@@ -1,0 +1,25 @@
+.env
+.env.*
+.DS_Store
+.vercel/
+
+# Build outputs
+axiom
+axiom.exe
+dist/
+build/
+bin/
+
+# Test and coverage artifacts
+coverage.out
+coverage.html
+*.test
+
+# Release and packaging artifacts
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+
+# Platform-specific files
+Thumbs.db
