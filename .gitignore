@@ -4,8 +4,8 @@
 .vercel/
 
 # Build outputs
-axiom
-axiom.exe
+/axiom
+/axiom.exe
 dist/
 build/
 bin/

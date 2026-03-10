@@ -1,0 +1,1193 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"math/big"
+	"os"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/Gen3Games/axiom-cli/internal/api"
+	"github.com/Gen3Games/axiom-cli/internal/app"
+	"github.com/Gen3Games/axiom-cli/internal/evm"
+	"github.com/Gen3Games/axiom-cli/internal/ui"
+	axrpl "github.com/Gen3Games/axiom-cli/internal/xrpl"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
+	qrterminal "github.com/mdp/qrterminal/v3"
+	"github.com/spf13/cobra"
+)
+
+const xrplEVMChainID int64 = 1440000
+
+var (
+	flagAPIURL  string
+	flagRPCURL  string
+	flagXRPLURL string
+	flagJSON    bool
+	flagProfile string
+)
+
+type cliContext struct {
+	Config      *app.Config
+	API         *api.Client
+	Profile     app.Profile
+	ProfileName string
+	JSON        bool
+}
+
+type bridgeFundingPreview struct {
+	DepositWalletAddress string
+	DestinationTag       int
+	AmountXRP            string
+	PaymentURI           string
+	QRCode               string
+	Instructions         []string
+	Submit               bool
+	TxHash               string
+	FromXRPLWallet       string
+}
+
+func main() {
+	rootCmd := &cobra.Command{
+		Use:   "axiom",
+		Short: "Axiom Protocol CLI for XRPL EVM users",
+		Long:  "Axiom CLI manages XRPL EVM wallets, funding flows, market discovery, predictions, claims, and profile analytics.",
+	}
+
+	rootCmd.PersistentFlags().StringVar(&flagAPIURL, "api-url", "", "Override the Axiom CLI API base URL (for example https://your-host/api/cli)")
+	rootCmd.PersistentFlags().StringVar(&flagRPCURL, "rpc-url", "", "Override the XRPL EVM RPC URL")
+	rootCmd.PersistentFlags().StringVar(&flagXRPLURL, "xrpl-rpc-url", "", "Override the XRPL JSON-RPC URL")
+	rootCmd.PersistentFlags().BoolVar(&flagJSON, "json", false, "Emit JSON output")
+	rootCmd.PersistentFlags().StringVar(&flagProfile, "profile", "", "Use a specific local profile")
+
+	rootCmd.AddCommand(newConfigCommand())
+	rootCmd.AddCommand(newWalletCommand())
+	rootCmd.AddCommand(newAuthCommand())
+	rootCmd.AddCommand(newMarketsCommand())
+	rootCmd.AddCommand(newProfileCommand())
+	rootCmd.AddCommand(newFundingCommand())
+	rootCmd.AddCommand(newPredictCommand())
+	rootCmd.AddCommand(newClaimCommand())
+
+	if err := rootCmd.Execute(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+func newConfigCommand() *cobra.Command {
+	cmd := &cobra.Command{Use: "config", Short: "Inspect or update local CLI configuration"}
+	cmd.AddCommand(&cobra.Command{
+		Use:   "show",
+		Short: "Show the current local configuration",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+			return printOutput(ctx.JSON, ctx.Config)
+		},
+	})
+
+	setCmd := &cobra.Command{
+		Use:   "set",
+		Short: "Update the CLI API or RPC URLs",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cfg, err := app.LoadConfig()
+			if err != nil {
+				return err
+			}
+			apiURL, _ := cmd.Flags().GetString("api-url")
+			rpcURL, _ := cmd.Flags().GetString("rpc-url")
+			xrplURL, _ := cmd.Flags().GetString("xrpl-rpc-url")
+			if apiURL != "" {
+				cfg.APIBaseURL = apiURL
+			}
+			if rpcURL != "" {
+				cfg.EVMRPCURL = rpcURL
+			}
+			if xrplURL != "" {
+				cfg.XRPLRPCURL = xrplURL
+			}
+			if err := app.SaveConfig(cfg); err != nil {
+				return err
+			}
+			fmt.Println("Configuration updated.")
+			return nil
+		},
+	}
+	setCmd.Flags().String("api-url", "", "Set the CLI API base URL")
+	setCmd.Flags().String("rpc-url", "", "Set the XRPL EVM RPC URL")
+	setCmd.Flags().String("xrpl-rpc-url", "", "Set the XRPL RPC URL")
+	cmd.AddCommand(setCmd)
+	return cmd
+}
+
+func newWalletCommand() *cobra.Command {
+	cmd := &cobra.Command{Use: "wallet", Short: "Create, import, inspect, and fund local wallets"}
+
+	cmd.AddCommand(&cobra.Command{
+		Use:   "create",
+		Short: "Create a new XRPL EVM wallet and store the private key in the OS keychain",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+			wallet, privateKeyHex, err := evm.NewRandomWallet()
+			if err != nil {
+				return err
+			}
+			secretStore, err := app.SaveSecret(app.EVMSecretKey(ctx.ProfileName), privateKeyHex)
+			if err != nil {
+				return err
+			}
+			profile := ctx.Profile
+			profile.EVMAddress = wallet.Address().Hex()
+			ctx.Config.SetCurrentProfile(profile)
+			if err := app.SaveConfig(ctx.Config); err != nil {
+				return err
+			}
+			return printOutput(ctx.JSON, map[string]any{
+				"profile":          ctx.ProfileName,
+				"evmAddress":       wallet.Address().Hex(),
+				"storedIn":         string(secretStore),
+				"storedInKeychain": secretStore == app.SecretStoreKeychain,
+				"nextStep":         "Run `axiom auth register` to get your Axiom destination tag.",
+			})
+		},
+	})
+
+	importCmd := &cobra.Command{
+		Use:   "import",
+		Short: "Import an existing XRPL EVM private key into the OS keychain",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+			privateKey, _ := cmd.Flags().GetString("private-key")
+			if strings.TrimSpace(privateKey) == "" {
+				return errors.New("--private-key is required")
+			}
+			wallet, err := evm.WalletFromPrivateKeyHex(privateKey)
+			if err != nil {
+				return err
+			}
+			secretStore, err := app.SaveSecret(app.EVMSecretKey(ctx.ProfileName), wallet.PrivateKeyHex())
+			if err != nil {
+				return err
+			}
+			profile := ctx.Profile
+			profile.EVMAddress = wallet.Address().Hex()
+			ctx.Config.SetCurrentProfile(profile)
+			if err := app.SaveConfig(ctx.Config); err != nil {
+				return err
+			}
+			return printOutput(ctx.JSON, map[string]any{
+				"profile":          ctx.ProfileName,
+				"evmAddress":       wallet.Address().Hex(),
+				"storedIn":         string(secretStore),
+				"storedInKeychain": secretStore == app.SecretStoreKeychain,
+			})
+		},
+	}
+	importCmd.Flags().String("private-key", "", "Hex-encoded secp256k1 private key")
+	cmd.AddCommand(importCmd)
+
+	cmd.AddCommand(&cobra.Command{
+		Use:   "xrpl-create",
+		Short: "Create a native XRPL wallet for direct bridge funding submissions",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+			wallet, err := axrpl.NewRandomWallet()
+			if err != nil {
+				return err
+			}
+			secretStore, err := app.SaveSecret(app.XRPLSecretKey(ctx.ProfileName), wallet.Seed())
+			if err != nil {
+				return err
+			}
+			profile := ctx.Profile
+			profile.XRPLAddress = wallet.Address()
+			ctx.Config.SetCurrentProfile(profile)
+			if err := app.SaveConfig(ctx.Config); err != nil {
+				return err
+			}
+			return printOutput(ctx.JSON, map[string]any{
+				"profile":          ctx.ProfileName,
+				"xrplAddress":      wallet.Address(),
+				"storedIn":         string(secretStore),
+				"storedInKeychain": secretStore == app.SecretStoreKeychain,
+			})
+		},
+	})
+
+	importXRPLCmd := &cobra.Command{
+		Use:   "xrpl-import",
+		Short: "Import an XRPL seed into the OS keychain",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+			seed, _ := cmd.Flags().GetString("seed")
+			if strings.TrimSpace(seed) == "" {
+				return errors.New("--seed is required")
+			}
+			wallet, err := axrpl.WalletFromSeed(seed)
+			if err != nil {
+				return err
+			}
+			secretStore, err := app.SaveSecret(app.XRPLSecretKey(ctx.ProfileName), wallet.Seed())
+			if err != nil {
+				return err
+			}
+			profile := ctx.Profile
+			profile.XRPLAddress = wallet.Address()
+			ctx.Config.SetCurrentProfile(profile)
+			if err := app.SaveConfig(ctx.Config); err != nil {
+				return err
+			}
+			return printOutput(ctx.JSON, map[string]any{
+				"profile":          ctx.ProfileName,
+				"xrplAddress":      wallet.Address(),
+				"storedIn":         string(secretStore),
+				"storedInKeychain": secretStore == app.SecretStoreKeychain,
+			})
+		},
+	}
+	importXRPLCmd.Flags().String("seed", "", "XRPL family seed (s...) or compatible secret")
+	cmd.AddCommand(importXRPLCmd)
+
+	cmd.AddCommand(&cobra.Command{
+		Use:   "show",
+		Short: "Show local wallet addresses for the active profile",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+			return printOutput(ctx.JSON, map[string]any{
+				"profile":               ctx.ProfileName,
+				"evmAddress":            ctx.Profile.EVMAddress,
+				"xrplAddress":           ctx.Profile.XRPLAddress,
+				"depositDestinationTag": ctx.Profile.DepositDestinationTag,
+			})
+		},
+	})
+
+	resetCmd := &cobra.Command{
+		Use:   "reset",
+		Short: "Clear local wallet addresses, destination tag, and stored secrets for the active profile",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+
+			confirmed, _ := cmd.Flags().GetBool("yes")
+			if !confirmed {
+				fmt.Fprintf(os.Stderr, "WARNING: wallet reset permanently deletes the local EVM private key and XRPL seed for profile %q from your OS keychain.\n", ctx.ProfileName)
+				fmt.Fprintln(os.Stderr, "WARNING: once removed, these secrets cannot be recovered by the CLI unless you backed them up elsewhere.")
+				fmt.Fprintf(os.Stderr, "Re-run with `axiom wallet reset --yes` to confirm the irreversible reset for profile %q.\n", ctx.ProfileName)
+				return errors.New("wallet reset aborted: confirmation required")
+			}
+
+			if err := app.DeleteSecretIfExists(app.EVMSecretKey(ctx.ProfileName)); err != nil {
+				return err
+			}
+			if err := app.DeleteSecretIfExists(app.XRPLSecretKey(ctx.ProfileName)); err != nil {
+				return err
+			}
+
+			ctx.Config.SetCurrentProfile(app.Profile{Name: ctx.ProfileName})
+			if err := app.SaveConfig(ctx.Config); err != nil {
+				return err
+			}
+
+			return printOutput(ctx.JSON, map[string]any{
+				"profile":               ctx.ProfileName,
+				"evmAddressCleared":     true,
+				"xrplAddressCleared":    true,
+				"destinationTagCleared": true,
+				"warning":               "The local EVM private key and XRPL seed were permanently removed from this machine. They cannot be recovered by the CLI.",
+			})
+		},
+	}
+	resetCmd.Flags().Bool("yes", false, "Confirm the irreversible deletion of local wallet secrets for the active profile")
+	cmd.AddCommand(resetCmd)
+
+	cmd.AddCommand(&cobra.Command{
+		Use:   "balance",
+		Short: "Show EVM and XRPL balances for the active profile",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+			result := map[string]any{"profile": ctx.ProfileName}
+			if ctx.Profile.EVMAddress != "" {
+				balance, err := evm.GetBalance(cmd.Context(), ctx.Config.EVMRPCURL, common.HexToAddress(ctx.Profile.EVMAddress))
+				if err != nil {
+					return err
+				}
+				result["evmAddress"] = ctx.Profile.EVMAddress
+				result["evmBalanceXrp"] = formatWeiToXRP(balance)
+			}
+			if ctx.Profile.XRPLAddress != "" {
+				balance, err := axrpl.GetBalance(cmd.Context(), ctx.Config.XRPLRPCURL, ctx.Profile.XRPLAddress)
+				if err != nil {
+					return err
+				}
+				result["xrplAddress"] = ctx.Profile.XRPLAddress
+				result["xrplBalanceXrp"] = balance
+			}
+			return printOutput(ctx.JSON, result)
+		},
+	})
+
+	return cmd
+}
+
+func newAuthCommand() *cobra.Command {
+	cmd := &cobra.Command{Use: "auth", Short: "Register the active wallet with the Axiom backend"}
+	cmd.AddCommand(&cobra.Command{
+		Use:   "register",
+		Short: "Register or refresh the active wallet with the Axiom CLI API",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+			wallet, err := requireEVMWallet(ctx)
+			if err != nil {
+				return err
+			}
+			issuedAt := time.Now().UTC()
+			message := buildRegistrationMessage(wallet.Address().Hex(), ctx.Config.DeviceID, issuedAt)
+			signature, err := wallet.SignMessage(message)
+			if err != nil {
+				return err
+			}
+			response, err := ctx.API.RegisterWallet(cmd.Context(), api.RegisterRequest{
+				WalletAddress: wallet.Address().Hex(),
+				Signature:     signature,
+				DeviceID:      ctx.Config.DeviceID,
+				IssuedAt:      issuedAt.Format(time.RFC3339),
+			})
+			if err != nil {
+				return err
+			}
+			profile := ctx.Profile
+			profile.EVMAddress = response.WalletAddress
+			profile.DepositDestinationTag = response.DepositDestinationTag
+			ctx.Config.SetCurrentProfile(profile)
+			if err := app.SaveConfig(ctx.Config); err != nil {
+				return err
+			}
+			return printOutput(ctx.JSON, response)
+		},
+	})
+	return cmd
+}
+
+func newMarketsCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "markets",
+		Short: "Discover Axiom markets and fetch market details",
+		Long: strings.Join([]string{
+			"Discover Axiom markets and fetch market details.",
+			"",
+			"Use `axiom markets list` to browse markets and narrow results with filters such as:",
+			"  --status active|resolved|upcoming|all",
+			"  --category hourly|sports|streak|...",
+			"  --search <text>",
+			"  --limit <n> (0 fetches all matching markets)",
+			"  --offset <n>",
+			"",
+			"Use `axiom markets get <market-id-or-address>` once you have the full identifier.",
+		}, "\n"),
+	}
+
+	listCmd := &cobra.Command{
+		Use:   "list",
+		Short: "List markets from the Axiom backend",
+		Example: strings.Join([]string{
+			"axiom markets list",
+			"axiom markets list --category hourly",
+			"axiom markets list --status resolved --limit 50",
+			"axiom markets list --search XRP --offset 20",
+		}, "\n"),
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+			status, _ := cmd.Flags().GetString("status")
+			search, _ := cmd.Flags().GetString("search")
+			category, _ := cmd.Flags().GetString("category")
+			limit, _ := cmd.Flags().GetInt("limit")
+			offset, _ := cmd.Flags().GetInt("offset")
+			var response *api.MarketsResponse
+			if strings.TrimSpace(category) != "" {
+				response, err = ctx.API.ListAllMarkets(cmd.Context(), status, search, "", 0)
+				if err != nil {
+					return err
+				}
+				response = filterMarketsByCategory(response, category, limit, offset)
+			} else if limit <= 0 {
+				response, err = ctx.API.ListAllMarkets(cmd.Context(), status, search, "", offset)
+			} else {
+				response, err = ctx.API.ListMarkets(cmd.Context(), status, search, "", limit, offset)
+			}
+			if err != nil {
+				return err
+			}
+			return printOutput(ctx.JSON, response)
+		},
+	}
+	listCmd.Flags().String("status", "active", "Filter by status: active, resolved, upcoming, all")
+	listCmd.Flags().String("category", "", "Filter by market category (for example hourly, sports, streak)")
+	listCmd.Flags().String("search", "", "Search by title or headline")
+	listCmd.Flags().Int("limit", 0, "Maximum number of markets to return (0 means fetch all matching markets)")
+	listCmd.Flags().Int("offset", 0, "Offset into the market result set")
+	cmd.AddCommand(listCmd)
+
+	getCmd := &cobra.Command{
+		Use:   "get <market-id-or-address>",
+		Short: "Get detailed metadata for a single market",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+			instanceDate, _ := cmd.Flags().GetString("instance-date")
+			response, err := ctx.API.GetMarket(cmd.Context(), args[0], instanceDate)
+			if err != nil {
+				return err
+			}
+			return printOutput(ctx.JSON, response)
+		},
+	}
+	getCmd.Flags().String("instance-date", "", "Optional instance date for recurring markets")
+	cmd.AddCommand(getCmd)
+	return cmd
+}
+
+func newProfileCommand() *cobra.Command {
+	cmd := &cobra.Command{Use: "profile", Short: "Read profile stats, positions, and claimable winnings"}
+
+	cmd.AddCommand(&cobra.Command{
+		Use:   "show [wallet-address]",
+		Short: "Show an Axiom profile summary",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+			address, err := resolveProfileAddress(ctx, args)
+			if err != nil {
+				return err
+			}
+			response, err := ctx.API.GetProfile(cmd.Context(), address)
+			if err != nil {
+				return err
+			}
+			return printOutput(ctx.JSON, response)
+		},
+	})
+
+	positionsCmd := &cobra.Command{
+		Use:   "positions [wallet-address]",
+		Short: "List recent positions for a profile",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+			address, err := resolveProfileAddress(ctx, args)
+			if err != nil {
+				return err
+			}
+			status, _ := cmd.Flags().GetString("status")
+			limit, _ := cmd.Flags().GetInt("limit")
+			response, err := ctx.API.GetPositions(cmd.Context(), address, status, limit)
+			if err != nil {
+				return err
+			}
+			return printOutput(ctx.JSON, response)
+		},
+	}
+	positionsCmd.Flags().String("status", "all", "Filter by position status: open, won, lost, all")
+	positionsCmd.Flags().Int("limit", 20, "Maximum number of positions to return")
+	cmd.AddCommand(positionsCmd)
+
+	cmd.AddCommand(&cobra.Command{
+		Use:   "unclaimed [wallet-address]",
+		Short: "Show unclaimed winnings for a profile",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+			address, err := resolveProfileAddress(ctx, args)
+			if err != nil {
+				return err
+			}
+			response, err := ctx.API.GetUnclaimed(cmd.Context(), address)
+			if err != nil {
+				return err
+			}
+			return printOutput(ctx.JSON, response)
+		},
+	})
+
+	return cmd
+}
+
+func newFundingCommand() *cobra.Command {
+	cmd := &cobra.Command{Use: "funding", Short: "Handle direct XRP funding and bridge funding via XRPL destination tags"}
+
+	cmd.AddCommand(&cobra.Command{
+		Use:   "info [wallet-address]",
+		Short: "Show funding instructions, destination tag, and recent bridge history",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+			address, err := resolveProfileAddress(ctx, args)
+			if err != nil {
+				return err
+			}
+			response, err := ctx.API.GetFunding(cmd.Context(), address, 20)
+			if err != nil {
+				return err
+			}
+			return printOutput(ctx.JSON, response)
+		},
+	})
+
+	directCmd := &cobra.Command{
+		Use:   "direct --to <evm-address> --amount <xrp>",
+		Short: "Send native XRP on XRPL EVM directly from the active local EVM wallet",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+			wallet, err := requireEVMWallet(ctx)
+			if err != nil {
+				return err
+			}
+			toAddress, _ := cmd.Flags().GetString("to")
+			amount, _ := cmd.Flags().GetString("amount")
+			if toAddress == "" || amount == "" {
+				return errors.New("--to and --amount are required")
+			}
+			amountWei, err := parseXRPToWei(amount)
+			if err != nil {
+				return err
+			}
+			txHash, err := wallet.SendNativeXRP(cmd.Context(), ctx.Config.EVMRPCURL, big.NewInt(xrplEVMChainID), common.HexToAddress(toAddress), amountWei)
+			if err != nil {
+				return err
+			}
+			return printOutput(ctx.JSON, map[string]any{"from": wallet.Address().Hex(), "to": toAddress, "amountXrp": amount, "txHash": txHash.Hex()})
+		},
+	}
+	directCmd.Flags().String("to", "", "Destination XRPL EVM address")
+	directCmd.Flags().String("amount", "", "Amount of XRP to send")
+	cmd.AddCommand(directCmd)
+
+	bridgeCmd := &cobra.Command{
+		Use:   "bridge [--amount <xrp>] [--submit]",
+		Short: "Show a QR code and payment details for XRPL relay funding, or submit the XRPL payment directly",
+		Long: strings.Join([]string{
+			"Prepare XRPL relay funding for your Axiom wallet.",
+			"",
+			"By default this command shows the relay wallet address, your destination tag,",
+			"a wallet-scan payment URI, and a terminal QR code so you can send XRP from",
+			"any XRPL wallet or exchange app without importing an XRPL seed into the CLI.",
+			"",
+			"Use --submit only if you want the CLI to send the XRPL payment itself using",
+			"an XRPL seed stored locally in the OS keychain.",
+		}, "\n"),
+		Example: strings.Join([]string{
+			"axiom funding bridge",
+			"axiom funding bridge --amount 25",
+			"axiom funding bridge --amount 25 --submit",
+		}, "\n"),
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+			if ctx.Profile.EVMAddress == "" {
+				return errors.New("no EVM wallet is configured for the active profile")
+			}
+			if ctx.Profile.DepositDestinationTag == 0 {
+				return errors.New("destination tag missing; run `axiom auth register` first")
+			}
+			amount, _ := cmd.Flags().GetString("amount")
+			submit, _ := cmd.Flags().GetBool("submit")
+			if submit && strings.TrimSpace(amount) == "" {
+				return errors.New("--amount is required")
+			}
+			funding, err := ctx.API.GetFunding(cmd.Context(), ctx.Profile.EVMAddress, 10)
+			if err != nil {
+				return err
+			}
+			if funding.DepositWalletAddress == "" {
+				return errors.New("the server has no deposit wallet configured")
+			}
+			destinationTag := valueOrZero(funding.DepositDestinationTag)
+			preview := bridgeFundingPreview{
+				DepositWalletAddress: funding.DepositWalletAddress,
+				DestinationTag:       destinationTag,
+				AmountXRP:            strings.TrimSpace(amount),
+				PaymentURI:           buildXRPLPaymentURI(funding.DepositWalletAddress, destinationTag, strings.TrimSpace(amount)),
+				Submit:               submit,
+				FromXRPLWallet:       ctx.Profile.XRPLAddress,
+			}
+			if submit {
+				seed, err := requireXRPLSeed(ctx)
+				if err != nil {
+					return err
+				}
+				txHash, err := axrpl.SubmitBridgePayment(cmd.Context(), ctx.Config.XRPLRPCURL, seed, funding.DepositWalletAddress, destinationTag, amount)
+				if err != nil {
+					return err
+				}
+				preview.TxHash = txHash
+			} else {
+				preview.QRCode = renderQRCode(preview.PaymentURI)
+				preview.Instructions = []string{
+					"Send XRP on the XRPL network to the deposit wallet address above.",
+					"Include the exact destination tag shown above.",
+					"Scan the QR code from your XRPL wallet app to prefill the relay wallet and destination tag.",
+					"The relay service will bridge the XRP into the matching XRPL EVM wallet.",
+				}
+			}
+			if ctx.JSON {
+				return printOutput(ctx.JSON, map[string]any{
+					"depositWalletAddress":  preview.DepositWalletAddress,
+					"destinationTag":        preview.DestinationTag,
+					"amountXrp":             preview.AmountXRP,
+					"paymentUri":            preview.PaymentURI,
+					"qrCode":                preview.QRCode,
+					"instructions":          preview.Instructions,
+					"submit":                preview.Submit,
+					"fromXRPLWalletAddress": preview.FromXRPLWallet,
+					"txHash":                preview.TxHash,
+				})
+			}
+			fmt.Println(renderBridgeFundingPreview(preview))
+			return nil
+		},
+	}
+	bridgeCmd.Flags().String("amount", "", "Optional amount of XRP to prefill in the QR code or required amount to submit directly")
+	bridgeCmd.Flags().Bool("submit", false, "Submit the XRPL payment using the local XRPL wallet seed stored in keychain")
+	cmd.AddCommand(bridgeCmd)
+
+	return cmd
+}
+
+func newPredictCommand() *cobra.Command {
+	cmd := &cobra.Command{Use: "predict", Short: "Place predictions on Axiom markets using the active EVM wallet"}
+	quoteCmd := &cobra.Command{
+		Use:   "quote <market-id-or-address>",
+		Short: "Preview weighted shares, price impact, and payout for a proposed buy",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+			market, err := ctx.API.GetMarket(cmd.Context(), args[0], mustStringFlag(cmd, "instance-date"))
+			if err != nil {
+				return err
+			}
+			amount, _ := cmd.Flags().GetString("amount")
+			if amount == "" {
+				return errors.New("--amount is required")
+			}
+			amountWei, err := parseXRPToWei(amount)
+			if err != nil {
+				return err
+			}
+			outcomeIndex, err := resolveOutcomeIndex(market, mustStringFlag(cmd, "outcome"), mustStringFlag(cmd, "label"))
+			if err != nil {
+				return err
+			}
+			state, err := evm.LoadMarketState(cmd.Context(), ctx.Config.EVMRPCURL, common.HexToAddress(market.ContractAddress))
+			if err != nil {
+				return err
+			}
+			outcomeLabel := fmt.Sprintf("Outcome %d", outcomeIndex)
+			for _, outcome := range market.Outcomes {
+				if outcome.Index == outcomeIndex {
+					outcomeLabel = outcome.Label
+					break
+				}
+			}
+			quote, err := evm.QuoteBuy(state, amountWei, uint8(outcomeIndex), market.Title, outcomeLabel, time.Now())
+			if err != nil {
+				return err
+			}
+			return printOutput(ctx.JSON, quote)
+		},
+	}
+	quoteCmd.Flags().String("amount", "", "Amount of XRP to preview")
+	quoteCmd.Flags().String("outcome", "", "Outcome index to preview")
+	quoteCmd.Flags().String("label", "", "Outcome label to preview (alternative to --outcome)")
+	quoteCmd.Flags().String("instance-date", "", "Optional instance date for recurring markets")
+	cmd.AddCommand(quoteCmd)
+
+	buyCmd := &cobra.Command{
+		Use:   "buy <market-id-or-address>",
+		Short: "Buy into an Axiom market outcome",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+			_, privateKeyHex, err := requireEVMWalletWithKey(ctx)
+			if err != nil {
+				return err
+			}
+			market, err := ctx.API.GetMarket(cmd.Context(), args[0], mustStringFlag(cmd, "instance-date"))
+			if err != nil {
+				return err
+			}
+			amount, _ := cmd.Flags().GetString("amount")
+			if amount == "" {
+				return errors.New("--amount is required")
+			}
+			amountWei, err := parseXRPToWei(amount)
+			if err != nil {
+				return err
+			}
+			outcomeIndex, err := resolveOutcomeIndex(market, mustStringFlag(cmd, "outcome"), mustStringFlag(cmd, "label"))
+			if err != nil {
+				return err
+			}
+			minShares, err := parseOptionalWei(cmd, "min-shares")
+			if err != nil {
+				return err
+			}
+			txHash, err := evm.BuyPosition(cmd.Context(), ctx.Config.EVMRPCURL, big.NewInt(xrplEVMChainID), privateKeyHex, common.HexToAddress(market.ContractAddress), uint8(outcomeIndex), amountWei, minShares)
+			if err != nil {
+				return err
+			}
+			result := map[string]any{"txHash": txHash.Hex(), "market": market.Title, "amountXrp": amount, "outcomeIndex": outcomeIndex}
+			if mustBoolFlag(cmd, "wait") {
+				receipt, err := waitForReceipt(cmd.Context(), ctx.Config.EVMRPCURL, txHash)
+				if err != nil {
+					return err
+				}
+				result["receiptStatus"] = receipt.Status
+			}
+			return printOutput(ctx.JSON, result)
+		},
+	}
+	buyCmd.Flags().String("amount", "", "Amount of XRP to commit")
+	buyCmd.Flags().String("outcome", "", "Outcome index to buy")
+	buyCmd.Flags().String("label", "", "Outcome label to buy (alternative to --outcome)")
+	buyCmd.Flags().String("min-shares", "0", "Minimum acceptable weighted shares in wei")
+	buyCmd.Flags().Bool("wait", false, "Wait for the transaction receipt")
+	buyCmd.Flags().String("instance-date", "", "Optional instance date for recurring markets")
+	cmd.AddCommand(buyCmd)
+	return cmd
+}
+
+func newClaimCommand() *cobra.Command {
+	cmd := &cobra.Command{Use: "claim", Short: "Claim winnings from individual markets or in batches"}
+
+	marketCmd := &cobra.Command{
+		Use:   "market <market-id-or-address>",
+		Short: "Claim winnings or refunds from a single market",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+			_, privateKeyHex, err := requireEVMWalletWithKey(ctx)
+			if err != nil {
+				return err
+			}
+			market, err := ctx.API.GetMarket(cmd.Context(), args[0], mustStringFlag(cmd, "instance-date"))
+			if err != nil {
+				return err
+			}
+			txHash, err := evm.ClaimMarket(cmd.Context(), ctx.Config.EVMRPCURL, big.NewInt(xrplEVMChainID), privateKeyHex, common.HexToAddress(market.ContractAddress))
+			if err != nil {
+				return err
+			}
+			result := map[string]any{"txHash": txHash.Hex(), "market": market.Title}
+			if mustBoolFlag(cmd, "wait") {
+				receipt, err := waitForReceipt(cmd.Context(), ctx.Config.EVMRPCURL, txHash)
+				if err != nil {
+					return err
+				}
+				result["receiptStatus"] = receipt.Status
+			}
+			return printOutput(ctx.JSON, result)
+		},
+	}
+	marketCmd.Flags().Bool("wait", false, "Wait for transaction finality")
+	marketCmd.Flags().String("instance-date", "", "Optional instance date for recurring markets")
+	cmd.AddCommand(marketCmd)
+
+	batchCmd := &cobra.Command{
+		Use:   "batch",
+		Short: "Claim all currently unclaimed resolved winnings using the AxiomUtility contract",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+			if ctx.Profile.EVMAddress == "" {
+				return errors.New("no EVM wallet configured for the active profile")
+			}
+			_, privateKeyHex, err := requireEVMWalletWithKey(ctx)
+			if err != nil {
+				return err
+			}
+			configResponse, err := ctx.API.GetConfig(cmd.Context())
+			if err != nil {
+				return err
+			}
+			if configResponse.AxiomUtilityAddress == "" {
+				return errors.New("the backend does not have a canonical AxiomUtility address configured")
+			}
+			unclaimed, err := ctx.API.GetUnclaimed(cmd.Context(), ctx.Profile.EVMAddress)
+			if err != nil {
+				return err
+			}
+			if len(unclaimed.Items) == 0 {
+				return printOutput(ctx.JSON, map[string]any{"message": "No unclaimed winnings found."})
+			}
+			markets := make([]common.Address, 0, len(unclaimed.Items))
+			for _, item := range unclaimed.Items {
+				markets = append(markets, common.HexToAddress(item.MarketAddress))
+			}
+			txHash, err := evm.BatchClaim(cmd.Context(), ctx.Config.EVMRPCURL, big.NewInt(xrplEVMChainID), privateKeyHex, common.HexToAddress(configResponse.AxiomUtilityAddress), markets)
+			if err != nil {
+				return err
+			}
+			result := map[string]any{"txHash": txHash.Hex(), "markets": len(markets)}
+			if mustBoolFlag(cmd, "wait") {
+				receipt, err := waitForReceipt(cmd.Context(), ctx.Config.EVMRPCURL, txHash)
+				if err != nil {
+					return err
+				}
+				result["receiptStatus"] = receipt.Status
+			}
+			return printOutput(ctx.JSON, result)
+		},
+	}
+	batchCmd.Flags().Bool("wait", false, "Wait for transaction finality")
+	cmd.AddCommand(batchCmd)
+
+	return cmd
+}
+
+func buildCLIContext() (*cliContext, error) {
+	cfg, err := app.LoadConfig()
+	if err != nil {
+		return nil, err
+	}
+	if flagAPIURL != "" {
+		cfg.APIBaseURL = flagAPIURL
+	}
+	if flagRPCURL != "" {
+		cfg.EVMRPCURL = flagRPCURL
+	}
+	if flagXRPLURL != "" {
+		cfg.XRPLRPCURL = flagXRPLURL
+	}
+	if flagProfile != "" {
+		cfg.ActiveProfile = flagProfile
+	}
+	profile, ok := cfg.Profiles[cfg.ActiveProfile]
+	if !ok {
+		profile = app.Profile{Name: cfg.ActiveProfile}
+		cfg.SetCurrentProfile(profile)
+	}
+	client, err := api.NewClient(cfg.APIBaseURL, cfg.DeviceID)
+	if err != nil {
+		return nil, err
+	}
+	return &cliContext{Config: cfg, API: client, Profile: profile, ProfileName: cfg.ActiveProfile, JSON: flagJSON || cfg.OutputFormat == "json"}, nil
+}
+
+func requireEVMWallet(ctx *cliContext) (*evm.Wallet, error) {
+	wallet, _, err := requireEVMWalletWithKey(ctx)
+	return wallet, err
+}
+
+func requireEVMWalletWithKey(ctx *cliContext) (*evm.Wallet, string, error) {
+	secret, err := app.LoadSecret(app.EVMSecretKey(ctx.ProfileName))
+	if err != nil {
+		return nil, "", fmt.Errorf("no EVM private key stored for profile %q: %w", ctx.ProfileName, err)
+	}
+	wallet, err := evm.WalletFromPrivateKeyHex(secret)
+	if err != nil {
+		return nil, "", err
+	}
+	return wallet, secret, nil
+}
+
+func requireXRPLSeed(ctx *cliContext) (string, error) {
+	seed, err := app.LoadSecret(app.XRPLSecretKey(ctx.ProfileName))
+	if err != nil {
+		return "", fmt.Errorf("no XRPL seed stored for profile %q: %w", ctx.ProfileName, err)
+	}
+	return seed, nil
+}
+
+func resolveProfileAddress(ctx *cliContext, args []string) (string, error) {
+	if len(args) > 0 && strings.TrimSpace(args[0]) != "" {
+		return args[0], nil
+	}
+	if ctx.Profile.EVMAddress == "" {
+		return "", errors.New("no active EVM wallet is configured; pass a wallet address explicitly or create/import a wallet first")
+	}
+	return ctx.Profile.EVMAddress, nil
+}
+
+func printOutput(asJSON bool, value any) error {
+	if asJSON {
+		data, err := json.MarshalIndent(value, "", "  ")
+		if err != nil {
+			return fmt.Errorf("marshal output: %w", err)
+		}
+		fmt.Println(string(data))
+		return nil
+	}
+
+	fmt.Println(ui.Render(value))
+	return nil
+}
+
+func buildRegistrationMessage(walletAddress string, deviceID string, issuedAt time.Time) string {
+	return strings.Join([]string{
+		"Axiom CLI registration",
+		"",
+		"Version: 2",
+		fmt.Sprintf("Wallet: %s", walletAddress),
+		fmt.Sprintf("Device: %s", strings.TrimSpace(deviceID)),
+		fmt.Sprintf("Issued At: %s", issuedAt.UTC().Format(time.RFC3339)),
+		"Network: xrpl-mainnet",
+		"Purpose: create or refresh my Axiom CLI profile and funding destination tag.",
+	}, "\n")
+}
+
+func parseXRPToWei(amount string) (*big.Int, error) {
+	value, ok := new(big.Rat).SetString(strings.TrimSpace(amount))
+	if !ok {
+		return nil, fmt.Errorf("invalid amount: %s", amount)
+	}
+	value.Mul(value, big.NewRat(1_000_000_000_000_000_000, 1))
+	result := new(big.Int)
+	if !value.IsInt() {
+		return nil, fmt.Errorf("amount has too many decimal places: %s", amount)
+	}
+	result.Div(value.Num(), value.Denom())
+	return result, nil
+}
+
+func formatWeiToXRP(value *big.Int) string {
+	rat := new(big.Rat).SetInt(value)
+	rat.Quo(rat, big.NewRat(1_000_000_000_000_000_000, 1))
+	return rat.FloatString(6)
+}
+
+func parseOptionalWei(cmd *cobra.Command, flagName string) (*big.Int, error) {
+	value, _ := cmd.Flags().GetString(flagName)
+	if strings.TrimSpace(value) == "" {
+		return big.NewInt(0), nil
+	}
+	if value == "0" {
+		return big.NewInt(0), nil
+	}
+	parsed := new(big.Int)
+	if _, ok := parsed.SetString(value, 10); !ok {
+		return nil, fmt.Errorf("invalid --%s value", flagName)
+	}
+	return parsed, nil
+}
+
+func resolveOutcomeIndex(market *api.MarketDetails, outcomeRaw string, label string) (int, error) {
+	if strings.TrimSpace(outcomeRaw) != "" {
+		for _, outcome := range market.Outcomes {
+			if fmt.Sprintf("%d", outcome.Index) == outcomeRaw {
+				return outcome.Index, nil
+			}
+		}
+		return 0, fmt.Errorf("outcome %s does not exist for this market", outcomeRaw)
+	}
+	if strings.TrimSpace(label) == "" {
+		return 0, errors.New("either --outcome or --label is required")
+	}
+	for _, outcome := range market.Outcomes {
+		if strings.EqualFold(strings.TrimSpace(outcome.Label), strings.TrimSpace(label)) {
+			return outcome.Index, nil
+		}
+	}
+	labels := make([]string, 0, len(market.Outcomes))
+	for _, outcome := range market.Outcomes {
+		labels = append(labels, outcome.Label)
+	}
+	sort.Strings(labels)
+	return 0, fmt.Errorf("label %q was not found. Valid labels: %s", label, strings.Join(labels, ", "))
+}
+
+func waitForReceipt(ctx context.Context, rpcURL string, txHash common.Hash) (*types.Receipt, error) {
+	waitCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	return evm.WaitForReceipt(waitCtx, rpcURL, txHash)
+}
+
+func mustBoolFlag(cmd *cobra.Command, name string) bool {
+	value, _ := cmd.Flags().GetBool(name)
+	return value
+}
+
+func mustStringFlag(cmd *cobra.Command, name string) string {
+	value, _ := cmd.Flags().GetString(name)
+	return value
+}
+
+func valueOrZero(value *int) int {
+	if value == nil {
+		return 0
+	}
+	return *value
+}
+
+func buildXRPLPaymentURI(address string, destinationTag int, amount string) string {
+	values := make([]string, 0, 2)
+	if destinationTag > 0 {
+		values = append(values, "dt="+strconv.Itoa(destinationTag))
+	}
+	if strings.TrimSpace(amount) != "" {
+		values = append(values, "amount="+strings.TrimSpace(amount))
+	}
+	if len(values) == 0 {
+		return "xrpl:" + address
+	}
+	return "xrpl:" + address + "?" + strings.Join(values, "&")
+}
+
+func renderQRCode(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return ""
+	}
+	var b strings.Builder
+	config := qrterminal.Config{
+		Level:          qrterminal.L,
+		Writer:         &b,
+		HalfBlocks:     true,
+		BlackChar:      qrterminal.BLACK_BLACK,
+		BlackWhiteChar: qrterminal.BLACK_WHITE,
+		WhiteChar:      qrterminal.WHITE_WHITE,
+		WhiteBlackChar: qrterminal.WHITE_BLACK,
+		QuietZone:      1,
+	}
+	qrterminal.GenerateWithConfig(value, config)
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+func renderBridgeFundingPreview(preview bridgeFundingPreview) string {
+	sections := []string{
+		ui.Render(map[string]any{
+			"depositWalletAddress": preview.DepositWalletAddress,
+			"destinationTag":       preview.DestinationTag,
+			"amountXrp":            firstNonEmpty(preview.AmountXRP, "scan to fill manually"),
+			"paymentUri":           preview.PaymentURI,
+			"submit":               preview.Submit,
+		}),
+	}
+
+	if preview.Submit && preview.TxHash != "" {
+		sections = append(sections, "", ui.Render(map[string]any{
+			"fromXRPLWalletAddress": preview.FromXRPLWallet,
+			"txHash":                preview.TxHash,
+		}))
+		return strings.Join(sections, "\n")
+	}
+
+	if len(preview.Instructions) > 0 {
+		sections = append(sections, "", "Bridge Funding QR", strings.Repeat("=", len("Bridge Funding QR")), preview.QRCode)
+		sections = append(sections, "", "Instructions", strings.Repeat("=", len("Instructions")))
+		for _, instruction := range preview.Instructions {
+			sections = append(sections, "• "+instruction)
+		}
+	}
+
+	return strings.Join(sections, "\n")
+}
+
+func filterMarketsByCategory(response *api.MarketsResponse, category string, limit int, offset int) *api.MarketsResponse {
+	trimmedCategory := strings.TrimSpace(category)
+	filtered := make([]api.MarketListItem, 0, len(response.Items))
+	for _, item := range response.Items {
+		if strings.EqualFold(strings.TrimSpace(item.Category), trimmedCategory) {
+			filtered = append(filtered, item)
+		}
+	}
+
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > len(filtered) {
+		offset = len(filtered)
+	}
+
+	end := len(filtered)
+	if limit > 0 && offset+limit < end {
+		end = offset + limit
+	}
+
+	items := filtered[offset:end]
+	resultLimit := len(items)
+	if limit > 0 {
+		resultLimit = limit
+	}
+
+	return &api.MarketsResponse{
+		Items:  items,
+		Total:  len(filtered),
+		Limit:  resultLimit,
+		Offset: offset,
+	}
+}
