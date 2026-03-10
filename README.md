@@ -81,6 +81,10 @@ Default values:
 - XRPL RPC URL: `https://s1.ripple.com:51234`
 - Active profile: `default`
 
+Current shared preview API for live smoke testing:
+
+- `https://preview.axiomprotocol.io/api/cli`
+
 You can override configuration per command with:
 
 - `--api-url`
@@ -92,7 +96,7 @@ You can override configuration per command with:
 Persist configuration with:
 
 ```bash
-axiom config set --api-url https://your-host.example/api/cli
+axiom config set --api-url https://preview.axiomprotocol.io/api/cli
 axiom config set --rpc-url https://rpc.xrplevm.org
 axiom config set --xrpl-rpc-url https://s1.ripple.com:51234
 ```

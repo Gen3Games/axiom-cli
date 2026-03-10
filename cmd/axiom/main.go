@@ -54,6 +54,14 @@ type bridgeFundingPreview struct {
 }
 
 func main() {
+	rootCmd := newRootCommand()
+	if err := rootCmd.Execute(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+func newRootCommand() *cobra.Command {
 	rootCmd := &cobra.Command{
 		Use:   "axiom",
 		Short: "Axiom Protocol CLI for XRPL EVM users",
@@ -75,10 +83,7 @@ func main() {
 	rootCmd.AddCommand(newPredictCommand())
 	rootCmd.AddCommand(newClaimCommand())
 
-	if err := rootCmd.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
+	return rootCmd
 }
 
 func newConfigCommand() *cobra.Command {
@@ -117,6 +122,12 @@ func newConfigCommand() *cobra.Command {
 			}
 			if err := app.SaveConfig(cfg); err != nil {
 				return err
+			}
+			if flagJSON {
+				return printOutput(true, map[string]any{
+					"message": "Configuration updated.",
+					"config":  cfg,
+				})
 			}
 			fmt.Println("Configuration updated.")
 			return nil
@@ -373,18 +384,7 @@ func newAuthCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			issuedAt := time.Now().UTC()
-			message := buildRegistrationMessage(wallet.Address().Hex(), ctx.Config.DeviceID, issuedAt)
-			signature, err := wallet.SignMessage(message)
-			if err != nil {
-				return err
-			}
-			response, err := ctx.API.RegisterWallet(cmd.Context(), api.RegisterRequest{
-				WalletAddress: wallet.Address().Hex(),
-				Signature:     signature,
-				DeviceID:      ctx.Config.DeviceID,
-				IssuedAt:      issuedAt.Format(time.RFC3339),
-			})
+			response, err := registerWalletWithCompat(cmd.Context(), ctx, wallet)
 			if err != nil {
 				return err
 			}
@@ -999,6 +999,50 @@ func buildRegistrationMessage(walletAddress string, deviceID string, issuedAt ti
 		"Network: xrpl-mainnet",
 		"Purpose: create or refresh my Axiom CLI profile and funding destination tag.",
 	}, "\n")
+}
+
+func registerWalletWithCompat(ctx context.Context, cliCtx *cliContext, wallet *evm.Wallet) (*api.RegisterResponse, error) {
+	issuedAt := time.Now().UTC()
+	walletAddress := wallet.Address().Hex()
+
+	response, err := signAndRegisterWallet(ctx, cliCtx, wallet, walletAddress, issuedAt)
+	if err == nil {
+		return response, nil
+	}
+	if !isInvalidWalletSignatureError(err) {
+		return nil, err
+	}
+
+	lowercaseWalletAddress := strings.ToLower(walletAddress)
+	if lowercaseWalletAddress == walletAddress {
+		return nil, err
+	}
+
+	response, retryErr := signAndRegisterWallet(ctx, cliCtx, wallet, lowercaseWalletAddress, issuedAt)
+	if retryErr == nil {
+		return response, nil
+	}
+
+	return nil, err
+}
+
+func signAndRegisterWallet(ctx context.Context, cliCtx *cliContext, wallet *evm.Wallet, walletAddress string, issuedAt time.Time) (*api.RegisterResponse, error) {
+	message := buildRegistrationMessage(walletAddress, cliCtx.Config.DeviceID, issuedAt)
+	signature, err := wallet.SignMessage(message)
+	if err != nil {
+		return nil, err
+	}
+
+	return cliCtx.API.RegisterWallet(ctx, api.RegisterRequest{
+		WalletAddress: walletAddress,
+		Signature:     signature,
+		DeviceID:      cliCtx.Config.DeviceID,
+		IssuedAt:      issuedAt.Format(time.RFC3339),
+	})
+}
+
+func isInvalidWalletSignatureError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "api error (401): Invalid wallet signature.")
 }
 
 func parseXRPToWei(amount string) (*big.Int, error) {

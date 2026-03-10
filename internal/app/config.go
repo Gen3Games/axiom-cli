@@ -53,6 +53,9 @@ func LoadConfig() (*Config, error) {
 
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		cfg := DefaultConfig()
+		if _, err := ensureDeviceID(cfg); err != nil {
+			return nil, err
+		}
 		if err := SaveConfig(cfg); err != nil {
 			return nil, err
 		}
@@ -75,12 +78,9 @@ func LoadConfig() (*Config, error) {
 	if cfg.ActiveProfile == "" {
 		cfg.ActiveProfile = "default"
 	}
-	if cfg.DeviceID == "" {
-		deviceID, err := generateDeviceID()
-		if err != nil {
-			return nil, err
-		}
-		cfg.DeviceID = deviceID
+	if generated, err := ensureDeviceID(cfg); err != nil {
+		return nil, err
+	} else if generated {
 		if err := SaveConfig(cfg); err != nil {
 			return nil, err
 		}
@@ -171,4 +171,17 @@ func generateDeviceID() (string, error) {
 		bytes[8:10],
 		bytes[10:16],
 	), nil
+}
+
+func ensureDeviceID(cfg *Config) (bool, error) {
+	if cfg.DeviceID != "" {
+		return false, nil
+	}
+
+	deviceID, err := generateDeviceID()
+	if err != nil {
+		return false, err
+	}
+	cfg.DeviceID = deviceID
+	return true, nil
 }
