@@ -31,6 +31,7 @@ var (
 	flagXRPLURL string
 	flagJSON    bool
 	flagProfile string
+	submitBridgePayment = axrpl.SubmitBridgePayment
 )
 
 type cliContext struct {
@@ -66,6 +67,8 @@ func newRootCommand() *cobra.Command {
 		Use:   "axiom",
 		Short: "Axiom Protocol CLI for XRPL EVM users",
 		Long:  "Axiom CLI manages XRPL EVM wallets, funding flows, market discovery, predictions, claims, and profile analytics.",
+		SilenceUsage:  true,
+		SilenceErrors: true,
 	}
 
 	rootCmd.PersistentFlags().StringVar(&flagAPIURL, "api-url", "", "Override the Axiom CLI API base URL (for example https://axiomprotocol.io/api/cli)")
@@ -632,78 +635,61 @@ func newFundingCommand() *cobra.Command {
 			"axiom funding bridge",
 			"axiom funding bridge --amount 25",
 			"axiom funding bridge --amount 25 --submit",
+			"axiom funding bridge-submit --amount 25",
 		}, "\n"),
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx, err := buildCLIContext()
 			if err != nil {
 				return err
 			}
-			if ctx.Profile.EVMAddress == "" {
-				return errors.New("no EVM wallet is configured for the active profile")
-			}
-			if ctx.Profile.DepositDestinationTag == 0 {
-				return errors.New("destination tag missing; run `axiom auth register` first")
-			}
 			amount, _ := cmd.Flags().GetString("amount")
 			submit, _ := cmd.Flags().GetBool("submit")
-			if submit && strings.TrimSpace(amount) == "" {
-				return errors.New("--amount is required")
-			}
-			funding, err := ctx.API.GetFunding(cmd.Context(), ctx.Profile.EVMAddress, 10)
-			if err != nil {
-				return err
-			}
-			if funding.DepositWalletAddress == "" {
-				return errors.New("the server has no deposit wallet configured")
-			}
-			destinationTag := valueOrZero(funding.DepositDestinationTag)
-			preview := bridgeFundingPreview{
-				DepositWalletAddress: funding.DepositWalletAddress,
-				DestinationTag:       destinationTag,
-				AmountXRP:            strings.TrimSpace(amount),
-				PaymentURI:           buildXRPLPaymentURI(funding.DepositWalletAddress, destinationTag, strings.TrimSpace(amount)),
-				Submit:               submit,
-				FromXRPLWallet:       ctx.Profile.XRPLAddress,
-			}
+			var preview *bridgeFundingPreview
 			if submit {
-				seed, err := requireXRPLSeed(ctx)
+				preview, err = submitBridgeFunding(cmd.Context(), ctx, amount)
 				if err != nil {
 					return err
 				}
-				txHash, err := axrpl.SubmitBridgePayment(cmd.Context(), ctx.Config.XRPLRPCURL, seed, funding.DepositWalletAddress, destinationTag, amount)
-				if err != nil {
-					return err
-				}
-				preview.TxHash = txHash
 			} else {
-				preview.QRCode = renderQRCode(preview.PaymentURI)
-				preview.Instructions = []string{
-					"Send XRP on the XRPL network to the deposit wallet address above.",
-					"Include the exact destination tag shown above.",
-					"Scan the QR code from your XRPL wallet app to prefill the relay wallet and destination tag.",
-					"The relay service will bridge the XRP into the matching XRPL EVM wallet.",
+				preview, err = previewBridgeFunding(cmd.Context(), ctx, amount)
+				if err != nil {
+					return err
 				}
 			}
-			if ctx.JSON {
-				return printOutput(ctx.JSON, map[string]any{
-					"depositWalletAddress":  preview.DepositWalletAddress,
-					"destinationTag":        preview.DestinationTag,
-					"amountXrp":             preview.AmountXRP,
-					"paymentUri":            preview.PaymentURI,
-					"qrCode":                preview.QRCode,
-					"instructions":          preview.Instructions,
-					"submit":                preview.Submit,
-					"fromXRPLWalletAddress": preview.FromXRPLWallet,
-					"txHash":                preview.TxHash,
-				})
-			}
-			fmt.Println(renderBridgeFundingPreview(preview))
-			return nil
+			return printBridgeFundingOutput(ctx.JSON, preview)
 		},
 	}
 	bridgeCmd.Flags().String("amount", "", "Optional amount of XRP to prefill in the QR code or required amount to submit directly")
 	bridgeCmd.Flags().Bool("submit", false, "Submit the XRPL payment using the local XRPL wallet seed stored in keychain")
 	cmd.AddCommand(bridgeCmd)
+
+	bridgeSubmitCmd := &cobra.Command{
+		Use:   "bridge-submit --amount <xrp>",
+		Short: "Bridge XRP from the active local XRPL wallet stored in the OS keychain",
+		Long: strings.Join([]string{
+			"Send an XRPL payment from the active local XRPL wallet to Axiom's relay deposit wallet.",
+			"",
+			"Use this after `axiom wallet xrpl-create` or `axiom wallet xrpl-import` when you want",
+			"the CLI to submit the bridge payment directly instead of showing a QR code.",
+		}, "\n"),
+		Example: strings.Join([]string{
+			"axiom funding bridge-submit --amount 25",
+			"axiom funding bridge-submit --amount 25 --json",
+		}, "\n"),
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+			preview, err := submitBridgeFunding(cmd.Context(), ctx, mustStringFlag(cmd, "amount"))
+			if err != nil {
+				return err
+			}
+			return printBridgeFundingOutput(ctx.JSON, preview)
+		},
+	}
+	bridgeSubmitCmd.Flags().String("amount", "", "Amount of XRP to bridge from the active local XRPL wallet")
+	cmd.AddCommand(bridgeSubmitCmd)
 
 	return cmd
 }
@@ -1140,6 +1126,89 @@ func buildXRPLPaymentURI(address string, destinationTag int, amount string) stri
 		return "xrpl:" + address
 	}
 	return "xrpl:" + address + "?" + strings.Join(values, "&")
+}
+
+func previewBridgeFunding(cmdCtx context.Context, ctx *cliContext, amount string) (*bridgeFundingPreview, error) {
+	preview, err := buildBridgeFundingPreview(cmdCtx, ctx, amount)
+	if err != nil {
+		return nil, err
+	}
+	preview.QRCode = renderQRCode(preview.PaymentURI)
+	preview.Instructions = []string{
+		"Send XRP on the XRPL network to the deposit wallet address above.",
+		"Include the exact destination tag shown above.",
+		"Scan the QR code from your XRPL wallet app to prefill the relay wallet and destination tag.",
+		"The relay service will bridge the XRP into the matching XRPL EVM wallet.",
+	}
+	return preview, nil
+}
+
+func submitBridgeFunding(cmdCtx context.Context, ctx *cliContext, amount string) (*bridgeFundingPreview, error) {
+	trimmedAmount := strings.TrimSpace(amount)
+	if trimmedAmount == "" {
+		return nil, errors.New("--amount is required")
+	}
+	preview, err := buildBridgeFundingPreview(cmdCtx, ctx, trimmedAmount)
+	if err != nil {
+		return nil, err
+	}
+	seed, err := requireXRPLSeed(ctx)
+	if err != nil {
+		return nil, err
+	}
+	txHash, err := submitBridgePayment(cmdCtx, ctx.Config.XRPLRPCURL, seed, preview.DepositWalletAddress, preview.DestinationTag, trimmedAmount)
+	if err != nil {
+		return nil, err
+	}
+	preview.Submit = true
+	preview.TxHash = txHash
+	return preview, nil
+}
+
+func buildBridgeFundingPreview(cmdCtx context.Context, ctx *cliContext, amount string) (*bridgeFundingPreview, error) {
+	if ctx.Profile.EVMAddress == "" {
+		return nil, errors.New("no EVM wallet is configured for the active profile")
+	}
+	if ctx.Profile.DepositDestinationTag == 0 {
+		return nil, errors.New("destination tag missing; run `axiom auth register` first")
+	}
+	trimmedAmount := strings.TrimSpace(amount)
+	funding, err := ctx.API.GetFunding(cmdCtx, ctx.Profile.EVMAddress, 10)
+	if err != nil {
+		return nil, err
+	}
+	if funding.DepositWalletAddress == "" {
+		return nil, errors.New("the server has no deposit wallet configured")
+	}
+	destinationTag := valueOrZero(funding.DepositDestinationTag)
+	if destinationTag == 0 {
+		destinationTag = ctx.Profile.DepositDestinationTag
+	}
+	return &bridgeFundingPreview{
+		DepositWalletAddress: funding.DepositWalletAddress,
+		DestinationTag:       destinationTag,
+		AmountXRP:            trimmedAmount,
+		PaymentURI:           buildXRPLPaymentURI(funding.DepositWalletAddress, destinationTag, trimmedAmount),
+		FromXRPLWallet:       ctx.Profile.XRPLAddress,
+	}, nil
+}
+
+func printBridgeFundingOutput(asJSON bool, preview *bridgeFundingPreview) error {
+	if asJSON {
+		return printOutput(asJSON, map[string]any{
+			"depositWalletAddress":  preview.DepositWalletAddress,
+			"destinationTag":        preview.DestinationTag,
+			"amountXrp":             preview.AmountXRP,
+			"paymentUri":            preview.PaymentURI,
+			"qrCode":                preview.QRCode,
+			"instructions":          preview.Instructions,
+			"submit":                preview.Submit,
+			"fromXRPLWalletAddress": preview.FromXRPLWallet,
+			"txHash":                preview.TxHash,
+		})
+	}
+	fmt.Println(renderBridgeFundingPreview(*preview))
+	return nil
 }
 
 func renderQRCode(value string) string {

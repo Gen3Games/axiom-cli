@@ -132,6 +132,8 @@ Read funding instructions:
 
 ```bash
 axiom funding info
+axiom funding bridge
+axiom funding bridge-submit --amount 25
 ```
 
 Browse markets:
@@ -176,7 +178,7 @@ The CLI no longer includes support for Vercel deployment-bypass secrets. Product
 - `axiom auth`: Register the active wallet with the backend
 - `axiom markets`: List markets and fetch market details
 - `axiom profile`: Read profile summary, positions, and unclaimed winnings
-- `axiom funding`: Inspect funding instructions, send direct XRP on XRPL EVM, or prepare XRPL bridge funding
+- `axiom funding`: Inspect funding instructions, send direct XRP on XRPL EVM, preview XRPL bridge funding, or bridge directly from a stored XRPL wallet
 - `axiom predict`: Quote and buy market positions
 - `axiom claim`: Claim from one market or batch-claim unclaimed winnings
 
@@ -193,6 +195,8 @@ For relay funding, `axiom funding bridge` can either:
 
 - Print a payment URI and terminal QR code for use with another XRPL wallet app
 - Submit the XRPL payment directly if a local XRPL seed is available
+
+If you want the local-XRPL-wallet path to appear as its own funding option, use `axiom funding bridge-submit --amount 25` after `axiom wallet xrpl-create` or `axiom wallet xrpl-import`.
 
 ## Development notes
 

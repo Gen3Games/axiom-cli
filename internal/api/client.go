@@ -379,6 +379,9 @@ func (c *Client) doJSON(ctx context.Context, method string, requestPath string, 
 		if json.Unmarshal(data, &apiErr) == nil && apiErr.Error != "" {
 			return fmt.Errorf("api error (%d): %s", resp.StatusCode, apiErr.Error)
 		}
+		if message, ok := formatProtectedDeploymentError(resp.StatusCode, c.baseURL.Host, data); ok {
+			return fmt.Errorf("api error (%d): %s", resp.StatusCode, message)
+		}
 		return fmt.Errorf("api error (%d): %s", resp.StatusCode, strings.TrimSpace(string(data)))
 	}
 
@@ -389,6 +392,18 @@ func (c *Client) doJSON(ctx context.Context, method string, requestPath string, 
 		return fmt.Errorf("decode response: %w", err)
 	}
 	return nil
+}
+
+func formatProtectedDeploymentError(statusCode int, host string, data []byte) (string, bool) {
+	body := strings.TrimSpace(string(data))
+	if statusCode != http.StatusUnauthorized {
+		return "", false
+	}
+	lowerBody := strings.ToLower(body)
+	if !strings.Contains(lowerBody, "vercel authentication") && !strings.Contains(lowerBody, "authentication required") {
+		return "", false
+	}
+	return fmt.Sprintf("received a Vercel Authentication page from %s; your CLI API base URL is pointed at a protected deployment. Run `axiom config set --api-url https://axiomprotocol.io/api/cli` or pass `--api-url https://axiomprotocol.io/api/cli`.", host), true
 }
 
 func (c *Client) buildURL(requestPath string) (*url.URL, error) {

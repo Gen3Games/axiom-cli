@@ -166,6 +166,33 @@ func TestGetConfigLocalhostErrorIncludesHint(t *testing.T) {
 	}
 }
 
+func TestDoJSONFormatsVercelAuthPageError(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`<!doctype html><html><title>Authentication Required</title><body>Vercel Authentication</body></html>`))
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL+"/api/cli", "")
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	_, err = client.GetConfig(context.Background())
+	if err == nil {
+		t.Fatal("GetConfig() error = nil, want protected deployment error")
+	}
+	if !strings.Contains(err.Error(), "Vercel Authentication page") {
+		t.Fatalf("GetConfig() error = %q, want protected deployment hint", err)
+	}
+	if !strings.Contains(err.Error(), "axiomprotocol.io/api/cli") {
+		t.Fatalf("GetConfig() error = %q, want production API guidance", err)
+	}
+}
+
 func TestBuildURLPreservesBasePathAndQuery(t *testing.T) {
 	t.Parallel()
 

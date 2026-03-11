@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/Gen3Games/axiom-cli/internal/api"
 	"github.com/Gen3Games/axiom-cli/internal/evm"
+	axrpl "github.com/Gen3Games/axiom-cli/internal/xrpl"
 )
 
 func TestCommandHelpSmoke(t *testing.T) {
@@ -48,6 +50,7 @@ func TestCommandHelpSmoke(t *testing.T) {
 		{args: []string{"funding", "info", "--help"}, want: "Show funding instructions"},
 		{args: []string{"funding", "direct", "--help"}, want: "Send native XRP on XRPL EVM directly"},
 		{args: []string{"funding", "bridge", "--help"}, want: "Prepare XRPL relay funding for your Axiom wallet."},
+		{args: []string{"funding", "bridge-submit", "--help"}, want: "Send an XRPL payment from the active local XRPL wallet"},
 		{args: []string{"predict", "--help"}, want: "Place predictions on Axiom markets"},
 		{args: []string{"predict", "quote", "--help"}, want: "Preview weighted shares"},
 		{args: []string{"predict", "buy", "--help"}, want: "Buy into an Axiom market outcome"},
@@ -103,6 +106,21 @@ func TestWalletResetRequiresConfirmation(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "irreversible reset") {
 		t.Fatalf("wallet reset stderr missing irreversible warning\nstderr:\n%s", stderr)
+	}
+}
+
+func TestRuntimeErrorsDoNotPrintUsage(t *testing.T) {
+	setCLIEnv(t)
+
+	_, stderr, err := executeCLI(t, "funding", "bridge")
+	if err == nil {
+		t.Fatal("funding bridge error = nil, want missing wallet error")
+	}
+	if strings.Contains(stderr, "Usage:") {
+		t.Fatalf("funding bridge stderr unexpectedly included usage\nstderr:\n%s", stderr)
+	}
+	if !strings.Contains(err.Error(), "no EVM wallet is configured") {
+		t.Fatalf("funding bridge error = %q, want missing wallet guidance", err)
 	}
 }
 
@@ -220,6 +238,37 @@ func TestWalletAuthAndReadCommandsWithMockAPI(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "xrpl:rDepositWallet?dt=4242&amount=25") {
 		t.Fatalf("funding bridge text stdout missing payment URI\nstdout:\n%s", stdout)
+	}
+
+	xrplWallet, err := axrpl.NewRandomWallet()
+	if err != nil {
+		t.Fatalf("NewRandomWallet() error = %v", err)
+	}
+	stdout, stderr, err = executeCLI(t, "--json", "wallet", "xrpl-import", "--seed", xrplWallet.Seed())
+	if err != nil {
+		t.Fatalf("wallet xrpl-import error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	originalSubmitBridgePayment := submitBridgePayment
+	submitBridgePayment = func(_ context.Context, rpcURL string, seed string, destination string, destinationTag int, amountXRP string) (string, error) {
+		if rpcURL == "" || seed == "" {
+			t.Fatalf("submitBridgePayment() received empty rpcURL or seed")
+		}
+		if destination != "rDepositWallet" || destinationTag != 4242 || amountXRP != "25" {
+			t.Fatalf("submitBridgePayment() args = (%q, %d, %q), want (%q, %d, %q)", destination, destinationTag, amountXRP, "rDepositWallet", 4242, "25")
+		}
+		return "XRPLTX123", nil
+	}
+	t.Cleanup(func() {
+		submitBridgePayment = originalSubmitBridgePayment
+	})
+
+	stdout, stderr, err = executeCLI(t, "--json", "--api-url", server.URL+"/api/cli", "funding", "bridge-submit", "--amount", "25")
+	if err != nil {
+		t.Fatalf("funding bridge-submit error = %v\nstderr:\n%s", err, stderr)
+	}
+	if !strings.Contains(stdout, "XRPLTX123") || !strings.Contains(stdout, xrplWallet.Address()) {
+		t.Fatalf("funding bridge-submit stdout missing tx hash or xrpl wallet\nstdout:\n%s", stdout)
 	}
 }
 
