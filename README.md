@@ -76,14 +76,14 @@ By default, the CLI stores config in the user config directory under `axiom-cli/
 
 Default values:
 
-- API base URL: `http://localhost:3000/api/cli`
+- API base URL: `https://axiomprotocol.io/api/cli`
 - XRPL EVM RPC URL: `https://rpc.xrplevm.org`
 - XRPL RPC URL: `https://s1.ripple.com:51234`
 - Active profile: `default`
 
-Current shared preview API for live smoke testing:
+Current production API:
 
-- `https://preview.axiomprotocol.io/api/cli`
+- `https://axiomprotocol.io/api/cli`
 
 You can override configuration per command with:
 
@@ -96,7 +96,7 @@ You can override configuration per command with:
 Persist configuration with:
 
 ```bash
-axiom config set --api-url https://preview.axiomprotocol.io/api/cli
+axiom config set --api-url https://axiomprotocol.io/api/cli
 axiom config set --rpc-url https://rpc.xrplevm.org
 axiom config set --xrpl-rpc-url https://s1.ripple.com:51234
 ```
@@ -167,7 +167,7 @@ axiom claim batch
 
 The CLI depends on a backend that exposes a stable HTTP interface for configuration, registration, market discovery, profile reads, and funding metadata. The public contract for those endpoints is documented in `docs/http-api.md`.
 
-The CLI no longer includes support for Vercel deployment-bypass secrets. Public deployments should expose the CLI API directly at a reachable base URL such as `https://your-host.example/api/cli`.
+The CLI no longer includes support for Vercel deployment-bypass secrets. Production CLI traffic should use `https://axiomprotocol.io/api/cli`, and alternate deployments should expose the same CLI API contract at their own reachable base URL.
 
 ## Command groups
 
@@ -196,7 +196,8 @@ For relay funding, `axiom funding bridge` can either:
 
 ## Development notes
 
-- The default API base URL is local development friendly by design: `http://localhost:3000/api/cli`
+- The default API base URL targets production: `https://axiomprotocol.io/api/cli`
 - XRPL EVM defaults to `https://rpc.xrplevm.org`
 - XRPL defaults to `https://s1.ripple.com:51234`
+- For local backend development, override with `axiom config set --api-url http://localhost:3000/api/cli`
 - Run `go mod tidy` before release builds to keep the dependency graph minimal

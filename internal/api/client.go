@@ -363,7 +363,7 @@ func (c *Client) doJSON(ctx context.Context, method string, requestPath string, 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		if strings.Contains(c.baseURL.Host, "localhost") || strings.Contains(c.baseURL.Host, "127.0.0.1") {
-			return fmt.Errorf("request api: %w (local CLI API unreachable; start the webapp or run `axiom config set --api-url https://<host>/api/cli`)", err)
+			return fmt.Errorf("request api: %w (local CLI API unreachable; start the webapp or run `axiom config set --api-url https://axiomprotocol.io/api/cli`)", err)
 		}
 		return fmt.Errorf("request api: %w", err)
 	}

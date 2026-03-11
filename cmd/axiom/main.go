@@ -68,7 +68,7 @@ func newRootCommand() *cobra.Command {
 		Long:  "Axiom CLI manages XRPL EVM wallets, funding flows, market discovery, predictions, claims, and profile analytics.",
 	}
 
-	rootCmd.PersistentFlags().StringVar(&flagAPIURL, "api-url", "", "Override the Axiom CLI API base URL (for example https://your-host/api/cli)")
+	rootCmd.PersistentFlags().StringVar(&flagAPIURL, "api-url", "", "Override the Axiom CLI API base URL (for example https://axiomprotocol.io/api/cli)")
 	rootCmd.PersistentFlags().StringVar(&flagRPCURL, "rpc-url", "", "Override the XRPL EVM RPC URL")
 	rootCmd.PersistentFlags().StringVar(&flagXRPLURL, "xrpl-rpc-url", "", "Override the XRPL JSON-RPC URL")
 	rootCmd.PersistentFlags().BoolVar(&flagJSON, "json", false, "Emit JSON output")

@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	defaultAPIBaseURL  = "http://localhost:3000/api/cli"
+	defaultAPIBaseURL  = "https://axiomprotocol.io/api/cli"
 	defaultEVMRPCURL   = "https://rpc.xrplevm.org"
 	defaultXRPLRPCURL  = "https://s1.ripple.com:51234"
 	keyringServiceName = "axiom-cli"

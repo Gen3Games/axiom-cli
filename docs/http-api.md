@@ -7,7 +7,7 @@ This document defines the backend HTTP interface expected by the public Axiom CL
 The CLI expects a base URL like:
 
 ```text
-https://your-host.example/api/cli
+https://axiomprotocol.io/api/cli
 ```
 
 All paths below are relative to that base URL.
