@@ -15,6 +15,21 @@ import (
 	"time"
 )
 
+type ProfileStats struct {
+	TotalPredictions   int     `json:"totalPredictions"`
+	ResolvedMarkets    int     `json:"resolvedMarkets"`
+	OpenMarkets        int     `json:"openMarkets"`
+	UnclaimedMarkets   int     `json:"unclaimedMarkets"`
+	UnclaimedPayoutUSD string  `json:"unclaimedPayoutUsd"`
+	UnclaimedPnlUSD    string  `json:"unclaimedPnlUsd"`
+	LeaderboardRank    *int    `json:"leaderboardRank"`
+	PnlUSD             float64 `json:"pnlUsd"`
+	PnlPercent         float64 `json:"pnlPercent"`
+	VolumeUSD          float64 `json:"volumeUsd"`
+	WinRate            float64 `json:"winRate"`
+	TradeCount         int     `json:"tradeCount"`
+}
+
 type Client struct {
 	baseURL    *url.URL
 	httpClient *http.Client
@@ -52,29 +67,36 @@ type Outcome struct {
 	Description string `json:"description"`
 }
 
+type OutcomeSpotPrice struct {
+	Index            int    `json:"index"`
+	Label            string `json:"label"`
+	CurrentSpotPrice string `json:"currentSpotPrice"`
+}
+
 type MarketListItem struct {
-	ID              string     `json:"id"`
-	MarketType      string     `json:"marketType"`
-	Title           string     `json:"title"`
-	Headline        string     `json:"headline"`
-	Description     string     `json:"description"`
-	Category        string     `json:"category"`
-	Status          string     `json:"status"`
-	StartsAt        time.Time  `json:"startsAt"`
-	EndsAt          time.Time  `json:"endsAt"`
-	ResolveBy       *time.Time `json:"resolveBy"`
-	ContractAddress string     `json:"contractAddress"`
-	ChainID         *int64     `json:"chainId"`
-	IsResolved      bool       `json:"isResolved"`
-	IsSeries        bool       `json:"isSeries"`
-	MetadataURI     string     `json:"metadataUri"`
-	ImageURL        string     `json:"imageUrl"`
-	InstanceID      string     `json:"instanceId"`
-	InstanceDate    *time.Time `json:"instanceDate"`
-	SequenceNumber  *int       `json:"sequenceNumber"`
-	ReferenceValue  string     `json:"referenceValue"`
-	AssetSymbol     string     `json:"assetSymbol"`
-	Outcomes        []Outcome  `json:"outcomes"`
+	ID                string             `json:"id"`
+	MarketType        string             `json:"marketType"`
+	Title             string             `json:"title"`
+	Headline          string             `json:"headline"`
+	Description       string             `json:"description"`
+	Category          string             `json:"category"`
+	Status            string             `json:"status"`
+	StartsAt          time.Time          `json:"startsAt"`
+	EndsAt            time.Time          `json:"endsAt"`
+	ResolveBy         *time.Time         `json:"resolveBy"`
+	ContractAddress   string             `json:"contractAddress"`
+	ChainID           *int64             `json:"chainId"`
+	IsResolved        bool               `json:"isResolved"`
+	IsSeries          bool               `json:"isSeries"`
+	MetadataURI       string             `json:"metadataUri"`
+	ImageURL          string             `json:"imageUrl"`
+	InstanceID        string             `json:"instanceId"`
+	InstanceDate      *time.Time         `json:"instanceDate"`
+	SequenceNumber    *int               `json:"sequenceNumber"`
+	ReferenceValue    string             `json:"referenceValue"`
+	AssetSymbol       string             `json:"assetSymbol"`
+	Outcomes          []Outcome          `json:"outcomes"`
+	CurrentSpotPrices []OutcomeSpotPrice `json:"currentSpotPrices,omitempty"`
 }
 
 type MarketsResponse struct {
@@ -95,26 +117,13 @@ type MarketDetails struct {
 }
 
 type ProfileSummary struct {
-	WalletAddress         string     `json:"walletAddress"`
-	DisplayName           string     `json:"displayName"`
-	AvatarURL             string     `json:"avatarUrl"`
-	DepositDestinationTag *int       `json:"depositDestinationTag"`
-	MemberSince           *time.Time `json:"memberSince"`
-	LastLoginAt           *time.Time `json:"lastLoginAt"`
-	Stats                 struct {
-		TotalPredictions   int     `json:"totalPredictions"`
-		ResolvedMarkets    int     `json:"resolvedMarkets"`
-		OpenMarkets        int     `json:"openMarkets"`
-		UnclaimedMarkets   int     `json:"unclaimedMarkets"`
-		UnclaimedPayoutUSD string  `json:"unclaimedPayoutUsd"`
-		UnclaimedPnlUSD    string  `json:"unclaimedPnlUsd"`
-		LeaderboardRank    *int    `json:"leaderboardRank"`
-		PnlUSD             float64 `json:"pnlUsd"`
-		PnlPercent         float64 `json:"pnlPercent"`
-		VolumeUSD          float64 `json:"volumeUsd"`
-		WinRate            float64 `json:"winRate"`
-		TradeCount         int     `json:"tradeCount"`
-	} `json:"stats"`
+	WalletAddress         string       `json:"walletAddress"`
+	DisplayName           string       `json:"displayName"`
+	AvatarURL             string       `json:"avatarUrl"`
+	DepositDestinationTag *int         `json:"depositDestinationTag"`
+	MemberSince           *time.Time   `json:"memberSince"`
+	LastLoginAt           *time.Time   `json:"lastLoginAt"`
+	Stats                 ProfileStats `json:"stats"`
 }
 
 type PositionItem struct {
@@ -134,6 +143,175 @@ type PositionItem struct {
 type PositionsResponse struct {
 	Items []PositionItem `json:"items"`
 	Total int            `json:"total"`
+}
+
+func (p *ProfileSummary) UnmarshalJSON(data []byte) error {
+	type profileSummaryAlias struct {
+		WalletAddress         string        `json:"walletAddress"`
+		Address               string        `json:"address"`
+		DisplayName           string        `json:"displayName"`
+		Name                  string        `json:"name"`
+		AvatarURL             string        `json:"avatarUrl"`
+		DepositDestinationTag *int          `json:"depositDestinationTag"`
+		DestinationTag        *int          `json:"destinationTag"`
+		MemberSince           *time.Time    `json:"memberSince"`
+		CreatedAt             *time.Time    `json:"createdAt"`
+		LastLoginAt           *time.Time    `json:"lastLoginAt"`
+		LastLogin             *time.Time    `json:"lastLogin"`
+		Stats                 *ProfileStats `json:"stats"`
+		TotalPredictions      *int          `json:"totalPredictions"`
+		ResolvedMarkets       *int          `json:"resolvedMarkets"`
+		OpenMarkets           *int          `json:"openMarkets"`
+		UnclaimedMarkets      *int          `json:"unclaimedMarkets"`
+		UnclaimedPayoutUSD    *string       `json:"unclaimedPayoutUsd"`
+		UnclaimedPnlUSD       *string       `json:"unclaimedPnlUsd"`
+		LeaderboardRank       *int          `json:"leaderboardRank"`
+		PnlUSD                *float64      `json:"pnlUsd"`
+		PnlPercent            *float64      `json:"pnlPercent"`
+		VolumeUSD             *float64      `json:"volumeUsd"`
+		WinRate               *float64      `json:"winRate"`
+		TradeCount            *int          `json:"tradeCount"`
+	}
+
+	type profileWrapper struct {
+		Profile json.RawMessage `json:"profile"`
+		Data    json.RawMessage `json:"data"`
+	}
+
+	payload := data
+	var wrapper profileWrapper
+	if err := json.Unmarshal(data, &wrapper); err == nil {
+		switch {
+		case len(wrapper.Profile) > 0:
+			payload = wrapper.Profile
+		case len(wrapper.Data) > 0:
+			payload = wrapper.Data
+		}
+	}
+
+	var aux profileSummaryAlias
+	if err := json.Unmarshal(payload, &aux); err != nil {
+		return err
+	}
+
+	stats := ProfileStats{}
+	if aux.Stats != nil {
+		stats = *aux.Stats
+	}
+	if aux.TotalPredictions != nil {
+		stats.TotalPredictions = *aux.TotalPredictions
+	}
+	if aux.ResolvedMarkets != nil {
+		stats.ResolvedMarkets = *aux.ResolvedMarkets
+	}
+	if aux.OpenMarkets != nil {
+		stats.OpenMarkets = *aux.OpenMarkets
+	}
+	if aux.UnclaimedMarkets != nil {
+		stats.UnclaimedMarkets = *aux.UnclaimedMarkets
+	}
+	if aux.UnclaimedPayoutUSD != nil {
+		stats.UnclaimedPayoutUSD = *aux.UnclaimedPayoutUSD
+	}
+	if aux.UnclaimedPnlUSD != nil {
+		stats.UnclaimedPnlUSD = *aux.UnclaimedPnlUSD
+	}
+	if aux.LeaderboardRank != nil {
+		stats.LeaderboardRank = aux.LeaderboardRank
+	}
+	if aux.PnlUSD != nil {
+		stats.PnlUSD = *aux.PnlUSD
+	}
+	if aux.PnlPercent != nil {
+		stats.PnlPercent = *aux.PnlPercent
+	}
+	if aux.VolumeUSD != nil {
+		stats.VolumeUSD = *aux.VolumeUSD
+	}
+	if aux.WinRate != nil {
+		stats.WinRate = *aux.WinRate
+	}
+	if aux.TradeCount != nil {
+		stats.TradeCount = *aux.TradeCount
+	}
+
+	p.WalletAddress = firstNonEmptyString(aux.WalletAddress, aux.Address)
+	p.DisplayName = firstNonEmptyString(aux.DisplayName, aux.Name)
+	p.AvatarURL = aux.AvatarURL
+	p.DepositDestinationTag = firstNonNilInt(aux.DepositDestinationTag, aux.DestinationTag)
+	p.MemberSince = firstNonNilTime(aux.MemberSince, aux.CreatedAt)
+	p.LastLoginAt = firstNonNilTime(aux.LastLoginAt, aux.LastLogin)
+	p.Stats = stats
+	return nil
+}
+
+func (p *PositionsResponse) UnmarshalJSON(data []byte) error {
+	trimmed := strings.TrimSpace(string(data))
+	if strings.HasPrefix(trimmed, "[") {
+		var items []PositionItem
+		if err := json.Unmarshal(data, &items); err != nil {
+			return err
+		}
+		p.Items = items
+		p.Total = len(items)
+		return nil
+	}
+
+	type positionsAlias struct {
+		Items     []PositionItem `json:"items"`
+		Positions []PositionItem `json:"positions"`
+		Data      []PositionItem `json:"data"`
+		Total     int            `json:"total"`
+		Meta      map[string]any `json:"meta"`
+	}
+
+	var aux positionsAlias
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+
+	items := aux.Items
+	if len(items) == 0 {
+		items = aux.Positions
+	}
+	if len(items) == 0 {
+		items = aux.Data
+	}
+
+	p.Items = items
+	p.Total = aux.Total
+	if p.Total <= 0 {
+		p.Total = len(items)
+	}
+	return nil
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+func firstNonNilInt(values ...*int) *int {
+	for _, value := range values {
+		if value != nil {
+			return value
+		}
+	}
+	return nil
+}
+
+func firstNonNilTime(values ...*time.Time) *time.Time {
+	for _, value := range values {
+		if value != nil {
+			return value
+		}
+	}
+	return nil
 }
 
 type UnclaimedItem struct {
@@ -289,6 +467,9 @@ func (c *Client) GetProfile(ctx context.Context, address string) (*ProfileSummar
 	var out ProfileSummary
 	if err := c.doJSON(ctx, http.MethodGet, path.Join("profile", address), nil, &out); err != nil {
 		return nil, err
+	}
+	if strings.TrimSpace(out.WalletAddress) == "" {
+		out.WalletAddress = address
 	}
 	return &out, nil
 }

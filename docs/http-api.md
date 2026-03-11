@@ -86,6 +86,11 @@ Query parameters:
 - `limit`
 - `offset`
 
+CLI post-processing:
+
+- `axiom markets list --my-positions` filters the result locally against `GET /profile/{address}/positions`
+- the CLI may attach `currentSpotPrices` per market in its own JSON output after reading on-chain pool state
+
 Response body:
 
 ```json
@@ -119,6 +124,13 @@ Response body:
           "label": "Yes",
           "description": "..."
         }
+      ],
+      "currentSpotPrices": [
+        {
+          "index": 0,
+          "label": "Yes",
+          "currentSpotPrice": "51.2%"
+        }
       ]
     }
   ],
@@ -135,6 +147,8 @@ Returns full market detail for a market ID or contract address.
 Query parameters:
 
 - `instanceDate` optional for recurring markets
+
+For recurring daily and hourly markets, the CLI documents `instanceDate` as `YYYY-MM-DD`.
 
 Additional response fields beyond the list item shape:
 
@@ -205,6 +219,8 @@ Response body:
   "total": 1
 }
 ```
+
+The CLI also accepts backend variants such as a bare array or `{ "positions": [...] }` and normalizes them back to the `items` and `total` shape above.
 
 ### `GET /profile/{address}/unclaimed`
 

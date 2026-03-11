@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -18,6 +19,7 @@ import (
 	"github.com/Gen3Games/axiom-cli/internal/api"
 	"github.com/Gen3Games/axiom-cli/internal/evm"
 	axrpl "github.com/Gen3Games/axiom-cli/internal/xrpl"
+	"github.com/ethereum/go-ethereum/common"
 )
 
 func TestCommandHelpSmoke(t *testing.T) {
@@ -193,13 +195,33 @@ func TestWalletAuthAndReadCommandsWithMockAPI(t *testing.T) {
 		t.Fatalf("profile show stdout missing profile data\nstdout:\n%s", stdout)
 	}
 
+	stdout, stderr, err = executeCLI(t, "--json", "--api-url", server.URL+"/api/cli", "profile", "show", wallet.Address().Hex())
+	if err != nil {
+		t.Fatalf("profile show by address error = %v\nstderr:\n%s", err, stderr)
+	}
+	var profilePayload map[string]any
+	if err := json.Unmarshal([]byte(stdout), &profilePayload); err != nil {
+		t.Fatalf("json.Unmarshal(profile show by address stdout) error = %v\nstdout:\n%s", err, stdout)
+	}
+	if profilePayload["walletAddress"] != wallet.Address().Hex() {
+		t.Fatalf("walletAddress = %#v, want %q", profilePayload["walletAddress"], wallet.Address().Hex())
+	}
+	statsPayload, ok := profilePayload["stats"].(map[string]any)
+	if !ok || statsPayload["pnlUsd"] == nil || statsPayload["winRate"] == nil {
+		t.Fatalf("profile show by address stats = %#v, want populated stats object", profilePayload["stats"])
+	}
+
 	stdout, stderr, err = executeCLI(t, "--json", "--api-url", server.URL+"/api/cli", "profile", "positions")
 	if err != nil {
 		t.Fatalf("profile positions error = %v\nstderr:\n%s", err, stderr)
 	}
-	if !strings.Contains(stdout, "positions") && !strings.Contains(stdout, "marketId") {
-		// JSON output should contain field names from the response payload.
-		t.Fatalf("profile positions stdout missing JSON payload\nstdout:\n%s", stdout)
+	var positionsPayload map[string]any
+	if err := json.Unmarshal([]byte(stdout), &positionsPayload); err != nil {
+		t.Fatalf("json.Unmarshal(profile positions stdout) error = %v\nstdout:\n%s", err, stdout)
+	}
+	items, ok := positionsPayload["items"].([]any)
+	if !ok || len(items) != 1 || positionsPayload["total"] != float64(1) {
+		t.Fatalf("profile positions payload = %#v, want items/total shape", positionsPayload)
 	}
 
 	stdout, stderr, err = executeCLI(t, "--json", "--api-url", server.URL+"/api/cli", "profile", "unclaimed")
@@ -270,6 +292,225 @@ func TestWalletAuthAndReadCommandsWithMockAPI(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "XRPLTX123") || !strings.Contains(stdout, xrplWallet.Address()) {
 		t.Fatalf("funding bridge-submit stdout missing tx hash or xrpl wallet\nstdout:\n%s", stdout)
+	}
+}
+
+func TestFundingHelpShowsSubcommandFlags(t *testing.T) {
+	setCLIEnv(t)
+
+	tests := []struct {
+		args []string
+		want string
+	}{
+		{args: []string{"funding", "info", "--help"}, want: "[wallet-address]"},
+		{args: []string{"funding", "direct", "--help"}, want: "--to string"},
+		{args: []string{"funding", "bridge", "--help"}, want: "--submit"},
+	}
+
+	for _, test := range tests {
+		stdout, stderr, err := executeCLI(t, test.args...)
+		if err != nil {
+			t.Fatalf("executeCLI(%v) error = %v\nstderr:\n%s", test.args, err, stderr)
+		}
+		if !strings.Contains(stdout, test.want) {
+			t.Fatalf("executeCLI(%v) output missing %q\nstdout:\n%s", test.args, test.want, stdout)
+		}
+	}
+}
+
+func TestPredictBuyNegativeAmountReturnsValidationError(t *testing.T) {
+	setCLIEnv(t)
+	server, _ := newMockAPIServer(t)
+	defer server.Close()
+
+	_, _, err := executeCLI(t, "--api-url", server.URL+"/api/cli", "predict", "buy", "market-1", "--label", "Yes", "--amount", "--", "-1")
+	if err == nil {
+		t.Fatal("predict buy negative amount error = nil, want validation failure")
+	}
+	if !strings.Contains(err.Error(), "amount must be greater than zero") {
+		t.Fatalf("predict buy negative amount error = %q, want amount validation", err)
+	}
+}
+
+func TestPredictBuyDryRunReturnsQuote(t *testing.T) {
+	setCLIEnv(t)
+	server, _ := newMockAPIServer(t)
+	defer server.Close()
+
+	originalLoadMarketState := loadMarketState
+	loadMarketState = func(_ context.Context, _ string, _ common.Address) (*evm.MarketState, error) {
+		now := time.Now().UTC()
+		return &evm.MarketState{
+			Status:           0,
+			OutcomeCount:     2,
+			MarketOpen:       uint64(now.Add(-1 * time.Hour).Unix()),
+			BetsClose:        uint64(now.Add(1 * time.Hour).Unix()),
+			TotalVirtualPool: testBigInt("100000000000000000000"),
+			MaxTimeBonus:     testBigInt("1500000000000000000"),
+			TotalPool:        testBigInt("200000000000000000000"),
+			OutcomePools: []*big.Int{
+				testBigInt("100000000000000000000"),
+				testBigInt("100000000000000000000"),
+			},
+			VirtualSeeds: []*big.Int{
+				testBigInt("50000000000000000000"),
+				testBigInt("50000000000000000000"),
+			},
+			TotalWeightedShares: []*big.Int{
+				testBigInt("10000000000000000000"),
+				testBigInt("10000000000000000000"),
+			},
+		}, nil
+	}
+	t.Cleanup(func() {
+		loadMarketState = originalLoadMarketState
+	})
+
+	stdout, stderr, err := executeCLI(t, "--json", "--api-url", server.URL+"/api/cli", "predict", "buy", "market-1", "--label", "Yes", "--amount", "1", "--dry-run")
+	if err != nil {
+		t.Fatalf("predict buy dry-run error = %v\nstderr:\n%s", err, stderr)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+		t.Fatalf("json.Unmarshal(dry-run stdout) error = %v\nstdout:\n%s", err, stdout)
+	}
+	if payload["dryRun"] != true {
+		t.Fatalf("dryRun = %#v, want true", payload["dryRun"])
+	}
+	quote, ok := payload["quote"].(map[string]any)
+	if !ok || quote["amountXrp"] != "1" {
+		t.Fatalf("quote payload = %#v, want quote object with amountXrp", payload["quote"])
+	}
+}
+
+func TestMarketsListMyPositionsFiltersAndIncludesSpotPrices(t *testing.T) {
+	setCLIEnv(t)
+	server, _ := newMockAPIServer(t)
+	defer server.Close()
+
+	privateKey := "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+	if _, stderr, err := executeCLI(t, "--json", "wallet", "import", "--private-key", privateKey); err != nil {
+		t.Fatalf("wallet import error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	originalLoadMarketState := loadMarketState
+	loadMarketState = func(_ context.Context, _ string, _ common.Address) (*evm.MarketState, error) {
+		return &evm.MarketState{
+			TotalPool:        testBigInt("200000000000000000000"),
+			TotalVirtualPool: testBigInt("100000000000000000000"),
+			OutcomePools: []*big.Int{
+				testBigInt("100000000000000000000"),
+				testBigInt("100000000000000000000"),
+			},
+			VirtualSeeds: []*big.Int{
+				testBigInt("50000000000000000000"),
+				testBigInt("50000000000000000000"),
+			},
+		}, nil
+	}
+	t.Cleanup(func() {
+		loadMarketState = originalLoadMarketState
+	})
+
+	stdout, stderr, err := executeCLI(t, "--json", "--api-url", server.URL+"/api/cli", "markets", "list", "--my-positions")
+	if err != nil {
+		t.Fatalf("markets list --my-positions error = %v\nstderr:\n%s", err, stderr)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+		t.Fatalf("json.Unmarshal(markets list stdout) error = %v\nstdout:\n%s", err, stdout)
+	}
+	items, ok := payload["items"].([]any)
+	if !ok || len(items) != 1 {
+		t.Fatalf("items = %#v, want one filtered market", payload["items"])
+	}
+	market, ok := items[0].(map[string]any)
+	if !ok || market["id"] != "market-1" {
+		t.Fatalf("market item = %#v, want market-1", items[0])
+	}
+	prices, ok := market["currentSpotPrices"].([]any)
+	if !ok || len(prices) != 2 {
+		t.Fatalf("currentSpotPrices = %#v, want two spot-price entries", market["currentSpotPrices"])
+	}
+}
+
+func TestClaimBatchReturnsClaimedMarketDetails(t *testing.T) {
+	setCLIEnv(t)
+	server, _ := newMockAPIServer(t)
+	defer server.Close()
+
+	privateKey := "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+	if _, stderr, err := executeCLI(t, "--json", "wallet", "import", "--private-key", privateKey); err != nil {
+		t.Fatalf("wallet import error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	originalBatchClaim := batchClaimMarkets
+	batchClaimMarkets = func(_ context.Context, _ string, _ *big.Int, _ string, _ common.Address, _ []common.Address) (common.Hash, error) {
+		return common.HexToHash("0x123"), nil
+	}
+	t.Cleanup(func() {
+		batchClaimMarkets = originalBatchClaim
+	})
+
+	stdout, stderr, err := executeCLI(t, "--json", "--api-url", server.URL+"/api/cli", "claim", "batch")
+	if err != nil {
+		t.Fatalf("claim batch error = %v\nstderr:\n%s", err, stderr)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+		t.Fatalf("json.Unmarshal(claim batch stdout) error = %v\nstdout:\n%s", err, stdout)
+	}
+	if payload["totalClaimedPayoutUsd"] != "22.00" {
+		t.Fatalf("totalClaimedPayoutUsd = %#v, want %q", payload["totalClaimedPayoutUsd"], "22.00")
+	}
+	claimed, ok := payload["claimedMarkets"].([]any)
+	if !ok || len(claimed) != 1 {
+		t.Fatalf("claimedMarkets = %#v, want one market", payload["claimedMarkets"])
+	}
+}
+
+func TestWalletBalanceFlagsSelectNetworks(t *testing.T) {
+	setCLIEnv(t)
+
+	privateKey := "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+	if _, stderr, err := executeCLI(t, "--json", "wallet", "import", "--private-key", privateKey); err != nil {
+		t.Fatalf("wallet import error = %v\nstderr:\n%s", err, stderr)
+	}
+	xrplWallet, err := axrpl.NewRandomWallet()
+	if err != nil {
+		t.Fatalf("NewRandomWallet() error = %v", err)
+	}
+	if _, stderr, err := executeCLI(t, "--json", "wallet", "xrpl-import", "--seed", xrplWallet.Seed()); err != nil {
+		t.Fatalf("wallet xrpl-import error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	originalEVMBalance := getEVMBalance
+	originalXRPLBalance := getXRPLBalance
+	getEVMBalance = func(_ context.Context, _ string, _ common.Address) (*big.Int, error) {
+		return testBigInt("1500000000000000000"), nil
+	}
+	getXRPLBalance = func(_ context.Context, _ string, _ string) (string, error) {
+		return "25", nil
+	}
+	t.Cleanup(func() {
+		getEVMBalance = originalEVMBalance
+		getXRPLBalance = originalXRPLBalance
+	})
+
+	stdout, stderr, err := executeCLI(t, "--json", "wallet", "balance", "--evm")
+	if err != nil {
+		t.Fatalf("wallet balance --evm error = %v\nstderr:\n%s", err, stderr)
+	}
+	if strings.Contains(stdout, "xrplBalanceXrp") || !strings.Contains(stdout, "evmBalanceXrp") {
+		t.Fatalf("wallet balance --evm stdout = %s, want only evm balance", stdout)
+	}
+
+	stdout, stderr, err = executeCLI(t, "--json", "wallet", "balance", "--xrpl")
+	if err != nil {
+		t.Fatalf("wallet balance --xrpl error = %v\nstderr:\n%s", err, stderr)
+	}
+	if strings.Contains(stdout, "evmBalanceXrp") || !strings.Contains(stdout, "xrplBalanceXrp") {
+		t.Fatalf("wallet balance --xrpl stdout = %s, want only xrpl balance", stdout)
 	}
 }
 
@@ -381,7 +622,7 @@ func executeCLI(t *testing.T, args ...string) (string, string, error) {
 	t.Helper()
 	resetCLIFlags()
 	cmd := newRootCommand()
-	cmd.SetArgs(args)
+	cmd.SetArgs(normalizeCLIArgs(args))
 	stdout, stderr, err := captureStdIO(func() error {
 		return cmd.Execute()
 	})
@@ -541,20 +782,7 @@ func newMockAPIServer(t *testing.T) (*httptest.Server, *mockAPIState) {
 				DepositDestinationTag: &tag,
 				MemberSince:           ptrTime(now.Add(-7 * 24 * time.Hour)),
 				LastLoginAt:           ptrTime(now),
-				Stats: struct {
-					TotalPredictions   int     `json:"totalPredictions"`
-					ResolvedMarkets    int     `json:"resolvedMarkets"`
-					OpenMarkets        int     `json:"openMarkets"`
-					UnclaimedMarkets   int     `json:"unclaimedMarkets"`
-					UnclaimedPayoutUSD string  `json:"unclaimedPayoutUsd"`
-					UnclaimedPnlUSD    string  `json:"unclaimedPnlUsd"`
-					LeaderboardRank    *int    `json:"leaderboardRank"`
-					PnlUSD             float64 `json:"pnlUsd"`
-					PnlPercent         float64 `json:"pnlPercent"`
-					VolumeUSD          float64 `json:"volumeUsd"`
-					WinRate            float64 `json:"winRate"`
-					TradeCount         int     `json:"tradeCount"`
-				}{TotalPredictions: 12, ResolvedMarkets: 5, OpenMarkets: 7, UnclaimedMarkets: 1, UnclaimedPayoutUSD: "22.00", UnclaimedPnlUSD: "3.00", LeaderboardRank: &rank, PnlUSD: 4.56, PnlPercent: 7.89, VolumeUSD: 123.45, WinRate: 66.6, TradeCount: 12},
+				Stats:                 api.ProfileStats{TotalPredictions: 12, ResolvedMarkets: 5, OpenMarkets: 7, UnclaimedMarkets: 1, UnclaimedPayoutUSD: "22.00", UnclaimedPnlUSD: "3.00", LeaderboardRank: &rank, PnlUSD: 4.56, PnlPercent: 7.89, VolumeUSD: 123.45, WinRate: 66.6, TradeCount: 12},
 			})
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/cli/funding/"):
 			tag := 4242
@@ -577,4 +805,12 @@ func newMockAPIServer(t *testing.T) (*httptest.Server, *mockAPIState) {
 
 func ptrTime(value time.Time) *time.Time {
 	return &value
+}
+
+func testBigInt(value string) *big.Int {
+	parsed, ok := new(big.Int).SetString(value, 10)
+	if !ok {
+		panic("invalid big int: " + value)
+	}
+	return parsed
 }

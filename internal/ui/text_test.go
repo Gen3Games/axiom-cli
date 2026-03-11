@@ -44,8 +44,8 @@ func TestRenderKnownTypes(t *testing.T) {
 		},
 		{
 			name:  "markets",
-			value: api.MarketsResponse{Items: []api.MarketListItem{{ID: "m1", Title: "Will XRP rise?", Status: "active", Category: "crypto", EndsAt: now, ContractAddress: "0xmarket", Outcomes: []api.Outcome{{Index: 0, Label: "Yes"}, {Index: 1, Label: "No"}}}}, Total: 1},
-			want:  []string{"Markets (1 total)", "Will XRP rise?", "crypto", "Yes, No", "0xmarket"},
+			value: api.MarketsResponse{Items: []api.MarketListItem{{ID: "m1", Title: "Will XRP rise?", Status: "active", Category: "crypto", EndsAt: now, ContractAddress: "0xmarket", Outcomes: []api.Outcome{{Index: 0, Label: "Yes"}, {Index: 1, Label: "No"}}, CurrentSpotPrices: []api.OutcomeSpotPrice{{Index: 0, Label: "Yes", CurrentSpotPrice: "50%"}, {Index: 1, Label: "No", CurrentSpotPrice: "50%"}}}}, Total: 1},
+			want:  []string{"Markets (1 total)", "Will XRP rise?", "crypto", "Yes, No", "Yes 50%, No 50%", "0xmarket"},
 		},
 		{
 			name:  "market details",
@@ -60,20 +60,7 @@ func TestRenderKnownTypes(t *testing.T) {
 				DepositDestinationTag: &tag,
 				MemberSince:           &memberSince,
 				LastLoginAt:           &now,
-				Stats: struct {
-					TotalPredictions   int     `json:"totalPredictions"`
-					ResolvedMarkets    int     `json:"resolvedMarkets"`
-					OpenMarkets        int     `json:"openMarkets"`
-					UnclaimedMarkets   int     `json:"unclaimedMarkets"`
-					UnclaimedPayoutUSD string  `json:"unclaimedPayoutUsd"`
-					UnclaimedPnlUSD    string  `json:"unclaimedPnlUsd"`
-					LeaderboardRank    *int    `json:"leaderboardRank"`
-					PnlUSD             float64 `json:"pnlUsd"`
-					PnlPercent         float64 `json:"pnlPercent"`
-					VolumeUSD          float64 `json:"volumeUsd"`
-					WinRate            float64 `json:"winRate"`
-					TradeCount         int     `json:"tradeCount"`
-				}{TotalPredictions: 12, ResolvedMarkets: 5, OpenMarkets: 7, UnclaimedPayoutUSD: "12.34", UnclaimedPnlUSD: "1.23", LeaderboardRank: &rank, PnlUSD: 4.56, PnlPercent: 7.89, VolumeUSD: 123.45, WinRate: 66.6},
+				Stats:                 api.ProfileStats{TotalPredictions: 12, ResolvedMarkets: 5, OpenMarkets: 7, UnclaimedPayoutUSD: "12.34", UnclaimedPnlUSD: "1.23", LeaderboardRank: &rank, PnlUSD: 4.56, PnlPercent: 7.89, VolumeUSD: 123.45, WinRate: 66.6},
 			},
 			want: []string{"Profile", "Performance", "Win Rate", "66.60%", "$123.45", "$4.56", "4242"},
 		},

@@ -126,6 +126,8 @@ Inspect wallet details and balances:
 ```bash
 axiom wallet show
 axiom wallet balance
+axiom wallet balance --evm
+axiom wallet balance --xrpl
 ```
 
 Read funding instructions:
@@ -140,6 +142,7 @@ Browse markets:
 
 ```bash
 axiom markets list
+axiom markets list --my-positions
 axiom markets get <market-id-or-address>
 ```
 
@@ -147,7 +150,9 @@ Preview and place a prediction:
 
 ```bash
 axiom predict quote <market-id-or-address> --label "Yes" --amount 10
+axiom predict quote xrp-hourly --label "Higher" --amount 10 --instance-date 2026-03-11
 axiom predict buy <market-id-or-address> --label "Yes" --amount 10
+axiom predict buy <market-id-or-address> --label "Yes" --amount 10 --dry-run
 ```
 
 Review profile activity:
@@ -155,6 +160,7 @@ Review profile activity:
 ```bash
 axiom profile show
 axiom profile positions
+axiom profile positions --status open
 axiom profile unclaimed
 ```
 
@@ -162,8 +168,11 @@ Claim winnings:
 
 ```bash
 axiom claim market <market-id-or-address>
+axiom claim market xrp-hourly --instance-date 2026-03-11
 axiom claim batch
 ```
+
+For recurring daily and hourly markets, pass `--instance-date` as `YYYY-MM-DD`.
 
 ## Public HTTP contract
 
@@ -177,12 +186,19 @@ The CLI no longer includes support for Vercel deployment-bypass secrets. Product
 - `axiom wallet`: Create, import, inspect, balance-check, and reset local wallets
 - `axiom auth`: Register the active wallet with the backend
 - `axiom markets`: List markets and fetch market details
+- `axiom markets list --my-positions`: Filter the list to markets where the active wallet has open positions
 - `axiom profile`: Read profile summary, positions, and unclaimed winnings
 - `axiom funding`: Inspect funding instructions, send direct XRP on XRPL EVM, preview XRPL bridge funding, or bridge directly from a stored XRPL wallet
-- `axiom predict`: Quote and buy market positions
+- `axiom predict`: Quote and buy market positions, including `predict buy --dry-run` for non-committing simulations
 - `axiom claim`: Claim from one market or batch-claim unclaimed winnings
 
 Use `--json` on any command when you want machine-readable output for scripts or automation.
+
+Notable JSON conventions:
+
+- `profile positions` returns an object with `items` and `total`
+- `markets list` may include `currentSpotPrices` for each market outcome when contract state is available
+- `claim batch` includes `claimedMarkets`, `totalClaimedPayoutUsd`, and `totalClaimedPnlUsd`
 
 ## Funding modes
 

@@ -211,3 +211,86 @@ func TestBuildURLPreservesBasePathAndQuery(t *testing.T) {
 		t.Fatalf("buildURL() = %q, want %q", endpoint.String(), want.String())
 	}
 }
+
+func TestGetProfileAcceptsVariantResponseShapes(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/cli/profile/0xabc" {
+			t.Fatalf("request path = %q, want %q", r.URL.Path, "/api/cli/profile/0xabc")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"profile": map[string]any{
+				"address":               "0xabc",
+				"displayName":           "agent",
+				"memberSince":           "2026-03-01T00:00:00Z",
+				"lastLoginAt":           "2026-03-11T00:00:00Z",
+				"depositDestinationTag": 4242,
+				"pnlUsd":                12.5,
+				"winRate":               66.6,
+				"volumeUsd":             100.0,
+				"tradeCount":            4,
+			},
+		})
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL+"/api/cli", "")
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	profile, err := client.GetProfile(context.Background(), "0xabc")
+	if err != nil {
+		t.Fatalf("GetProfile() error = %v", err)
+	}
+	if profile.WalletAddress != "0xabc" {
+		t.Fatalf("WalletAddress = %q, want %q", profile.WalletAddress, "0xabc")
+	}
+	if profile.Stats.PnlUSD != 12.5 || profile.Stats.WinRate != 66.6 {
+		t.Fatalf("Stats = %+v, want top-level stats fields mapped", profile.Stats)
+	}
+	if profile.DisplayName != "agent" {
+		t.Fatalf("DisplayName = %q, want %q", profile.DisplayName, "agent")
+	}
+}
+
+func TestGetPositionsAcceptsWrappedAndBareArrays(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		response  string
+		wantTotal int
+	}{
+		{name: "positions wrapper", response: `{"positions":[{"marketId":"m1","status":"active"}],"total":1}`, wantTotal: 1},
+		{name: "bare array", response: `[{"marketId":"m1","status":"active"},{"marketId":"m2","status":"won"}]`, wantTotal: 2},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/api/cli/profile/0xabc/positions" {
+					t.Fatalf("request path = %q, want %q", r.URL.Path, "/api/cli/profile/0xabc/positions")
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(test.response))
+			}))
+			defer server.Close()
+
+			client, err := NewClient(server.URL+"/api/cli", "")
+			if err != nil {
+				t.Fatalf("NewClient() error = %v", err)
+			}
+
+			positions, err := client.GetPositions(context.Background(), "0xabc", "all", 0)
+			if err != nil {
+				t.Fatalf("GetPositions() error = %v", err)
+			}
+			if positions.Total != test.wantTotal || len(positions.Items) != test.wantTotal {
+				t.Fatalf("positions = %+v, want total/items %d", positions, test.wantTotal)
+			}
+		})
+	}
+}

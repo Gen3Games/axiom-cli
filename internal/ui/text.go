@@ -102,20 +102,36 @@ func renderMarkets(response api.MarketsResponse) string {
 	if len(response.Items) == 0 {
 		return heading("Markets") + "\nNo markets found."
 	}
+	showSpotPrices := false
+	for _, item := range response.Items {
+		if len(item.CurrentSpotPrices) > 0 {
+			showSpotPrices = true
+			break
+		}
+	}
+	headers := []string{"Title", "Status", "Category", "Closes", "Outcomes"}
+	if showSpotPrices {
+		headers = append(headers, "Spot Odds")
+	}
+	headers = append(headers, "Identifier")
 	rows := make([][]string, 0, len(response.Items))
 	for _, item := range response.Items {
-		rows = append(rows, []string{
+		row := []string{
 			truncate(item.Title, 40),
 			item.Status,
 			truncate(item.Category, 14),
 			formatTime(item.EndsAt),
 			truncate(joinOutcomeLabels(item.Outcomes), 28),
-			firstNonEmpty(item.ContractAddress, item.ID),
-		})
+		}
+		if showSpotPrices {
+			row = append(row, truncate(joinOutcomeSpotPrices(item.CurrentSpotPrices), 28))
+		}
+		row = append(row, firstNonEmpty(item.ContractAddress, item.ID))
+		rows = append(rows, row)
 	}
 	return strings.Join([]string{
 		heading(fmt.Sprintf("Markets (%d total)", response.Total)),
-		renderTable([]string{"Title", "Status", "Category", "Closes", "Outcomes", "Identifier"}, rows),
+		renderTable(headers, rows),
 	}, "\n")
 }
 
@@ -175,6 +191,17 @@ func renderProfile(profile api.ProfileSummary) string {
 			{"Leaderboard Rank", optionalInt(stats.LeaderboardRank)},
 		}),
 	}, "\n")
+}
+
+func joinOutcomeSpotPrices(values []api.OutcomeSpotPrice) string {
+	if len(values) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(values))
+	for _, value := range values {
+		parts = append(parts, value.Label+" "+value.CurrentSpotPrice)
+	}
+	return strings.Join(parts, ", ")
 }
 
 func renderPositions(response api.PositionsResponse) string {

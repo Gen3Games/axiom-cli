@@ -31,6 +31,13 @@ var (
 	flagXRPLURL         string
 	flagJSON            bool
 	flagProfile         string
+	getEVMBalance       = evm.GetBalance
+	getXRPLBalance      = axrpl.GetBalance
+	loadMarketState     = evm.LoadMarketState
+	quoteBuy            = evm.QuoteBuy
+	buyPosition         = evm.BuyPosition
+	claimSingleMarket   = evm.ClaimMarket
+	batchClaimMarkets   = evm.BatchClaim
 	submitBridgePayment = axrpl.SubmitBridgePayment
 )
 
@@ -56,6 +63,7 @@ type bridgeFundingPreview struct {
 
 func main() {
 	rootCmd := newRootCommand()
+	rootCmd.SetArgs(normalizeCLIArgs(os.Args[1:]))
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -70,6 +78,12 @@ func newRootCommand() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
+	rootCmd.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
+		if rewritten := rewriteAmountFlagParseError(normalizeCLIArgs(os.Args[1:]), err); rewritten != nil {
+			return rewritten
+		}
+		return err
+	})
 
 	rootCmd.PersistentFlags().StringVar(&flagAPIURL, "api-url", "", "Override the Axiom CLI API base URL (for example https://axiomprotocol.io/api/cli)")
 	rootCmd.PersistentFlags().StringVar(&flagRPCURL, "rpc-url", "", "Override the XRPL EVM RPC URL")
@@ -341,25 +355,37 @@ func newWalletCommand() *cobra.Command {
 	resetCmd.Flags().Bool("yes", false, "Confirm the irreversible deletion of local wallet secrets for the active profile")
 	cmd.AddCommand(resetCmd)
 
-	cmd.AddCommand(&cobra.Command{
+	balanceCmd := &cobra.Command{
 		Use:   "balance",
 		Short: "Show EVM and XRPL balances for the active profile",
+		Long: strings.Join([]string{
+			"Show local wallet balances for the active profile.",
+			"",
+			"By default the command returns both XRPL EVM and XRPL balances when those wallets",
+			"are configured. Use --evm or --xrpl to restrict the response to a single network.",
+		}, "\n"),
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx, err := buildCLIContext()
 			if err != nil {
 				return err
 			}
+			includeEVM := mustBoolFlag(cmd, "evm")
+			includeXRPL := mustBoolFlag(cmd, "xrpl")
+			if !includeEVM && !includeXRPL {
+				includeEVM = true
+				includeXRPL = true
+			}
 			result := map[string]any{"profile": ctx.ProfileName}
-			if ctx.Profile.EVMAddress != "" {
-				balance, err := evm.GetBalance(cmd.Context(), ctx.Config.EVMRPCURL, common.HexToAddress(ctx.Profile.EVMAddress))
+			if includeEVM && ctx.Profile.EVMAddress != "" {
+				balance, err := getEVMBalance(cmd.Context(), ctx.Config.EVMRPCURL, common.HexToAddress(ctx.Profile.EVMAddress))
 				if err != nil {
 					return err
 				}
 				result["evmAddress"] = ctx.Profile.EVMAddress
 				result["evmBalanceXrp"] = formatWeiToXRP(balance)
 			}
-			if ctx.Profile.XRPLAddress != "" {
-				balance, err := axrpl.GetBalance(cmd.Context(), ctx.Config.XRPLRPCURL, ctx.Profile.XRPLAddress)
+			if includeXRPL && ctx.Profile.XRPLAddress != "" {
+				balance, err := getXRPLBalance(cmd.Context(), ctx.Config.XRPLRPCURL, ctx.Profile.XRPLAddress)
 				if err != nil {
 					return err
 				}
@@ -368,7 +394,10 @@ func newWalletCommand() *cobra.Command {
 			}
 			return printOutput(ctx.JSON, result)
 		},
-	})
+	}
+	balanceCmd.Flags().Bool("evm", false, "Return only the XRPL EVM balance")
+	balanceCmd.Flags().Bool("xrpl", false, "Return only the XRPL balance")
+	cmd.AddCommand(balanceCmd)
 
 	return cmd
 }
@@ -441,27 +470,42 @@ func newMarketsCommand() *cobra.Command {
 			category, _ := cmd.Flags().GetString("category")
 			limit, _ := cmd.Flags().GetInt("limit")
 			offset, _ := cmd.Flags().GetInt("offset")
+			myPositions, _ := cmd.Flags().GetBool("my-positions")
 			var response *api.MarketsResponse
-			if strings.TrimSpace(category) != "" {
+			needsLocalFiltering := strings.TrimSpace(category) != "" || myPositions
+			if needsLocalFiltering || limit <= 0 {
 				response, err = ctx.API.ListAllMarkets(cmd.Context(), status, search, "", 0)
-				if err != nil {
-					return err
-				}
-				response = filterMarketsByCategory(response, category, limit, offset)
-			} else if limit <= 0 {
-				response, err = ctx.API.ListAllMarkets(cmd.Context(), status, search, "", offset)
 			} else {
 				response, err = ctx.API.ListMarkets(cmd.Context(), status, search, "", limit, offset)
 			}
 			if err != nil {
 				return err
 			}
+			if strings.TrimSpace(category) != "" {
+				response = filterMarketsByCategory(response, category, 0, 0)
+			}
+			if myPositions {
+				if ctx.Profile.EVMAddress == "" {
+					return errors.New("no active EVM wallet is configured; run `axiom wallet create` or pass an address to `axiom profile positions`")
+				}
+				positions, err := ctx.API.GetPositions(cmd.Context(), ctx.Profile.EVMAddress, "open", 0)
+				if err != nil {
+					return err
+				}
+				positions = filterPositionsByStatus(positions, "open", 0)
+				response = filterMarketsByPositions(response, positions)
+			}
+			if needsLocalFiltering {
+				response = paginateMarkets(response, limit, offset)
+			}
+			enrichMarketsWithSpotPrices(cmd.Context(), ctx, response)
 			return printOutput(ctx.JSON, response)
 		},
 	}
 	listCmd.Flags().String("status", "active", "Filter by status: active, resolved, upcoming, all")
 	listCmd.Flags().String("category", "", "Filter by market category (for example hourly, sports, streak)")
 	listCmd.Flags().String("search", "", "Search by title or headline")
+	listCmd.Flags().Bool("my-positions", false, "Only return markets where the active wallet currently has open positions")
 	listCmd.Flags().Int("limit", 0, "Maximum number of markets to return (0 means fetch all matching markets)")
 	listCmd.Flags().Int("offset", 0, "Offset into the market result set")
 	cmd.AddCommand(listCmd)
@@ -483,7 +527,7 @@ func newMarketsCommand() *cobra.Command {
 			return printOutput(ctx.JSON, response)
 		},
 	}
-	getCmd.Flags().String("instance-date", "", "Optional instance date for recurring markets")
+	getCmd.Flags().String("instance-date", "", "Instance date for recurring daily/hourly markets in YYYY-MM-DD format")
 	cmd.AddCommand(getCmd)
 	return cmd
 }
@@ -515,7 +559,13 @@ func newProfileCommand() *cobra.Command {
 	positionsCmd := &cobra.Command{
 		Use:   "positions [wallet-address]",
 		Short: "List recent positions for a profile",
-		Args:  cobra.MaximumNArgs(1),
+		Long: strings.Join([]string{
+			"List recent positions for a profile.",
+			"",
+			"Use --status open to restrict results to unresolved positions. The CLI applies the",
+			"status filter locally as a fallback when the backend returns a broader payload.",
+		}, "\n"),
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, err := buildCLIContext()
 			if err != nil {
@@ -531,6 +581,7 @@ func newProfileCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			response = filterPositionsByStatus(response, status, limit)
 			return printOutput(ctx.JSON, response)
 		},
 	}
@@ -565,10 +616,21 @@ func newProfileCommand() *cobra.Command {
 func newFundingCommand() *cobra.Command {
 	cmd := &cobra.Command{Use: "funding", Short: "Handle direct XRP funding and bridge funding via XRPL destination tags"}
 
-	cmd.AddCommand(&cobra.Command{
+	infoCmd := &cobra.Command{
 		Use:   "info [wallet-address]",
 		Short: "Show funding instructions, destination tag, and recent bridge history",
-		Args:  cobra.MaximumNArgs(1),
+		Long: strings.Join([]string{
+			"Show funding instructions, destination tag, and recent bridge history.",
+			"",
+			"This command is read-only. It returns the relay deposit wallet, the destination tag",
+			"that identifies your wallet, and recent relay history from the backend.",
+		}, "\n"),
+		Example: strings.Join([]string{
+			"axiom funding info",
+			"axiom funding info 0xabc123...",
+			"axiom --json funding info",
+		}, "\n"),
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, err := buildCLIContext()
 			if err != nil {
@@ -584,11 +646,22 @@ func newFundingCommand() *cobra.Command {
 			}
 			return printOutput(ctx.JSON, response)
 		},
-	})
+	}
+	cmd.AddCommand(infoCmd)
 
 	directCmd := &cobra.Command{
 		Use:   "direct --to <evm-address> --amount <xrp>",
 		Short: "Send native XRP on XRPL EVM directly from the active local EVM wallet",
+		Long: strings.Join([]string{
+			"Send native XRP on XRPL EVM directly from the active local EVM wallet.",
+			"",
+			"Use this when you already have XRP on XRPL EVM and want to fund another EVM wallet",
+			"without going through the XRPL relay deposit flow.",
+		}, "\n"),
+		Example: strings.Join([]string{
+			"axiom funding direct --to 0xabc123... --amount 25",
+			"axiom funding direct --to 0xabc123... --amount 25 --json",
+		}, "\n"),
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx, err := buildCLIContext()
 			if err != nil {
@@ -699,7 +772,11 @@ func newPredictCommand() *cobra.Command {
 	quoteCmd := &cobra.Command{
 		Use:   "quote <market-id-or-address>",
 		Short: "Preview weighted shares, price impact, and payout for a proposed buy",
-		Args:  cobra.ExactArgs(1),
+		Example: strings.Join([]string{
+			"axiom predict quote xrp-hourly --label Higher --amount 5",
+			"axiom predict quote xrp-hourly --outcome 0 --amount 5 --instance-date 2026-03-11",
+		}, "\n"),
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, err := buildCLIContext()
 			if err != nil {
@@ -721,7 +798,7 @@ func newPredictCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			state, err := evm.LoadMarketState(cmd.Context(), ctx.Config.EVMRPCURL, common.HexToAddress(market.ContractAddress))
+			state, err := loadMarketState(cmd.Context(), ctx.Config.EVMRPCURL, common.HexToAddress(market.ContractAddress))
 			if err != nil {
 				return err
 			}
@@ -732,7 +809,7 @@ func newPredictCommand() *cobra.Command {
 					break
 				}
 			}
-			quote, err := evm.QuoteBuy(state, amountWei, uint8(outcomeIndex), market.Title, outcomeLabel, time.Now())
+			quote, err := quoteBuy(state, amountWei, uint8(outcomeIndex), market.Title, outcomeLabel, time.Now())
 			if err != nil {
 				return err
 			}
@@ -742,19 +819,26 @@ func newPredictCommand() *cobra.Command {
 	quoteCmd.Flags().String("amount", "", "Amount of XRP to preview")
 	quoteCmd.Flags().String("outcome", "", "Outcome index to preview")
 	quoteCmd.Flags().String("label", "", "Outcome label to preview (alternative to --outcome)")
-	quoteCmd.Flags().String("instance-date", "", "Optional instance date for recurring markets")
+	quoteCmd.Flags().String("instance-date", "", "Instance date for recurring daily/hourly markets in YYYY-MM-DD format")
 	cmd.AddCommand(quoteCmd)
 
 	buyCmd := &cobra.Command{
 		Use:   "buy <market-id-or-address>",
 		Short: "Buy into an Axiom market outcome",
-		Args:  cobra.ExactArgs(1),
+		Long: strings.Join([]string{
+			"Buy into an Axiom market outcome.",
+			"",
+			"Use --dry-run to execute the same market and outcome resolution path as a live buy",
+			"without submitting a transaction. This returns the same quote structure as `predict quote`.",
+		}, "\n"),
+		Example: strings.Join([]string{
+			"axiom predict buy xrp-hourly --label Higher --amount 5",
+			"axiom predict buy xrp-hourly --label Higher --amount 5 --dry-run",
+			"axiom predict buy xrp-hourly --label Higher --amount 5 --instance-date 2026-03-11",
+		}, "\n"),
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, err := buildCLIContext()
-			if err != nil {
-				return err
-			}
-			_, privateKeyHex, err := requireEVMWalletWithKey(ctx)
 			if err != nil {
 				return err
 			}
@@ -774,11 +858,36 @@ func newPredictCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if mustBoolFlag(cmd, "dry-run") {
+				state, err := loadMarketState(cmd.Context(), ctx.Config.EVMRPCURL, common.HexToAddress(market.ContractAddress))
+				if err != nil {
+					return err
+				}
+				outcomeLabel := fmt.Sprintf("Outcome %d", outcomeIndex)
+				for _, outcome := range market.Outcomes {
+					if outcome.Index == outcomeIndex {
+						outcomeLabel = outcome.Label
+						break
+					}
+				}
+				quote, err := quoteBuy(state, amountWei, uint8(outcomeIndex), market.Title, outcomeLabel, time.Now())
+				if err != nil {
+					return err
+				}
+				return printOutput(ctx.JSON, map[string]any{
+					"dryRun": true,
+					"quote":  quote,
+				})
+			}
+			_, privateKeyHex, err := requireEVMWalletWithKey(ctx)
+			if err != nil {
+				return err
+			}
 			minShares, err := parseOptionalWei(cmd, "min-shares")
 			if err != nil {
 				return err
 			}
-			txHash, err := evm.BuyPosition(cmd.Context(), ctx.Config.EVMRPCURL, big.NewInt(xrplEVMChainID), privateKeyHex, common.HexToAddress(market.ContractAddress), uint8(outcomeIndex), amountWei, minShares)
+			txHash, err := buyPosition(cmd.Context(), ctx.Config.EVMRPCURL, big.NewInt(xrplEVMChainID), privateKeyHex, common.HexToAddress(market.ContractAddress), uint8(outcomeIndex), amountWei, minShares)
 			if err != nil {
 				return err
 			}
@@ -797,8 +906,9 @@ func newPredictCommand() *cobra.Command {
 	buyCmd.Flags().String("outcome", "", "Outcome index to buy")
 	buyCmd.Flags().String("label", "", "Outcome label to buy (alternative to --outcome)")
 	buyCmd.Flags().String("min-shares", "0", "Minimum acceptable weighted shares in wei")
+	buyCmd.Flags().Bool("dry-run", false, "Resolve the market and return a quote without submitting a transaction")
 	buyCmd.Flags().Bool("wait", false, "Wait for the transaction receipt")
-	buyCmd.Flags().String("instance-date", "", "Optional instance date for recurring markets")
+	buyCmd.Flags().String("instance-date", "", "Instance date for recurring daily/hourly markets in YYYY-MM-DD format")
 	cmd.AddCommand(buyCmd)
 	return cmd
 }
@@ -809,7 +919,11 @@ func newClaimCommand() *cobra.Command {
 	marketCmd := &cobra.Command{
 		Use:   "market <market-id-or-address>",
 		Short: "Claim winnings or refunds from a single market",
-		Args:  cobra.ExactArgs(1),
+		Example: strings.Join([]string{
+			"axiom claim market market-123",
+			"axiom claim market xrp-hourly --instance-date 2026-03-11",
+		}, "\n"),
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, err := buildCLIContext()
 			if err != nil {
@@ -823,7 +937,7 @@ func newClaimCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			txHash, err := evm.ClaimMarket(cmd.Context(), ctx.Config.EVMRPCURL, big.NewInt(xrplEVMChainID), privateKeyHex, common.HexToAddress(market.ContractAddress))
+			txHash, err := claimSingleMarket(cmd.Context(), ctx.Config.EVMRPCURL, big.NewInt(xrplEVMChainID), privateKeyHex, common.HexToAddress(market.ContractAddress))
 			if err != nil {
 				return err
 			}
@@ -839,7 +953,7 @@ func newClaimCommand() *cobra.Command {
 		},
 	}
 	marketCmd.Flags().Bool("wait", false, "Wait for transaction finality")
-	marketCmd.Flags().String("instance-date", "", "Optional instance date for recurring markets")
+	marketCmd.Flags().String("instance-date", "", "Instance date for recurring daily/hourly markets in YYYY-MM-DD format")
 	cmd.AddCommand(marketCmd)
 
 	batchCmd := &cobra.Command{
@@ -875,11 +989,29 @@ func newClaimCommand() *cobra.Command {
 			for _, item := range unclaimed.Items {
 				markets = append(markets, common.HexToAddress(item.MarketAddress))
 			}
-			txHash, err := evm.BatchClaim(cmd.Context(), ctx.Config.EVMRPCURL, big.NewInt(xrplEVMChainID), privateKeyHex, common.HexToAddress(configResponse.AxiomUtilityAddress), markets)
+			txHash, err := batchClaimMarkets(cmd.Context(), ctx.Config.EVMRPCURL, big.NewInt(xrplEVMChainID), privateKeyHex, common.HexToAddress(configResponse.AxiomUtilityAddress), markets)
 			if err != nil {
 				return err
 			}
-			result := map[string]any{"txHash": txHash.Hex(), "markets": len(markets)}
+			claimedMarkets := make([]map[string]any, 0, len(unclaimed.Items))
+			for _, item := range unclaimed.Items {
+				claimedMarkets = append(claimedMarkets, map[string]any{
+					"marketId":      item.MarketID,
+					"marketAddress": item.MarketAddress,
+					"title":         item.Title,
+					"payoutUsd":     item.PayoutUSD,
+					"pnlUsd":        item.PnlUSD,
+					"instanceDate":  item.InstanceDate,
+					"category":      item.Category,
+				})
+			}
+			result := map[string]any{
+				"txHash":                txHash.Hex(),
+				"markets":               len(markets),
+				"claimedMarkets":        claimedMarkets,
+				"totalClaimedPayoutUsd": unclaimed.Summary.TotalUnclaimedPayoutUSD,
+				"totalClaimedPnlUsd":    unclaimed.Summary.TotalUnclaimedPnlUSD,
+			}
 			if mustBoolFlag(cmd, "wait") {
 				receipt, err := waitForReceipt(cmd.Context(), ctx.Config.EVMRPCURL, txHash)
 				if err != nil {
@@ -1022,6 +1154,9 @@ func parseXRPToWei(amount string) (*big.Int, error) {
 	if !ok {
 		return nil, fmt.Errorf("invalid amount: %s", amount)
 	}
+	if value.Sign() <= 0 {
+		return nil, fmt.Errorf("amount must be greater than zero")
+	}
 	value.Mul(value, big.NewRat(1_000_000_000_000_000_000, 1))
 	result := new(big.Int)
 	if !value.IsInt() {
@@ -1115,6 +1250,11 @@ func buildXRPLPaymentURI(address string, destinationTag int, amount string) stri
 }
 
 func previewBridgeFunding(cmdCtx context.Context, ctx *cliContext, amount string) (*bridgeFundingPreview, error) {
+	if strings.TrimSpace(amount) != "" {
+		if _, err := parseXRPToWei(amount); err != nil {
+			return nil, err
+		}
+	}
 	preview, err := buildBridgeFundingPreview(cmdCtx, ctx, amount)
 	if err != nil {
 		return nil, err
@@ -1289,4 +1429,179 @@ func filterMarketsByCategory(response *api.MarketsResponse, category string, lim
 		Limit:  resultLimit,
 		Offset: offset,
 	}
+}
+
+func normalizeCLIArgs(args []string) []string {
+	if len(args) == 0 {
+		return nil
+	}
+	normalized := make([]string, 0, len(args))
+	amountFlags := map[string]struct{}{
+		"--amount": {},
+	}
+	for index := 0; index < len(args); index++ {
+		current := args[index]
+		if _, ok := amountFlags[current]; ok {
+			if index+2 < len(args) && args[index+1] == "--" && strings.HasPrefix(args[index+2], "-") {
+				normalized = append(normalized, current+"="+args[index+2])
+				index += 2
+				continue
+			}
+			if index+1 < len(args) && strings.HasPrefix(args[index+1], "-") && args[index+1] != "--" && !strings.HasPrefix(args[index+1], "--") {
+				normalized = append(normalized, current+"="+args[index+1])
+				index++
+				continue
+			}
+		}
+		normalized = append(normalized, current)
+	}
+	return normalized
+}
+
+func rewriteAmountFlagParseError(args []string, err error) error {
+	if err == nil {
+		return nil
+	}
+	message := err.Error()
+	if !strings.Contains(message, "unknown shorthand flag") {
+		return nil
+	}
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "--amount=-") {
+			return errors.New("amount must be greater than zero")
+		}
+	}
+	return nil
+}
+
+func filterPositionsByStatus(response *api.PositionsResponse, status string, limit int) *api.PositionsResponse {
+	if response == nil {
+		return &api.PositionsResponse{}
+	}
+	trimmedStatus := strings.TrimSpace(strings.ToLower(status))
+	if trimmedStatus == "" || trimmedStatus == "all" {
+		if limit > 0 && len(response.Items) > limit {
+			return &api.PositionsResponse{Items: response.Items[:limit], Total: response.Total}
+		}
+		return response
+	}
+	filtered := make([]api.PositionItem, 0, len(response.Items))
+	for _, item := range response.Items {
+		if positionMatchesStatus(item, trimmedStatus) {
+			filtered = append(filtered, item)
+		}
+	}
+	total := len(filtered)
+	if limit > 0 && len(filtered) > limit {
+		filtered = filtered[:limit]
+	}
+	return &api.PositionsResponse{Items: filtered, Total: total}
+}
+
+func positionMatchesStatus(item api.PositionItem, status string) bool {
+	current := strings.TrimSpace(strings.ToLower(item.Status))
+	switch status {
+	case "open":
+		return current == "open" || current == "active" || current == "unresolved"
+	case "won", "lost":
+		return current == status
+	default:
+		return current == status
+	}
+}
+
+func filterMarketsByPositions(response *api.MarketsResponse, positions *api.PositionsResponse) *api.MarketsResponse {
+	if response == nil || positions == nil {
+		return response
+	}
+	marketIDs := make(map[string]struct{}, len(positions.Items)*2)
+	for _, item := range positions.Items {
+		if trimmed := strings.TrimSpace(strings.ToLower(item.MarketID)); trimmed != "" {
+			marketIDs[trimmed] = struct{}{}
+		}
+		if trimmed := strings.TrimSpace(strings.ToLower(item.MarketAddress)); trimmed != "" {
+			marketIDs[trimmed] = struct{}{}
+		}
+	}
+	filtered := make([]api.MarketListItem, 0, len(response.Items))
+	for _, item := range response.Items {
+		if _, ok := marketIDs[strings.TrimSpace(strings.ToLower(item.ID))]; ok {
+			filtered = append(filtered, item)
+			continue
+		}
+		if _, ok := marketIDs[strings.TrimSpace(strings.ToLower(item.ContractAddress))]; ok {
+			filtered = append(filtered, item)
+		}
+	}
+	return &api.MarketsResponse{Items: filtered, Total: len(filtered), Limit: response.Limit, Offset: response.Offset}
+}
+
+func paginateMarkets(response *api.MarketsResponse, limit int, offset int) *api.MarketsResponse {
+	if response == nil {
+		return &api.MarketsResponse{}
+	}
+	items := response.Items
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > len(items) {
+		offset = len(items)
+	}
+	end := len(items)
+	if limit > 0 && offset+limit < end {
+		end = offset + limit
+	}
+	paged := items[offset:end]
+	resultLimit := len(paged)
+	if limit > 0 {
+		resultLimit = limit
+	}
+	return &api.MarketsResponse{Items: paged, Total: len(items), Limit: resultLimit, Offset: offset}
+}
+
+func enrichMarketsWithSpotPrices(ctx context.Context, cliCtx *cliContext, response *api.MarketsResponse) {
+	if response == nil {
+		return
+	}
+	for index := range response.Items {
+		item := &response.Items[index]
+		if strings.TrimSpace(item.ContractAddress) == "" || len(item.Outcomes) == 0 {
+			continue
+		}
+		state, err := loadMarketState(ctx, cliCtx.Config.EVMRPCURL, common.HexToAddress(item.ContractAddress))
+		if err != nil || state == nil {
+			continue
+		}
+		item.CurrentSpotPrices = marketSpotPrices(state, item.Outcomes)
+	}
+}
+
+func marketSpotPrices(state *evm.MarketState, outcomes []api.Outcome) []api.OutcomeSpotPrice {
+	if state == nil || len(outcomes) == 0 {
+		return nil
+	}
+	total := new(big.Int).Add(cloneBigInt(state.TotalPool), cloneBigInt(state.TotalVirtualPool))
+	if total.Sign() == 0 {
+		return nil
+	}
+	prices := make([]api.OutcomeSpotPrice, 0, len(outcomes))
+	for _, outcome := range outcomes {
+		if outcome.Index < 0 || outcome.Index >= len(state.OutcomePools) || outcome.Index >= len(state.VirtualSeeds) {
+			continue
+		}
+		numerator := new(big.Int).Add(cloneBigInt(state.OutcomePools[outcome.Index]), cloneBigInt(state.VirtualSeeds[outcome.Index]))
+		prices = append(prices, api.OutcomeSpotPrice{
+			Index:            outcome.Index,
+			Label:            outcome.Label,
+			CurrentSpotPrice: formatRatioPercent(numerator, total),
+		})
+	}
+	return prices
+}
+
+func cloneBigInt(value *big.Int) *big.Int {
+	if value == nil {
+		return big.NewInt(0)
+	}
+	return new(big.Int).Set(value)
 }
