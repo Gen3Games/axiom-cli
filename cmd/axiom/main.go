@@ -359,7 +359,7 @@ func newWalletCommand() *cobra.Command {
 		Use:   "balance",
 		Short: "Show EVM and XRPL balances for the active profile",
 		Long: strings.Join([]string{
-			"Show local wallet balances for the active profile.",
+			"Show EVM and XRPL balances for the active profile.",
 			"",
 			"By default the command returns both XRPL EVM and XRPL balances when those wallets",
 			"are configured. Use --evm or --xrpl to restrict the response to a single network.",
@@ -1604,4 +1604,19 @@ func cloneBigInt(value *big.Int) *big.Int {
 		return big.NewInt(0)
 	}
 	return new(big.Int).Set(value)
+}
+
+func formatRatioPercent(numerator *big.Int, denominator *big.Int) string {
+	if numerator == nil || denominator == nil || denominator.Sign() == 0 {
+		return "—"
+	}
+	scaled := new(big.Int).Quo(new(big.Int).Mul(cloneBigInt(numerator), big.NewInt(1_000_000)), cloneBigInt(denominator))
+	whole := new(big.Int).Quo(scaled, big.NewInt(10_000))
+	fraction := new(big.Int).Mod(scaled, big.NewInt(10_000))
+	fractionText := fmt.Sprintf("%04s", fraction.String())
+	fractionText = strings.TrimRight(fractionText, "0")
+	if fractionText == "" {
+		return whole.String() + "%"
+	}
+	return whole.String() + "." + fractionText + "%"
 }

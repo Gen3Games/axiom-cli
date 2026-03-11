@@ -221,3 +221,4 @@ If you want the local-XRPL-wallet path to appear as its own funding option, use 
 - XRPL defaults to `https://s1.ripple.com:51234`
 - For local backend development, override with `axiom config set --api-url http://localhost:3000/api/cli`
 - Run `go mod tidy` before release builds to keep the dependency graph minimal
+- GitHub release procedure and packaging conventions are documented in `docs/github-releases.md`

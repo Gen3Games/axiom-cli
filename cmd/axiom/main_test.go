@@ -662,7 +662,10 @@ func captureStdIO(run func() error) (string, string, error) {
 
 func setCLIEnv(t *testing.T) {
 	t.Helper()
-	t.Setenv("APPDATA", t.TempDir())
+	configHome := t.TempDir()
+	t.Setenv("APPDATA", configHome)
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	t.Setenv("HOME", configHome)
 	t.Setenv("AXIOM_CLI_SECRET_STORE", "file")
 	t.Setenv("AXIOM_CLI_SECRET_PASSPHRASE", "test-passphrase")
 }
