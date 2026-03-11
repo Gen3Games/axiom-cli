@@ -26,11 +26,11 @@ import (
 const xrplEVMChainID int64 = 1440000
 
 var (
-	flagAPIURL  string
-	flagRPCURL  string
-	flagXRPLURL string
-	flagJSON    bool
-	flagProfile string
+	flagAPIURL          string
+	flagRPCURL          string
+	flagXRPLURL         string
+	flagJSON            bool
+	flagProfile         string
 	submitBridgePayment = axrpl.SubmitBridgePayment
 )
 
@@ -64,9 +64,9 @@ func main() {
 
 func newRootCommand() *cobra.Command {
 	rootCmd := &cobra.Command{
-		Use:   "axiom",
-		Short: "Axiom Protocol CLI for XRPL EVM users",
-		Long:  "Axiom CLI manages XRPL EVM wallets, funding flows, market discovery, predictions, claims, and profile analytics.",
+		Use:           "axiom",
+		Short:         "Axiom Protocol CLI for XRPL EVM users",
+		Long:          "Axiom CLI manages XRPL EVM wallets, funding flows, market discovery, predictions, claims, and profile analytics.",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
