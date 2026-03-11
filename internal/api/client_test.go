@@ -49,7 +49,7 @@ func TestRegisterWalletSendsExpectedHeadersAndBody(t *testing.T) {
 		WalletAddress: "0xabc",
 		Signature:     "0xsig",
 		DeviceID:      "device-123",
-		IssuedAt:      "2026-03-10T00:00:00Z",
+		IssuedAt:      "2026-03-10T00:00:00.000Z",
 	})
 	if err != nil {
 		t.Fatalf("RegisterWallet() error = %v", err)

@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -272,29 +273,22 @@ func TestWalletAuthAndReadCommandsWithMockAPI(t *testing.T) {
 	}
 }
 
-func TestAuthRegisterRetriesWithLowercaseWalletAddress(t *testing.T) {
+func TestAuthRegisterUsesMillisecondPrecisionIssuedAt(t *testing.T) {
 	setCLIEnv(t)
 
 	privateKey := "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
-	wallet, err := evm.WalletFromPrivateKeyHex(privateKey)
+	_, err := evm.WalletFromPrivateKeyHex(privateKey)
 	if err != nil {
 		t.Fatalf("WalletFromPrivateKeyHex() error = %v", err)
 	}
 
-	var requests []api.RegisterRequest
+	var request api.RegisterRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/api/cli/register":
-			var request api.RegisterRequest
 			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 				t.Fatalf("Decode(register body) error = %v", err)
-			}
-			requests = append(requests, request)
-			if request.WalletAddress != strings.ToLower(request.WalletAddress) {
-				w.WriteHeader(http.StatusUnauthorized)
-				_, _ = w.Write([]byte(`{"error":"Invalid wallet signature."}`))
-				return
 			}
 			_ = json.NewEncoder(w).Encode(api.RegisterResponse{
 				WalletAddress:         request.WalletAddress,
@@ -317,20 +311,13 @@ func TestAuthRegisterRetriesWithLowercaseWalletAddress(t *testing.T) {
 	if err != nil {
 		t.Fatalf("auth register error = %v\nstderr:\n%s", err, stderr)
 	}
-	if len(requests) != 2 {
-		t.Fatalf("register request count = %d, want 2", len(requests))
+	if matched, err := regexp.MatchString(`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$`, request.IssuedAt); err != nil {
+		t.Fatalf("regexp.MatchString() error = %v", err)
+	} else if !matched {
+		t.Fatalf("issuedAt = %q, want millisecond-precision ISO timestamp", request.IssuedAt)
 	}
-	if requests[0].WalletAddress != wallet.Address().Hex() {
-		t.Fatalf("first walletAddress = %q, want %q", requests[0].WalletAddress, wallet.Address().Hex())
-	}
-	if requests[1].WalletAddress != strings.ToLower(wallet.Address().Hex()) {
-		t.Fatalf("second walletAddress = %q, want %q", requests[1].WalletAddress, strings.ToLower(wallet.Address().Hex()))
-	}
-	if requests[0].IssuedAt != requests[1].IssuedAt {
-		t.Fatalf("issuedAt mismatch between retries: %q vs %q", requests[0].IssuedAt, requests[1].IssuedAt)
-	}
-	if !strings.Contains(stdout, strings.ToLower(wallet.Address().Hex())) || !strings.Contains(stdout, "4242") {
-		t.Fatalf("auth register stdout missing successful retry payload\nstdout:\n%s", stdout)
+	if !strings.Contains(stdout, request.WalletAddress) || !strings.Contains(stdout, "4242") {
+		t.Fatalf("auth register stdout missing successful payload\nstdout:\n%s", stdout)
 	}
 }
 
@@ -341,6 +328,13 @@ func TestCommandHelperFunctions(t *testing.T) {
 	message := buildRegistrationMessage("0xabc", "device-123", issuedAt)
 	if !strings.Contains(message, "Wallet: 0xabc") || !strings.Contains(message, "Device: device-123") {
 		t.Fatalf("buildRegistrationMessage() = %q, want wallet and device markers", message)
+	}
+	if !strings.Contains(message, "Issued At: 2026-03-10T00:00:00.000Z") {
+		t.Fatalf("buildRegistrationMessage() = %q, want millisecond-precision issued-at line", message)
+	}
+	formattedIssuedAt := formatRegistrationIssuedAt(time.Date(2026, time.March, 10, 0, 0, 0, 123456789, time.UTC))
+	if formattedIssuedAt != "2026-03-10T00:00:00.123Z" {
+		t.Fatalf("formatRegistrationIssuedAt() = %q, want %q", formattedIssuedAt, "2026-03-10T00:00:00.123Z")
 	}
 
 	wei, err := parseXRPToWei("1.5")

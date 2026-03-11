@@ -981,35 +981,21 @@ func buildRegistrationMessage(walletAddress string, deviceID string, issuedAt ti
 		"Version: 2",
 		fmt.Sprintf("Wallet: %s", walletAddress),
 		fmt.Sprintf("Device: %s", strings.TrimSpace(deviceID)),
-		fmt.Sprintf("Issued At: %s", issuedAt.UTC().Format(time.RFC3339)),
+		fmt.Sprintf("Issued At: %s", formatRegistrationIssuedAt(issuedAt)),
 		"Network: xrpl-mainnet",
 		"Purpose: create or refresh my Axiom CLI profile and funding destination tag.",
 	}, "\n")
+}
+
+func formatRegistrationIssuedAt(issuedAt time.Time) string {
+	return issuedAt.UTC().Truncate(time.Millisecond).Format("2006-01-02T15:04:05.000Z")
 }
 
 func registerWalletWithCompat(ctx context.Context, cliCtx *cliContext, wallet *evm.Wallet) (*api.RegisterResponse, error) {
 	issuedAt := time.Now().UTC()
 	walletAddress := wallet.Address().Hex()
 
-	response, err := signAndRegisterWallet(ctx, cliCtx, wallet, walletAddress, issuedAt)
-	if err == nil {
-		return response, nil
-	}
-	if !isInvalidWalletSignatureError(err) {
-		return nil, err
-	}
-
-	lowercaseWalletAddress := strings.ToLower(walletAddress)
-	if lowercaseWalletAddress == walletAddress {
-		return nil, err
-	}
-
-	response, retryErr := signAndRegisterWallet(ctx, cliCtx, wallet, lowercaseWalletAddress, issuedAt)
-	if retryErr == nil {
-		return response, nil
-	}
-
-	return nil, err
+	return signAndRegisterWallet(ctx, cliCtx, wallet, walletAddress, issuedAt)
 }
 
 func signAndRegisterWallet(ctx context.Context, cliCtx *cliContext, wallet *evm.Wallet, walletAddress string, issuedAt time.Time) (*api.RegisterResponse, error) {
@@ -1023,7 +1009,7 @@ func signAndRegisterWallet(ctx context.Context, cliCtx *cliContext, wallet *evm.
 		WalletAddress: walletAddress,
 		Signature:     signature,
 		DeviceID:      cliCtx.Config.DeviceID,
-		IssuedAt:      issuedAt.Format(time.RFC3339),
+		IssuedAt:      formatRegistrationIssuedAt(issuedAt),
 	})
 }
 
