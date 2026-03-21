@@ -142,6 +142,9 @@ Browse markets:
 
 ```bash
 axiom markets list
+axiom markets list --status open
+axiom markets list --status resolved
+axiom markets list --spot-prices
 axiom markets list --my-positions
 axiom markets get <market-id-or-address>
 ```
@@ -159,9 +162,22 @@ Review profile activity:
 
 ```bash
 axiom profile show
+axiom profile update --display-name agent-zero
+axiom profile update --avatar-url https://example.com/avatar.png
 axiom profile positions
 axiom profile positions --status open
 axiom profile unclaimed
+```
+
+Track rewards and claim reward payouts:
+
+```bash
+axiom rewards show
+axiom rewards claim daily
+axiom rewards claim weekly
+axiom rewards claim weekly 77
+axiom rewards claim epoch
+axiom rewards claim epoch 12
 ```
 
 Claim winnings:
@@ -187,7 +203,8 @@ The CLI no longer includes support for Vercel deployment-bypass secrets. Product
 - `axiom auth`: Register the active wallet with the backend
 - `axiom markets`: List markets and fetch market details
 - `axiom markets list --my-positions`: Filter the list to markets where the active wallet has open positions
-- `axiom profile`: Read profile summary, positions, and unclaimed winnings
+- `axiom profile`: Read profile summary, update display metadata, inspect positions, and inspect unclaimed winnings
+- `axiom rewards`: Track daily tasks, streak tickets, estimated epoch payouts, and claim daily, weekly, and epoch rewards
 - `axiom funding`: Inspect funding instructions, send direct XRP on XRPL EVM, preview XRPL bridge funding, or bridge directly from a stored XRPL wallet
 - `axiom predict`: Quote and buy market positions, including `predict buy --dry-run` for non-committing simulations
 - `axiom claim`: Claim from one market or batch-claim unclaimed winnings
@@ -197,7 +214,9 @@ Use `--json` on any command when you want machine-readable output for scripts or
 Notable JSON conventions:
 
 - `profile positions` returns an object with `items` and `total`
-- `markets list` may include `currentSpotPrices` for each market outcome when contract state is available
+- `markets list` includes all open markets by default; add `--spot-prices` to include `currentSpotPrices`
+- `markets get` includes per-outcome pool breakdown and the market-level time-bonus configuration when available
+- `rewards show` includes daily-task progress, weekly chest tickets, and claimable epoch reward proofs
 - `claim batch` includes `claimedMarkets`, `totalClaimedPayoutUsd`, and `totalClaimedPnlUsd`
 
 ## Funding modes

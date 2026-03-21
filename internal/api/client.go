@@ -73,6 +73,19 @@ type OutcomeSpotPrice struct {
 	CurrentSpotPrice string `json:"currentSpotPrice"`
 }
 
+type OutcomePoolBreakdown struct {
+	Index     int    `json:"index"`
+	Label     string `json:"label"`
+	PoolXRP   string `json:"poolXrp"`
+	SpotPrice string `json:"spotPrice"`
+}
+
+type MarketPoolBreakdown struct {
+	TotalPoolXRP string                 `json:"totalPoolXrp"`
+	MaxTimeBonus string                 `json:"maxTimeBonus"`
+	Outcomes     []OutcomePoolBreakdown `json:"outcomes"`
+}
+
 type MarketListItem struct {
 	ID                string             `json:"id"`
 	MarketType        string             `json:"marketType"`
@@ -108,12 +121,22 @@ type MarketsResponse struct {
 
 type MarketDetails struct {
 	MarketListItem
-	SettlementToken      string   `json:"settlementToken"`
-	Creator              string   `json:"creator"`
-	OwnerAddress         string   `json:"ownerAddress"`
-	ResolvedOutcomeIndex *int     `json:"resolvedOutcomeIndex"`
-	ResolutionCriteria   string   `json:"resolutionCriteria"`
-	Tags                 []string `json:"tags"`
+	SettlementToken      string               `json:"settlementToken"`
+	Creator              string               `json:"creator"`
+	OwnerAddress         string               `json:"ownerAddress"`
+	ResolvedOutcomeIndex *int                 `json:"resolvedOutcomeIndex"`
+	ResolutionCriteria   string               `json:"resolutionCriteria"`
+	Tags                 []string             `json:"tags"`
+	PoolBreakdown        *MarketPoolBreakdown `json:"poolBreakdown"`
+}
+
+type UpdateProfileRequest struct {
+	WalletAddress string  `json:"walletAddress"`
+	Signature     string  `json:"signature"`
+	DeviceID      string  `json:"deviceId"`
+	IssuedAt      string  `json:"issuedAt"`
+	DisplayName   *string `json:"displayName,omitempty"`
+	AvatarURL     *string `json:"avatarUrl,omitempty"`
 }
 
 type ProfileSummary struct {
@@ -360,6 +383,176 @@ type FundingResponse struct {
 	RecentHistory         []FundingHistoryItem `json:"recentHistory"`
 }
 
+type RewardsSummary struct {
+	Address             string     `json:"address"`
+	TotalReferrals      int        `json:"totalReferrals"`
+	CurrentEpochID      *int       `json:"currentEpochId"`
+	CurrentEpochEndsAt  *time.Time `json:"currentEpochEndsAt"`
+	CurrentEpochPoints  int        `json:"currentEpochPoints"`
+	TradingPoints       int        `json:"tradingPoints"`
+	ReferralPoints      int        `json:"referralPoints"`
+	BonusPoints         int        `json:"bonusPoints"`
+	PoolXRP             *float64   `json:"poolXrp"`
+	GlobalTotalPoints   *int       `json:"globalTotalPoints"`
+	PoolSharePercentage *float64   `json:"poolSharePercentage"`
+	EstimatedPayoutXRP  *float64   `json:"estimatedPayoutXrp"`
+}
+
+func (r *RewardsSummary) UnmarshalJSON(data []byte) error {
+	type rewardsSummaryAlias struct {
+		Address             string          `json:"address"`
+		TotalReferrals      json.RawMessage `json:"totalReferrals"`
+		CurrentEpochID      *int            `json:"currentEpochId"`
+		CurrentEpochEndsAt  *time.Time      `json:"currentEpochEndsAt"`
+		CurrentEpochPoints  int             `json:"currentEpochPoints"`
+		TradingPoints       int             `json:"tradingPoints"`
+		ReferralPoints      int             `json:"referralPoints"`
+		BonusPoints         int             `json:"bonusPoints"`
+		PoolXRP             *float64        `json:"poolXrp"`
+		GlobalTotalPoints   *int            `json:"globalTotalPoints"`
+		PoolSharePercentage *float64        `json:"poolSharePercentage"`
+		EstimatedPayoutXRP  *float64        `json:"estimatedPayoutXrp"`
+	}
+
+	var aux rewardsSummaryAlias
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+
+	totalReferrals, err := parseFlexibleInt(aux.TotalReferrals)
+	if err != nil {
+		return fmt.Errorf("parse totalReferrals: %w", err)
+	}
+
+	r.Address = aux.Address
+	r.TotalReferrals = totalReferrals
+	r.CurrentEpochID = aux.CurrentEpochID
+	r.CurrentEpochEndsAt = aux.CurrentEpochEndsAt
+	r.CurrentEpochPoints = aux.CurrentEpochPoints
+	r.TradingPoints = aux.TradingPoints
+	r.ReferralPoints = aux.ReferralPoints
+	r.BonusPoints = aux.BonusPoints
+	r.PoolXRP = aux.PoolXRP
+	r.GlobalTotalPoints = aux.GlobalTotalPoints
+	r.PoolSharePercentage = aux.PoolSharePercentage
+	r.EstimatedPayoutXRP = aux.EstimatedPayoutXRP
+	return nil
+}
+
+func parseFlexibleInt(data json.RawMessage) (int, error) {
+	trimmed := strings.TrimSpace(string(data))
+	if trimmed == "" || trimmed == "null" {
+		return 0, nil
+	}
+
+	var number int
+	if err := json.Unmarshal(data, &number); err == nil {
+		return number, nil
+	}
+
+	var asString string
+	if err := json.Unmarshal(data, &asString); err == nil {
+		parsed, convErr := strconv.Atoi(strings.TrimSpace(asString))
+		if convErr != nil {
+			return 0, convErr
+		}
+		return parsed, nil
+	}
+
+	return 0, fmt.Errorf("unsupported integer value %s", trimmed)
+}
+
+type DailyTaskStatus struct {
+	HasPredictTask          bool `json:"hasPredictTask"`
+	HasDailyTwitterPostTask bool `json:"hasDailyTwitterPostTask"`
+	HasBigBetTask           bool `json:"hasBigBetTask"`
+	HasClaimWinningsTask    bool `json:"hasClaimWinningsTask"`
+	HasMultiMarketTask      bool `json:"hasMultiMarketTask"`
+	CompletedCount          int  `json:"completedCount"`
+	RequiredCount           int  `json:"requiredCount"`
+	HasCompletedRequirement bool `json:"hasCompletedRequirement"`
+	DailyChestClaimed       bool `json:"dailyChestClaimed"`
+}
+
+type RewardsStreak struct {
+	CurrentStreak                    int        `json:"currentStreak"`
+	LongestStreak                    int        `json:"longestStreak"`
+	LastActivityDate                 *time.Time `json:"lastActivityDate"`
+	DaysUntilLottery                 int        `json:"daysUntilLottery"`
+	HasAvailableLotteryTicket        bool       `json:"hasAvailableLotteryTicket"`
+	CompletedDailyTasksCount         int        `json:"completedDailyTasksCount"`
+	RequiredDailyTasksCount          int        `json:"requiredDailyTasksCount"`
+	HasCompletedDailyTaskRequirement bool       `json:"hasCompletedDailyTaskRequirement"`
+	HasCompletedDailyBetTask         bool       `json:"hasCompletedDailyBetTask"`
+	HasCompletedDailyTwitterPostTask bool       `json:"hasCompletedDailyTwitterPostTask"`
+	HasCompletedBigBetTask           bool       `json:"hasCompletedBigBetTask"`
+	HasCompletedClaimWinningsTask    bool       `json:"hasCompletedClaimWinningsTask"`
+	HasCompletedMultiMarketTask      bool       `json:"hasCompletedMultiMarketTask"`
+}
+
+type LotteryTicketInfo struct {
+	ID          int        `json:"id"`
+	Status      string     `json:"status"`
+	PrizeType   string     `json:"prizeType"`
+	PrizeAmount *int       `json:"prizeAmount"`
+	PrizeLabel  string     `json:"prizeLabel"`
+	EarnedAt    time.Time  `json:"earnedAt"`
+	ClaimedAt   *time.Time `json:"claimedAt"`
+}
+
+type EpochReward struct {
+	EpochID    int       `json:"epochId"`
+	Points     int       `json:"points"`
+	AmountWei  string    `json:"amountWei"`
+	AmountXRP  string    `json:"amountXrp"`
+	Proof      []string  `json:"proof"`
+	HasClaimed bool      `json:"hasClaimed"`
+	DateEnded  time.Time `json:"dateEnded"`
+	IsExpired  bool      `json:"isExpired"`
+	Claimable  bool      `json:"claimable"`
+}
+
+type RewardsResponse struct {
+	WalletAddress                 string              `json:"walletAddress"`
+	Summary                       *RewardsSummary     `json:"summary"`
+	DailyTasks                    *DailyTaskStatus    `json:"dailyTasks"`
+	Streak                        *RewardsStreak      `json:"streak"`
+	LotteryTickets                []LotteryTicketInfo `json:"lotteryTickets"`
+	EpochRewards                  []EpochReward       `json:"epochRewards"`
+	TotalClaimableEpochRewardsXRP string              `json:"totalClaimableEpochRewardsXrp"`
+}
+
+type RewardsActionRequest struct {
+	WalletAddress string `json:"walletAddress"`
+	Signature     string `json:"signature"`
+	DeviceID      string `json:"deviceId"`
+	IssuedAt      string `json:"issuedAt"`
+	TxHash        string `json:"txHash,omitempty"`
+}
+
+type DailyChestClaimResponse struct {
+	Success     bool   `json:"success"`
+	PrizeAmount *int   `json:"prizeAmount"`
+	PrizeLabel  string `json:"prizeLabel"`
+}
+
+type WeeklyChestClaimResponse struct {
+	Success               bool   `json:"success"`
+	PrizeType             string `json:"prizeType"`
+	PrizeAmount           *int   `json:"prizeAmount"`
+	PrizeLabel            string `json:"prizeLabel"`
+	IsConsolation         bool   `json:"isConsolation"`
+	CashConvertedToPoints bool   `json:"cashConvertedToPoints"`
+}
+
+type EpochRewardClaimResponse struct {
+	Success       bool        `json:"success"`
+	WalletAddress string      `json:"walletAddress"`
+	EpochID       int         `json:"epochId"`
+	TxHash        string      `json:"txHash"`
+	ClaimedReward EpochReward `json:"claimedReward"`
+}
+
 type apiError struct {
 	Error string `json:"error"`
 }
@@ -474,6 +667,14 @@ func (c *Client) GetProfile(ctx context.Context, address string) (*ProfileSummar
 	return &out, nil
 }
 
+func (c *Client) UpdateProfile(ctx context.Context, address string, request UpdateProfileRequest) (*ProfileSummary, error) {
+	var out ProfileSummary
+	if err := c.doJSON(ctx, http.MethodPost, path.Join("profile", address), request, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 func (c *Client) GetPositions(ctx context.Context, address string, status string, limit int) (*PositionsResponse, error) {
 	values := url.Values{}
 	if status != "" {
@@ -508,6 +709,38 @@ func (c *Client) GetFunding(ctx context.Context, address string, limit int) (*Fu
 	}
 	var out FundingResponse
 	if err := c.doJSON(ctx, http.MethodGet, requestPath, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *Client) GetRewards(ctx context.Context, address string) (*RewardsResponse, error) {
+	var out RewardsResponse
+	if err := c.doJSON(ctx, http.MethodGet, path.Join("profile", address, "rewards"), nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *Client) ClaimDailyChest(ctx context.Context, address string, request RewardsActionRequest) (*DailyChestClaimResponse, error) {
+	var out DailyChestClaimResponse
+	if err := c.doJSON(ctx, http.MethodPost, path.Join("profile", address, "rewards", "daily-chest"), request, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *Client) ClaimWeeklyChest(ctx context.Context, address string, ticketID int, request RewardsActionRequest) (*WeeklyChestClaimResponse, error) {
+	var out WeeklyChestClaimResponse
+	if err := c.doJSON(ctx, http.MethodPost, path.Join("profile", address, "rewards", "lottery", strconv.Itoa(ticketID)), request, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *Client) SyncEpochRewardClaim(ctx context.Context, address string, epochID int, request RewardsActionRequest) (*EpochRewardClaimResponse, error) {
+	var out EpochRewardClaimResponse
+	if err := c.doJSON(ctx, http.MethodPost, path.Join("profile", address, "rewards", "epochs", strconv.Itoa(epochID)), request, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil

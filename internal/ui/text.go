@@ -45,6 +45,10 @@ func Render(value any) string {
 		return renderFunding(*typed)
 	case api.FundingResponse:
 		return renderFunding(typed)
+	case *api.RewardsResponse:
+		return renderRewards(*typed)
+	case api.RewardsResponse:
+		return renderRewards(typed)
 	case *evm.BuyQuote:
 		return renderBuyQuote(*typed)
 	case evm.BuyQuote:
@@ -162,7 +166,34 @@ func renderMarketDetails(market api.MarketDetails) string {
 		}
 		lines = append(lines, "", heading("Outcomes"), renderTable([]string{"Index", "Label", "Description"}, rows))
 	}
+	if market.PoolBreakdown != nil && len(market.PoolBreakdown.Outcomes) > 0 {
+		lines = append(lines, "", heading("Pool Breakdown"), renderKeyValueRows([][2]string{
+			{"Total Pool", market.PoolBreakdown.TotalPoolXRP + " XRP"},
+			{"Max Time Bonus", formatMaxTimeBonus(market.PoolBreakdown.MaxTimeBonus)},
+		}))
+		rows := make([][]string, 0, len(market.PoolBreakdown.Outcomes))
+		for _, outcome := range market.PoolBreakdown.Outcomes {
+			rows = append(rows, []string{
+				fmt.Sprintf("%d", outcome.Index),
+				outcome.Label,
+				outcome.PoolXRP,
+				outcome.SpotPrice,
+			})
+		}
+		lines = append(lines, renderTable([]string{"Index", "Label", "Pool XRP", "Spot Odds"}, rows))
+	}
 	return strings.Join(lines, "\n")
+}
+
+func formatMaxTimeBonus(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" || trimmed == "0" || trimmed == "0.0" || trimmed == "0.00" || trimmed == "0.000000000000000000" {
+		return "Disabled"
+	}
+	if strings.HasSuffix(trimmed, "x") {
+		return trimmed
+	}
+	return trimmed + "x"
 }
 
 func renderProfile(profile api.ProfileSummary) string {
@@ -172,6 +203,7 @@ func renderProfile(profile api.ProfileSummary) string {
 		renderKeyValueRows([][2]string{
 			{"Wallet", profile.WalletAddress},
 			{"Display Name", profile.DisplayName},
+			{"Avatar URL", profile.AvatarURL},
 			{"Destination Tag", optionalInt(profile.DepositDestinationTag)},
 			{"Member Since", optionalTime(profile.MemberSince)},
 			{"Last Login", optionalTime(profile.LastLoginAt)},
@@ -285,6 +317,85 @@ func renderFunding(response api.FundingResponse) string {
 	return strings.Join(lines, "\n")
 }
 
+func renderRewards(response api.RewardsResponse) string {
+	lines := []string{
+		heading("Rewards"),
+		renderKeyValueRows([][2]string{{"Wallet", response.WalletAddress}}),
+	}
+
+	if response.Summary != nil {
+		summary := response.Summary
+		lines = append(lines, "", heading("Epoch Summary"), renderKeyValueRows([][2]string{
+			{"Current Epoch", optionalInt(summary.CurrentEpochID)},
+			{"Epoch Ends", optionalTime(summary.CurrentEpochEndsAt)},
+			{"Axiom Points", fmt.Sprintf("%d", summary.CurrentEpochPoints)},
+			{"Trading Points", fmt.Sprintf("%d", summary.TradingPoints)},
+			{"Referral Points", fmt.Sprintf("%d", summary.ReferralPoints)},
+			{"Bonus Points", fmt.Sprintf("%d", summary.BonusPoints)},
+			{"Total Referrals", fmt.Sprintf("%d", summary.TotalReferrals)},
+			{"Estimated Payout", optionalFloat(summary.EstimatedPayoutXRP, " XRP")},
+			{"Pool Share", optionalFloat(summary.PoolSharePercentage, "%")},
+			{"Claimable Epoch Rewards", response.TotalClaimableEpochRewardsXRP + " XRP"},
+		}))
+	}
+
+	if response.DailyTasks != nil {
+		tasks := response.DailyTasks
+		lines = append(lines, "", heading("Daily Tasks"), renderKeyValueRows([][2]string{
+			{"Completed", fmt.Sprintf("%d/%d", tasks.CompletedCount, tasks.RequiredCount)},
+			{"Requirement Met", yesNo(tasks.HasCompletedRequirement)},
+			{"Daily Chest Claimed", yesNo(tasks.DailyChestClaimed)},
+			{"Predict Task", yesNo(tasks.HasPredictTask)},
+			{"Twitter Post Task", yesNo(tasks.HasDailyTwitterPostTask)},
+			{"Big Bet Task", yesNo(tasks.HasBigBetTask)},
+			{"Claim Winnings Task", yesNo(tasks.HasClaimWinningsTask)},
+			{"Multi-Market Task", yesNo(tasks.HasMultiMarketTask)},
+		}))
+	}
+
+	if response.Streak != nil {
+		streak := response.Streak
+		lines = append(lines, "", heading("Streak"), renderKeyValueRows([][2]string{
+			{"Current Streak", fmt.Sprintf("%d", streak.CurrentStreak)},
+			{"Longest Streak", fmt.Sprintf("%d", streak.LongestStreak)},
+			{"Last Activity", optionalTime(streak.LastActivityDate)},
+			{"Days Until Weekly Chest", fmt.Sprintf("%d", streak.DaysUntilLottery)},
+			{"Available Weekly Ticket", yesNo(streak.HasAvailableLotteryTicket)},
+		}))
+	}
+
+	if len(response.LotteryTickets) > 0 {
+		rows := make([][]string, 0, len(response.LotteryTickets))
+		for _, ticket := range response.LotteryTickets {
+			rows = append(rows, []string{
+				fmt.Sprintf("%d", ticket.ID),
+				ticket.Status,
+				firstNonEmpty(ticket.PrizeType, "-"),
+				optionalInt(ticket.PrizeAmount),
+				firstNonEmpty(ticket.PrizeLabel, "-"),
+				formatTime(ticket.EarnedAt),
+			})
+		}
+		lines = append(lines, "", heading("Weekly Chest Tickets"), renderTable([]string{"ID", "Status", "Prize Type", "Amount", "Label", "Earned"}, rows))
+	}
+
+	if len(response.EpochRewards) > 0 {
+		rows := make([][]string, 0, len(response.EpochRewards))
+		for _, reward := range response.EpochRewards {
+			rows = append(rows, []string{
+				fmt.Sprintf("%d", reward.EpochID),
+				fmt.Sprintf("%d", reward.Points),
+				reward.AmountXRP,
+				epochRewardStatus(reward),
+				formatTime(reward.DateEnded),
+			})
+		}
+		lines = append(lines, "", heading("Epoch Rewards"), renderTable([]string{"Epoch", "Points", "XRP", "Status", "Ended"}, rows))
+	}
+
+	return strings.Join(lines, "\n")
+}
+
 func renderBuyQuote(quote evm.BuyQuote) string {
 	return strings.Join([]string{
 		heading("Predict Quote"),
@@ -305,6 +416,33 @@ func renderBuyQuote(quote evm.BuyQuote) string {
 		"",
 		note("Estimates use the current pool state and assume the market resolved immediately after this buy with no further bets or fees changes."),
 	}, "\n")
+}
+
+func yesNo(value bool) string {
+	if value {
+		return "yes"
+	}
+	return "no"
+}
+
+func optionalFloat(value *float64, suffix string) string {
+	if value == nil {
+		return "-"
+	}
+	return formatFloat(*value, 2) + suffix
+}
+
+func epochRewardStatus(reward api.EpochReward) string {
+	if reward.HasClaimed {
+		return "claimed"
+	}
+	if reward.Claimable {
+		return "claimable"
+	}
+	if reward.IsExpired {
+		return "expired"
+	}
+	return "pending"
 }
 
 func renderMap(values map[string]any) string {

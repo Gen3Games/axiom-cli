@@ -86,10 +86,17 @@ Query parameters:
 - `limit`
 - `offset`
 
+`status` accepts `open`, `active`, `resolved`, `upcoming`, and `all`.
+
+- `open` means unresolved markets whose close time has not passed yet
+- `active` means markets that have started and are still open for bets
+
+`limit=0` means "return all matching markets".
+
 CLI post-processing:
 
 - `axiom markets list --my-positions` filters the result locally against `GET /profile/{address}/positions`
-- the CLI may attach `currentSpotPrices` per market in its own JSON output after reading on-chain pool state
+- the CLI only attaches `currentSpotPrices` when the user passes `--spot-prices`
 
 Response body:
 
@@ -159,7 +166,19 @@ Additional response fields beyond the list item shape:
   "ownerAddress": "0x...",
   "resolvedOutcomeIndex": 0,
   "resolutionCriteria": "...",
-  "tags": ["crypto", "daily"]
+  "tags": ["crypto", "daily"],
+  "poolBreakdown": {
+    "totalPoolXrp": "100.0",
+    "maxTimeBonus": "1.5",
+    "outcomes": [
+      {
+        "index": 0,
+        "label": "Yes",
+        "poolXrp": "60.0",
+        "spotPrice": "56.66%"
+      }
+    ]
+  }
 }
 ```
 
@@ -187,6 +206,23 @@ Response body fields include:
 - `stats.volumeUsd`
 - `stats.winRate`
 - `stats.tradeCount`
+
+### `POST /profile/{address}`
+
+Updates a CLI-authenticated profile's display metadata.
+
+Request body fields:
+
+- `walletAddress`
+- `signature`
+- `deviceId`
+- `issuedAt`
+- `displayName` optional
+- `avatarUrl` optional
+
+At least one of `displayName` or `avatarUrl` must be present.
+
+The response body matches `GET /profile/{address}`.
 
 ### `GET /profile/{address}/positions`
 
@@ -234,6 +270,75 @@ Response body contains:
 - `summary.marketCount`
 - `summary.seriesCount`
 - `items[]` with market identifiers, payout values, resolved outcome, and timestamps
+
+### `GET /profile/{address}/rewards`
+
+Returns the CLI rewards dashboard for a wallet.
+
+Response body contains:
+
+- `walletAddress`
+- `summary.currentEpochId`
+- `summary.currentEpochEndsAt`
+- `summary.currentEpochPoints`
+- `summary.estimatedPayoutXrp`
+- `summary.totalReferrals`
+- `dailyTasks.completedCount`
+- `dailyTasks.requiredCount`
+- `dailyTasks.dailyChestClaimed`
+- `streak.currentStreak`
+- `streak.daysUntilLottery`
+- `lotteryTickets[]`
+- `epochRewards[]` with `epochId`, `points`, `amountWei`, `amountXrp`, `proof`, `hasClaimed`, `isExpired`, and `claimable`
+- `totalClaimableEpochRewardsXrp`
+
+### `POST /profile/{address}/rewards/daily-chest`
+
+Claims the daily chest reward for a CLI-authenticated wallet.
+
+Request body fields:
+
+- `walletAddress`
+- `signature`
+- `deviceId`
+- `issuedAt`
+
+Response body:
+
+```json
+{
+  "success": true,
+  "prizeAmount": 500,
+  "prizeLabel": "500 points"
+}
+```
+
+### `POST /profile/{address}/rewards/lottery/{ticketId}`
+
+Claims an available weekly chest ticket for a CLI-authenticated wallet.
+
+Request body fields:
+
+- `walletAddress`
+- `signature`
+- `deviceId`
+- `issuedAt`
+
+Response body contains `success`, `prizeType`, `prizeAmount`, `prizeLabel`, `isConsolation`, and `cashConvertedToPoints`.
+
+### `POST /profile/{address}/rewards/epochs/{epochId}`
+
+Marks a weekly epoch reward as claimed after the CLI has already submitted the on-chain `AxiomRewards.claim(...)` transaction.
+
+Request body fields:
+
+- `walletAddress`
+- `signature`
+- `deviceId`
+- `issuedAt`
+- `txHash`
+
+Response body contains the synced `claimedReward` entry plus the submitted `txHash`.
 
 ### `GET /funding/{address}`
 

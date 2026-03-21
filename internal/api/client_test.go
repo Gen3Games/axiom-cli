@@ -256,6 +256,190 @@ func TestGetProfileAcceptsVariantResponseShapes(t *testing.T) {
 	}
 }
 
+func TestUpdateProfileSendsExpectedBody(t *testing.T) {
+	t.Parallel()
+
+	var gotRequest UpdateProfileRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/cli/profile/0xabc" {
+			t.Fatalf("request path = %q, want %q", r.URL.Path, "/api/cli/profile/0xabc")
+		}
+		if r.Method != http.MethodPost {
+			t.Fatalf("request method = %q, want %q", r.Method, http.MethodPost)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&gotRequest); err != nil {
+			t.Fatalf("Decode(request body) error = %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(ProfileSummary{
+			WalletAddress: "0xabc",
+			DisplayName:   "agent-zero",
+			AvatarURL:     "https://example.com/avatar.png",
+		})
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL+"/api/cli", "device-123")
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	displayName := "agent-zero"
+	avatarURL := "https://example.com/avatar.png"
+	profile, err := client.UpdateProfile(context.Background(), "0xabc", UpdateProfileRequest{
+		WalletAddress: "0xabc",
+		Signature:     "0xsig",
+		DeviceID:      "device-123",
+		IssuedAt:      "2026-03-10T00:00:00.000Z",
+		DisplayName:   &displayName,
+		AvatarURL:     &avatarURL,
+	})
+	if err != nil {
+		t.Fatalf("UpdateProfile() error = %v", err)
+	}
+	if gotRequest.Signature != "0xsig" {
+		t.Fatalf("signature = %q, want %q", gotRequest.Signature, "0xsig")
+	}
+	if gotRequest.DisplayName == nil || *gotRequest.DisplayName != displayName {
+		t.Fatalf("displayName = %#v, want %q", gotRequest.DisplayName, displayName)
+	}
+	if profile.AvatarURL != avatarURL {
+		t.Fatalf("AvatarURL = %q, want %q", profile.AvatarURL, avatarURL)
+	}
+}
+
+func TestGetRewardsUsesRewardsEndpoint(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/cli/profile/0xabc/rewards" {
+			t.Fatalf("request path = %q, want %q", r.URL.Path, "/api/cli/profile/0xabc/rewards")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(RewardsResponse{
+			WalletAddress: "0xabc",
+			DailyTasks:    &DailyTaskStatus{CompletedCount: 3, RequiredCount: 3, DailyChestClaimed: false},
+			EpochRewards:  []EpochReward{{EpochID: 12, AmountXRP: "1", Claimable: true}},
+		})
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL+"/api/cli", "device-123")
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	rewards, err := client.GetRewards(context.Background(), "0xabc")
+	if err != nil {
+		t.Fatalf("GetRewards() error = %v", err)
+	}
+	if rewards.WalletAddress != "0xabc" || len(rewards.EpochRewards) != 1 {
+		t.Fatalf("rewards = %+v, want wallet and one epoch reward", rewards)
+	}
+}
+
+func TestGetRewardsAcceptsStringTotalReferrals(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/cli/profile/0xabc/rewards" {
+			t.Fatalf("request path = %q, want %q", r.URL.Path, "/api/cli/profile/0xabc/rewards")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"walletAddress": "0xabc",
+			"summary": map[string]any{
+				"address":            "0xabc",
+				"totalReferrals":     "0",
+				"currentEpochPoints": 0,
+				"tradingPoints":      0,
+				"referralPoints":     0,
+				"bonusPoints":        0,
+			},
+			"dailyTasks": map[string]any{
+				"completedCount":          0,
+				"requiredCount":           3,
+				"dailyChestClaimed":       false,
+				"hasCompletedRequirement": false,
+			},
+			"streak": map[string]any{
+				"currentStreak":                    0,
+				"longestStreak":                    0,
+				"daysUntilLottery":                 7,
+				"hasAvailableLotteryTicket":        false,
+				"completedDailyTasksCount":         0,
+				"requiredDailyTasksCount":          3,
+				"hasCompletedDailyTaskRequirement": false,
+			},
+			"lotteryTickets":                []any{},
+			"epochRewards":                  []any{},
+			"totalClaimableEpochRewardsXrp": "0",
+		})
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL+"/api/cli", "device-123")
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	rewards, err := client.GetRewards(context.Background(), "0xabc")
+	if err != nil {
+		t.Fatalf("GetRewards() error = %v", err)
+	}
+	if rewards.Summary == nil {
+		t.Fatal("GetRewards() summary = nil, want decoded summary")
+	}
+	if rewards.Summary.TotalReferrals != 0 {
+		t.Fatalf("TotalReferrals = %d, want 0", rewards.Summary.TotalReferrals)
+	}
+}
+
+func TestSyncEpochRewardClaimSendsExpectedBody(t *testing.T) {
+	t.Parallel()
+
+	var gotRequest RewardsActionRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/cli/profile/0xabc/rewards/epochs/12" {
+			t.Fatalf("request path = %q, want %q", r.URL.Path, "/api/cli/profile/0xabc/rewards/epochs/12")
+		}
+		if r.Method != http.MethodPost {
+			t.Fatalf("request method = %q, want %q", r.Method, http.MethodPost)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&gotRequest); err != nil {
+			t.Fatalf("Decode(request body) error = %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(EpochRewardClaimResponse{
+			Success:       true,
+			WalletAddress: "0xabc",
+			EpochID:       12,
+			TxHash:        gotRequest.TxHash,
+			ClaimedReward: EpochReward{EpochID: 12, AmountXRP: "1", HasClaimed: true},
+		})
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL+"/api/cli", "device-123")
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	response, err := client.SyncEpochRewardClaim(context.Background(), "0xabc", 12, RewardsActionRequest{
+		WalletAddress: "0xabc",
+		Signature:     "0xsig",
+		DeviceID:      "device-123",
+		IssuedAt:      "2026-03-10T00:00:00.000Z",
+		TxHash:        "0x1111111111111111111111111111111111111111111111111111111111111111",
+	})
+	if err != nil {
+		t.Fatalf("SyncEpochRewardClaim() error = %v", err)
+	}
+	if gotRequest.TxHash == "" || response.TxHash != gotRequest.TxHash {
+		t.Fatalf("tx hash = %q, want preserved sync request tx hash", response.TxHash)
+	}
+}
+
 func TestGetPositionsAcceptsWrappedAndBareArrays(t *testing.T) {
 	t.Parallel()
 

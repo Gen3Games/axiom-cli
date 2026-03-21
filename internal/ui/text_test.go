@@ -53,6 +53,27 @@ func TestRenderKnownTypes(t *testing.T) {
 			want:  []string{"Will XRP rise?", "Identifier", "binary", "XRP headline", "Long form details", "Outcomes", "Yes"},
 		},
 		{
+			name: "market details disabled max time bonus",
+			value: api.MarketDetails{
+				MarketListItem: api.MarketListItem{
+					ID:         "m2",
+					Title:      "Liverpool vs Brighton",
+					Status:     "active",
+					Category:   "sports",
+					MarketType: "standalone",
+					StartsAt:   memberSince,
+					EndsAt:     now,
+					Outcomes:   []api.Outcome{{Index: 0, Label: "Liverpool", Description: "Home team wins"}},
+				},
+				PoolBreakdown: &api.MarketPoolBreakdown{
+					TotalPoolXRP: "4.25",
+					MaxTimeBonus: "0",
+					Outcomes: []api.OutcomePoolBreakdown{{Index: 0, Label: "Liverpool", PoolXRP: "3.49", SpotPrice: "44.75%"}},
+				},
+			},
+			want: []string{"Pool Breakdown", "Max Time Bonus", "Disabled"},
+		},
+		{
 			name: "profile",
 			value: api.ProfileSummary{
 				WalletAddress:         "0xabc",

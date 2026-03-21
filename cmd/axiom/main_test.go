@@ -20,6 +20,7 @@ import (
 	"github.com/Gen3Games/axiom-cli/internal/evm"
 	axrpl "github.com/Gen3Games/axiom-cli/internal/xrpl"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
 )
 
 func TestCommandHelpSmoke(t *testing.T) {
@@ -49,6 +50,12 @@ func TestCommandHelpSmoke(t *testing.T) {
 		{args: []string{"profile", "show", "--help"}, want: "Show an Axiom profile summary"},
 		{args: []string{"profile", "positions", "--help"}, want: "List recent positions"},
 		{args: []string{"profile", "unclaimed", "--help"}, want: "Show unclaimed winnings"},
+		{args: []string{"rewards", "--help"}, want: "Track rewards progress"},
+		{args: []string{"rewards", "show", "--help"}, want: "Show rewards progress"},
+		{args: []string{"rewards", "claim", "--help"}, want: "Claim daily chest"},
+		{args: []string{"rewards", "claim", "daily", "--help"}, want: "Claim the daily chest reward"},
+		{args: []string{"rewards", "claim", "weekly", "--help"}, want: "Claim an available weekly chest ticket"},
+		{args: []string{"rewards", "claim", "epoch", "--help"}, want: "Claim the current claimable epoch reward"},
 		{args: []string{"funding", "--help"}, want: "Handle direct XRP funding"},
 		{args: []string{"funding", "info", "--help"}, want: "Show funding instructions"},
 		{args: []string{"funding", "direct", "--help"}, want: "Send native XRP on XRPL EVM directly"},
@@ -412,7 +419,7 @@ func TestMarketsListMyPositionsFiltersAndIncludesSpotPrices(t *testing.T) {
 		loadMarketState = originalLoadMarketState
 	})
 
-	stdout, stderr, err := executeCLI(t, "--json", "--api-url", server.URL+"/api/cli", "markets", "list", "--my-positions")
+	stdout, stderr, err := executeCLI(t, "--json", "--api-url", server.URL+"/api/cli", "markets", "list", "--my-positions", "--spot-prices")
 	if err != nil {
 		t.Fatalf("markets list --my-positions error = %v\nstderr:\n%s", err, stderr)
 	}
@@ -431,6 +438,98 @@ func TestMarketsListMyPositionsFiltersAndIncludesSpotPrices(t *testing.T) {
 	prices, ok := market["currentSpotPrices"].([]any)
 	if !ok || len(prices) != 2 {
 		t.Fatalf("currentSpotPrices = %#v, want two spot-price entries", market["currentSpotPrices"])
+	}
+}
+
+func TestProfileUpdateSendsSignedMetadata(t *testing.T) {
+	setCLIEnv(t)
+	server, state := newMockAPIServer(t)
+	defer server.Close()
+
+	privateKey := "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+	if _, stderr, err := executeCLI(t, "--json", "wallet", "import", "--private-key", privateKey); err != nil {
+		t.Fatalf("wallet import error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	stdout, stderr, err := executeCLI(
+		t,
+		"--json",
+		"--api-url", server.URL+"/api/cli",
+		"profile", "update",
+		"--display-name", "agent-zero",
+		"--avatar-url", "https://example.com/avatar.png",
+	)
+	if err != nil {
+		t.Fatalf("profile update error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	state.mu.Lock()
+	request := state.lastProfileUpdate
+	state.mu.Unlock()
+	if request.DisplayName == nil || *request.DisplayName != "agent-zero" {
+		t.Fatalf("displayName = %#v, want agent-zero", request.DisplayName)
+	}
+	if request.AvatarURL == nil || *request.AvatarURL != "https://example.com/avatar.png" {
+		t.Fatalf("avatarUrl = %#v, want https://example.com/avatar.png", request.AvatarURL)
+	}
+	if request.Signature == "" {
+		t.Fatal("signature = empty, want signed profile update")
+	}
+	if !strings.Contains(stdout, "agent-zero") || !strings.Contains(stdout, "https://example.com/avatar.png") {
+		t.Fatalf("profile update stdout missing updated profile fields\nstdout:\n%s", stdout)
+	}
+}
+
+func TestRewardsShowAndClaimCommands(t *testing.T) {
+	setCLIEnv(t)
+	server, state := newMockAPIServer(t)
+	defer server.Close()
+
+	privateKey := "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+	if _, stderr, err := executeCLI(t, "--json", "wallet", "import", "--private-key", privateKey); err != nil {
+		t.Fatalf("wallet import error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	stdout, stderr, err := executeCLI(t, "--json", "--api-url", server.URL+"/api/cli", "rewards", "show")
+	if err != nil {
+		t.Fatalf("rewards show error = %v\nstderr:\n%s", err, stderr)
+	}
+	if !strings.Contains(stdout, "totalClaimableEpochRewardsXrp") || !strings.Contains(stdout, "dailyChestClaimed") {
+		t.Fatalf("rewards show stdout missing rewards fields\nstdout:\n%s", stdout)
+	}
+
+	originalClaimEpochRewards := claimEpochRewards
+	claimEpochRewards = func(_ context.Context, _ string, _ *big.Int, _ string, _ common.Address, _ *big.Int, _ *big.Int, _ []common.Hash) (common.Hash, error) {
+		return common.HexToHash("0x1111111111111111111111111111111111111111111111111111111111111111"), nil
+	}
+	originalWaitForReceipt := waitForTxReceipt
+	waitForTxReceipt = func(_ context.Context, _ string, txHash common.Hash) (*types.Receipt, error) {
+		return &types.Receipt{TxHash: txHash, Status: 1}, nil
+	}
+	t.Cleanup(func() {
+		claimEpochRewards = originalClaimEpochRewards
+		waitForTxReceipt = originalWaitForReceipt
+	})
+
+	if _, stderr, err = executeCLI(t, "--json", "--api-url", server.URL+"/api/cli", "rewards", "claim", "daily"); err != nil {
+		t.Fatalf("rewards claim daily error = %v\nstderr:\n%s", err, stderr)
+	}
+	if _, stderr, err = executeCLI(t, "--json", "--api-url", server.URL+"/api/cli", "rewards", "claim", "weekly"); err != nil {
+		t.Fatalf("rewards claim weekly error = %v\nstderr:\n%s", err, stderr)
+	}
+	if _, stderr, err = executeCLI(t, "--json", "--api-url", server.URL+"/api/cli", "rewards", "claim", "epoch"); err != nil {
+		t.Fatalf("rewards claim epoch error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	state.mu.Lock()
+	lastPath := state.lastRewardsPath
+	lastAction := state.lastRewardsAction
+	state.mu.Unlock()
+	if !strings.Contains(lastPath, "/rewards/epochs/12") {
+		t.Fatalf("last rewards path = %q, want epoch sync path", lastPath)
+	}
+	if lastAction.TxHash == "" || lastAction.Signature == "" {
+		t.Fatalf("last rewards action = %+v, want signed sync payload with tx hash", lastAction)
 	}
 }
 
@@ -679,9 +778,12 @@ func resetCLIFlags() {
 }
 
 type mockAPIState struct {
-	lastRegister     api.RegisterRequest
-	lastDeviceHeader string
-	mu               sync.Mutex
+	lastRegister      api.RegisterRequest
+	lastProfileUpdate api.UpdateProfileRequest
+	lastRewardsAction api.RewardsActionRequest
+	lastRewardsPath   string
+	lastDeviceHeader  string
+	mu                sync.Mutex
 }
 
 func newMockAPIServer(t *testing.T) (*httptest.Server, *mockAPIState) {
@@ -744,6 +846,75 @@ func newMockAPIServer(t *testing.T) (*httptest.Server, *mockAPIState) {
 				DepositDestinationTag: 4242,
 				Created:               true,
 			})
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/rewards/daily-chest"):
+			var request api.RewardsActionRequest
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatalf("Decode(daily chest body) error = %v", err)
+			}
+			state.mu.Lock()
+			state.lastRewardsAction = request
+			state.lastRewardsPath = r.URL.Path
+			state.lastDeviceHeader = r.Header.Get("X-Axiom-CLI-Device")
+			state.mu.Unlock()
+			prizeAmount := 500
+			_ = json.NewEncoder(w).Encode(api.DailyChestClaimResponse{Success: true, PrizeAmount: &prizeAmount, PrizeLabel: "500 points"})
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/rewards/lottery/"):
+			var request api.RewardsActionRequest
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatalf("Decode(weekly chest body) error = %v", err)
+			}
+			state.mu.Lock()
+			state.lastRewardsAction = request
+			state.lastRewardsPath = r.URL.Path
+			state.lastDeviceHeader = r.Header.Get("X-Axiom-CLI-Device")
+			state.mu.Unlock()
+			prizeAmount := 2500
+			_ = json.NewEncoder(w).Encode(api.WeeklyChestClaimResponse{Success: true, PrizeType: "points", PrizeAmount: &prizeAmount, PrizeLabel: "2500 points", IsConsolation: false, CashConvertedToPoints: false})
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/rewards/epochs/"):
+			var request api.RewardsActionRequest
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatalf("Decode(epoch sync body) error = %v", err)
+			}
+			state.mu.Lock()
+			state.lastRewardsAction = request
+			state.lastRewardsPath = r.URL.Path
+			state.lastDeviceHeader = r.Header.Get("X-Axiom-CLI-Device")
+			state.mu.Unlock()
+			_ = json.NewEncoder(w).Encode(api.EpochRewardClaimResponse{
+				Success:       true,
+				WalletAddress: request.WalletAddress,
+				EpochID:       12,
+				TxHash:        request.TxHash,
+				ClaimedReward: api.EpochReward{EpochID: 12, Points: 1200, AmountWei: "1000000000000000000", AmountXRP: "1", Proof: []string{"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}, HasClaimed: true, DateEnded: now.Add(-24 * time.Hour), IsExpired: false, Claimable: false},
+			})
+		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/cli/profile/"):
+			var request api.UpdateProfileRequest
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatalf("Decode(profile update body) error = %v", err)
+			}
+			state.mu.Lock()
+			state.lastProfileUpdate = request
+			state.lastDeviceHeader = r.Header.Get("X-Axiom-CLI-Device")
+			state.mu.Unlock()
+			tag := 4242
+			rank := 7
+			displayName := "default"
+			if request.DisplayName != nil {
+				displayName = *request.DisplayName
+			}
+			avatarURL := ""
+			if request.AvatarURL != nil {
+				avatarURL = *request.AvatarURL
+			}
+			_ = json.NewEncoder(w).Encode(api.ProfileSummary{
+				WalletAddress:         filepath.Base(r.URL.Path),
+				DisplayName:           displayName,
+				AvatarURL:             avatarURL,
+				DepositDestinationTag: &tag,
+				MemberSince:           ptrTime(now.Add(-7 * 24 * time.Hour)),
+				LastLoginAt:           ptrTime(now),
+				Stats:                 api.ProfileStats{TotalPredictions: 12, ResolvedMarkets: 5, OpenMarkets: 7, UnclaimedMarkets: 1, UnclaimedPayoutUSD: "22.00", UnclaimedPnlUSD: "3.00", LeaderboardRank: &rank, PnlUSD: 4.56, PnlPercent: 7.89, VolumeUSD: 123.45, WinRate: 66.6, TradeCount: 12},
+			})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/cli/markets":
 			_ = json.NewEncoder(w).Encode(api.MarketsResponse{Items: markets, Total: len(markets), Limit: len(markets), Offset: 0})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/cli/markets/market-1":
@@ -764,6 +935,35 @@ func newMockAPIServer(t *testing.T) (*httptest.Server, *mockAPIState) {
 				OwnerAddress:       "0xowner",
 				ResolutionCriteria: "Close price above $3.00 on the candle.",
 				Tags:               []string{"crypto", "daily"},
+			})
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/cli/profile/") && strings.HasSuffix(r.URL.Path, "/rewards"):
+			epochID := 12
+			endsAt := now.Add(24 * time.Hour)
+			poolXRP := 42.5
+			estimatedPayout := 1.75
+			poolShare := 4.12
+			claimTime := now.Add(-24 * time.Hour)
+			_ = json.NewEncoder(w).Encode(api.RewardsResponse{
+				WalletAddress: filepath.Base(filepath.Dir(r.URL.Path)),
+				Summary: &api.RewardsSummary{
+					Address:             filepath.Base(filepath.Dir(r.URL.Path)),
+					TotalReferrals:      2,
+					CurrentEpochID:      &epochID,
+					CurrentEpochEndsAt:  &endsAt,
+					CurrentEpochPoints:  1200,
+					TradingPoints:       1000,
+					ReferralPoints:      150,
+					BonusPoints:         50,
+					PoolXRP:             &poolXRP,
+					GlobalTotalPoints:   ptrInt(10000),
+					PoolSharePercentage: &poolShare,
+					EstimatedPayoutXRP:  &estimatedPayout,
+				},
+				DailyTasks:                    &api.DailyTaskStatus{HasPredictTask: true, HasDailyTwitterPostTask: false, HasBigBetTask: true, HasClaimWinningsTask: false, HasMultiMarketTask: true, CompletedCount: 3, RequiredCount: 3, HasCompletedRequirement: true, DailyChestClaimed: false},
+				Streak:                        &api.RewardsStreak{CurrentStreak: 7, LongestStreak: 9, LastActivityDate: &claimTime, DaysUntilLottery: 0, HasAvailableLotteryTicket: true, CompletedDailyTasksCount: 3, RequiredDailyTasksCount: 3, HasCompletedDailyTaskRequirement: true, HasCompletedDailyBetTask: true, HasCompletedDailyTwitterPostTask: false, HasCompletedBigBetTask: true, HasCompletedClaimWinningsTask: false, HasCompletedMultiMarketTask: true},
+				LotteryTickets:                []api.LotteryTicketInfo{{ID: 77, Status: "available", EarnedAt: now.Add(-2 * time.Hour)}},
+				EpochRewards:                  []api.EpochReward{{EpochID: 12, Points: 1200, AmountWei: "1000000000000000000", AmountXRP: "1", Proof: []string{"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}, HasClaimed: false, DateEnded: now.Add(-24 * time.Hour), IsExpired: false, Claimable: true}},
+				TotalClaimableEpochRewardsXRP: "1",
 			})
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/cli/profile/") && strings.HasSuffix(r.URL.Path, "/positions"):
 			_ = json.NewEncoder(w).Encode(api.PositionsResponse{Items: []api.PositionItem{{MarketID: "market-1", MarketAddress: "0x0000000000000000000000000000000000000002", Title: "Will XRP close above $3.00?", Status: "active", OutcomeIndex: 0, OutcomeLabel: "Yes", AmountUSD: "25.00", Shares: "100", CreatedAt: now}}, Total: 1})
@@ -807,6 +1007,10 @@ func newMockAPIServer(t *testing.T) (*httptest.Server, *mockAPIState) {
 }
 
 func ptrTime(value time.Time) *time.Time {
+	return &value
+}
+
+func ptrInt(value int) *int {
 	return &value
 }
 

@@ -24,6 +24,7 @@ import (
 )
 
 const xrplEVMChainID int64 = 1440000
+const axiomRewardsAddress = "0x163cc681d60ca60ac47803eefd7df16a5b005d57"
 
 var (
 	flagAPIURL          string
@@ -36,8 +37,10 @@ var (
 	loadMarketState     = evm.LoadMarketState
 	quoteBuy            = evm.QuoteBuy
 	buyPosition         = evm.BuyPosition
+	claimEpochRewards   = evm.ClaimRewards
 	claimSingleMarket   = evm.ClaimMarket
 	batchClaimMarkets   = evm.BatchClaim
+	waitForTxReceipt    = waitForReceipt
 	submitBridgePayment = axrpl.SubmitBridgePayment
 )
 
@@ -96,6 +99,7 @@ func newRootCommand() *cobra.Command {
 	rootCmd.AddCommand(newAuthCommand())
 	rootCmd.AddCommand(newMarketsCommand())
 	rootCmd.AddCommand(newProfileCommand())
+	rootCmd.AddCommand(newRewardsCommand())
 	rootCmd.AddCommand(newFundingCommand())
 	rootCmd.AddCommand(newPredictCommand())
 	rootCmd.AddCommand(newClaimCommand())
@@ -441,11 +445,12 @@ func newMarketsCommand() *cobra.Command {
 			"Discover Axiom markets and fetch market details.",
 			"",
 			"Use `axiom markets list` to browse markets and narrow results with filters such as:",
-			"  --status active|resolved|upcoming|all",
+			"  --status open|resolved",
 			"  --category hourly|sports|streak|...",
 			"  --search <text>",
 			"  --limit <n> (0 fetches all matching markets)",
 			"  --offset <n>",
+			"  --spot-prices (opt in to slower on-chain odds enrichment)",
 			"",
 			"Use `axiom markets get <market-id-or-address>` once you have the full identifier.",
 		}, "\n"),
@@ -457,6 +462,7 @@ func newMarketsCommand() *cobra.Command {
 		Example: strings.Join([]string{
 			"axiom markets list",
 			"axiom markets list --category hourly",
+			"axiom markets list --status open --spot-prices",
 			"axiom markets list --status resolved --limit 50",
 			"axiom markets list --search XRP --offset 20",
 		}, "\n"),
@@ -471,6 +477,7 @@ func newMarketsCommand() *cobra.Command {
 			limit, _ := cmd.Flags().GetInt("limit")
 			offset, _ := cmd.Flags().GetInt("offset")
 			myPositions, _ := cmd.Flags().GetBool("my-positions")
+			spotPrices, _ := cmd.Flags().GetBool("spot-prices")
 			var response *api.MarketsResponse
 			needsLocalFiltering := strings.TrimSpace(category) != "" || myPositions
 			if needsLocalFiltering || limit <= 0 {
@@ -498,14 +505,17 @@ func newMarketsCommand() *cobra.Command {
 			if needsLocalFiltering {
 				response = paginateMarkets(response, limit, offset)
 			}
-			enrichMarketsWithSpotPrices(cmd.Context(), ctx, response)
+			if spotPrices {
+				enrichMarketsWithSpotPrices(cmd.Context(), ctx, response)
+			}
 			return printOutput(ctx.JSON, response)
 		},
 	}
-	listCmd.Flags().String("status", "active", "Filter by status: active, resolved, upcoming, all")
+	listCmd.Flags().String("status", "open", "Filter by status: open or resolved")
 	listCmd.Flags().String("category", "", "Filter by market category (for example hourly, sports, streak)")
 	listCmd.Flags().String("search", "", "Search by title or headline")
 	listCmd.Flags().Bool("my-positions", false, "Only return markets where the active wallet currently has open positions")
+	listCmd.Flags().Bool("spot-prices", false, "Fetch current spot odds from XRPL EVM for each returned market")
 	listCmd.Flags().Int("limit", 0, "Maximum number of markets to return (0 means fetch all matching markets)")
 	listCmd.Flags().Int("offset", 0, "Offset into the market result set")
 	cmd.AddCommand(listCmd)
@@ -534,6 +544,53 @@ func newMarketsCommand() *cobra.Command {
 
 func newProfileCommand() *cobra.Command {
 	cmd := &cobra.Command{Use: "profile", Short: "Read profile stats, positions, and claimable winnings"}
+
+	updateCmd := &cobra.Command{
+		Use:   "update",
+		Short: "Update the active wallet's Axiom display name or avatar URL",
+		Long: strings.Join([]string{
+			"Update the active wallet's Axiom profile metadata.",
+			"",
+			"This signs a profile-update message with the active local EVM wallet before sending it",
+			"to the CLI API. At least one of --display-name or --avatar-url is required.",
+		}, "\n"),
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+			wallet, _, err := requireEVMWalletWithKey(ctx)
+			if err != nil {
+				return err
+			}
+			displayName := strings.TrimSpace(mustStringFlag(cmd, "display-name"))
+			avatarURL := strings.TrimSpace(mustStringFlag(cmd, "avatar-url"))
+			if displayName == "" && avatarURL == "" {
+				return errors.New("at least one of --display-name or --avatar-url is required")
+			}
+			issuedAt := time.Now().UTC()
+			message := buildProfileUpdateMessage(wallet.Address().Hex(), ctx.Config.DeviceID, issuedAt, displayName, avatarURL)
+			signature, err := wallet.SignMessage(message)
+			if err != nil {
+				return err
+			}
+			response, err := ctx.API.UpdateProfile(cmd.Context(), wallet.Address().Hex(), api.UpdateProfileRequest{
+				WalletAddress: wallet.Address().Hex(),
+				Signature:     signature,
+				DeviceID:      ctx.Config.DeviceID,
+				IssuedAt:      formatRegistrationIssuedAt(issuedAt),
+				DisplayName:   optionalStringPointer(displayName),
+				AvatarURL:     optionalStringPointer(avatarURL),
+			})
+			if err != nil {
+				return err
+			}
+			return printOutput(ctx.JSON, response)
+		},
+	}
+	updateCmd.Flags().String("display-name", "", "Set the display name for the active wallet's Axiom profile")
+	updateCmd.Flags().String("avatar-url", "", "Set the avatar image URL for the active wallet's Axiom profile")
+	cmd.AddCommand(updateCmd)
 
 	cmd.AddCommand(&cobra.Command{
 		Use:   "show [wallet-address]",
@@ -610,6 +667,201 @@ func newProfileCommand() *cobra.Command {
 		},
 	})
 
+	return cmd
+}
+
+func newRewardsCommand() *cobra.Command {
+	cmd := &cobra.Command{Use: "rewards", Short: "Track rewards progress and claim daily, weekly, and epoch rewards"}
+
+	cmd.AddCommand(&cobra.Command{
+		Use:   "show [wallet-address]",
+		Short: "Show rewards progress, streaks, tickets, and epoch claimables",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+			address, err := resolveProfileAddress(ctx, args)
+			if err != nil {
+				return err
+			}
+			response, err := ctx.API.GetRewards(cmd.Context(), address)
+			if err != nil {
+				return err
+			}
+			return printOutput(ctx.JSON, response)
+		},
+	})
+
+	claimCmd := &cobra.Command{Use: "claim", Short: "Claim daily chest, weekly chest, or epoch rewards"}
+
+	claimCmd.AddCommand(&cobra.Command{
+		Use:   "daily",
+		Short: "Claim the daily chest reward after completing the daily task requirement",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+			wallet, _, err := requireEVMWalletWithKey(ctx)
+			if err != nil {
+				return err
+			}
+			issuedAt := time.Now().UTC()
+			message := buildRewardsActionMessage(wallet.Address().Hex(), ctx.Config.DeviceID, issuedAt, "claim-daily-chest", 0, 0, "")
+			signature, err := wallet.SignMessage(message)
+			if err != nil {
+				return err
+			}
+			response, err := ctx.API.ClaimDailyChest(cmd.Context(), wallet.Address().Hex(), api.RewardsActionRequest{
+				WalletAddress: wallet.Address().Hex(),
+				Signature:     signature,
+				DeviceID:      ctx.Config.DeviceID,
+				IssuedAt:      formatRegistrationIssuedAt(issuedAt),
+			})
+			if err != nil {
+				return err
+			}
+			return printOutput(ctx.JSON, map[string]any{
+				"walletAddress": wallet.Address().Hex(),
+				"claimType":     "daily-chest",
+				"success":       response.Success,
+				"prizeAmount":   response.PrizeAmount,
+				"prizeLabel":    response.PrizeLabel,
+			})
+		},
+	})
+
+	claimWeeklyCmd := &cobra.Command{
+		Use:   "weekly [ticket-id]",
+		Short: "Claim an available weekly chest ticket from a 7-day streak",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+			wallet, _, err := requireEVMWalletWithKey(ctx)
+			if err != nil {
+				return err
+			}
+			rewards, err := ctx.API.GetRewards(cmd.Context(), wallet.Address().Hex())
+			if err != nil {
+				return err
+			}
+			ticket, err := resolveClaimableLotteryTicket(rewards, args)
+			if err != nil {
+				return err
+			}
+			issuedAt := time.Now().UTC()
+			message := buildRewardsActionMessage(wallet.Address().Hex(), ctx.Config.DeviceID, issuedAt, "claim-weekly-chest", ticket.ID, 0, "")
+			signature, err := wallet.SignMessage(message)
+			if err != nil {
+				return err
+			}
+			response, err := ctx.API.ClaimWeeklyChest(cmd.Context(), wallet.Address().Hex(), ticket.ID, api.RewardsActionRequest{
+				WalletAddress: wallet.Address().Hex(),
+				Signature:     signature,
+				DeviceID:      ctx.Config.DeviceID,
+				IssuedAt:      formatRegistrationIssuedAt(issuedAt),
+			})
+			if err != nil {
+				return err
+			}
+			return printOutput(ctx.JSON, map[string]any{
+				"walletAddress":         wallet.Address().Hex(),
+				"claimType":             "weekly-chest",
+				"ticketId":              ticket.ID,
+				"success":               response.Success,
+				"prizeType":             response.PrizeType,
+				"prizeAmount":           response.PrizeAmount,
+				"prizeLabel":            response.PrizeLabel,
+				"isConsolation":         response.IsConsolation,
+				"cashConvertedToPoints": response.CashConvertedToPoints,
+			})
+		},
+	}
+	claimCmd.AddCommand(claimWeeklyCmd)
+
+	claimEpochCmd := &cobra.Command{
+		Use:   "epoch [epoch-id]",
+		Short: "Claim the current claimable epoch reward on-chain and sync it back to Axiom",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+			wallet, privateKeyHex, err := requireEVMWalletWithKey(ctx)
+			if err != nil {
+				return err
+			}
+			rewards, err := ctx.API.GetRewards(cmd.Context(), wallet.Address().Hex())
+			if err != nil {
+				return err
+			}
+			reward, err := resolveClaimableEpochReward(rewards, args)
+			if err != nil {
+				return err
+			}
+			amountWei, ok := new(big.Int).SetString(strings.TrimSpace(reward.AmountWei), 10)
+			if !ok {
+				return fmt.Errorf("invalid amountWei for epoch %d", reward.EpochID)
+			}
+			proof, err := parseMerkleProof(reward.Proof)
+			if err != nil {
+				return err
+			}
+			txHash, err := claimEpochRewards(
+				cmd.Context(),
+				ctx.Config.EVMRPCURL,
+				big.NewInt(xrplEVMChainID),
+				privateKeyHex,
+				common.HexToAddress(axiomRewardsAddress),
+				big.NewInt(int64(reward.EpochID)),
+				amountWei,
+				proof,
+			)
+			if err != nil {
+				return err
+			}
+			receipt, err := waitForTxReceipt(cmd.Context(), ctx.Config.EVMRPCURL, txHash)
+			if err != nil {
+				return err
+			}
+			if receipt.Status != 1 {
+				return fmt.Errorf("epoch reward claim transaction failed: %s", txHash.Hex())
+			}
+			issuedAt := time.Now().UTC()
+			message := buildRewardsActionMessage(wallet.Address().Hex(), ctx.Config.DeviceID, issuedAt, "sync-epoch-claim", 0, reward.EpochID, txHash.Hex())
+			signature, err := wallet.SignMessage(message)
+			if err != nil {
+				return err
+			}
+			response, err := ctx.API.SyncEpochRewardClaim(cmd.Context(), wallet.Address().Hex(), reward.EpochID, api.RewardsActionRequest{
+				WalletAddress: wallet.Address().Hex(),
+				Signature:     signature,
+				DeviceID:      ctx.Config.DeviceID,
+				IssuedAt:      formatRegistrationIssuedAt(issuedAt),
+				TxHash:        txHash.Hex(),
+			})
+			if err != nil {
+				return err
+			}
+			return printOutput(ctx.JSON, map[string]any{
+				"walletAddress": wallet.Address().Hex(),
+				"claimType":     "epoch-reward",
+				"epochId":       response.EpochID,
+				"amountXrp":     response.ClaimedReward.AmountXRP,
+				"txHash":        response.TxHash,
+				"success":       response.Success,
+			})
+		},
+	}
+	claimCmd.AddCommand(claimEpochCmd)
+
+	cmd.AddCommand(claimCmd)
 	return cmd
 }
 
@@ -1119,8 +1371,143 @@ func buildRegistrationMessage(walletAddress string, deviceID string, issuedAt ti
 	}, "\n")
 }
 
+func buildProfileUpdateMessage(walletAddress string, deviceID string, issuedAt time.Time, displayName string, avatarURL string) string {
+	return strings.Join([]string{
+		"Axiom CLI profile update",
+		"",
+		"Version: 1",
+		fmt.Sprintf("Wallet: %s", walletAddress),
+		fmt.Sprintf("Device: %s", strings.TrimSpace(deviceID)),
+		fmt.Sprintf("Issued At: %s", formatRegistrationIssuedAt(issuedAt)),
+		fmt.Sprintf("Display Name: %s", optionalProfileMessageValue(displayName)),
+		fmt.Sprintf("Avatar URL: %s", optionalProfileMessageValue(avatarURL)),
+		"Network: xrpl-mainnet",
+		"Purpose: update my Axiom CLI profile metadata.",
+	}, "\n")
+}
+
+func buildRewardsActionMessage(walletAddress string, deviceID string, issuedAt time.Time, action string, ticketID int, epochID int, txHash string) string {
+	return strings.Join([]string{
+		"Axiom CLI rewards action",
+		"",
+		"Version: 1",
+		fmt.Sprintf("Wallet: %s", walletAddress),
+		fmt.Sprintf("Device: %s", strings.TrimSpace(deviceID)),
+		fmt.Sprintf("Issued At: %s", formatRegistrationIssuedAt(issuedAt)),
+		fmt.Sprintf("Action: %s", action),
+		fmt.Sprintf("Ticket ID: %s", optionalIntMessageValue(ticketID)),
+		fmt.Sprintf("Epoch ID: %s", optionalIntMessageValue(epochID)),
+		fmt.Sprintf("Transaction Hash: %s", optionalStringMessageValue(txHash)),
+		"Network: xrpl-mainnet",
+		"Purpose: authorize a rewards claim or rewards-claim sync from the Axiom CLI.",
+	}, "\n")
+}
+
+func optionalIntMessageValue(value int) string {
+	if value <= 0 {
+		return "(none)"
+	}
+	return strconv.Itoa(value)
+}
+
+func optionalStringMessageValue(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return "(none)"
+	}
+	return trimmed
+}
+
+func optionalProfileMessageValue(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return "(unchanged)"
+	}
+	return trimmed
+}
+
+func optionalStringPointer(value string) *string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return nil
+	}
+	return &trimmed
+}
+
 func formatRegistrationIssuedAt(issuedAt time.Time) string {
 	return issuedAt.UTC().Truncate(time.Millisecond).Format("2006-01-02T15:04:05.000Z")
+}
+
+func resolveClaimableLotteryTicket(rewards *api.RewardsResponse, args []string) (*api.LotteryTicketInfo, error) {
+	if rewards == nil {
+		return nil, errors.New("rewards response was empty")
+	}
+
+	if len(args) > 0 && strings.TrimSpace(args[0]) != "" {
+		ticketID, err := strconv.Atoi(strings.TrimSpace(args[0]))
+		if err != nil || ticketID <= 0 {
+			return nil, errors.New("ticket id must be a positive integer")
+		}
+		for _, ticket := range rewards.LotteryTickets {
+			if ticket.ID == ticketID {
+				if ticket.Status != "available" {
+					return nil, fmt.Errorf("ticket %d is not claimable", ticketID)
+				}
+				return &ticket, nil
+			}
+		}
+		return nil, fmt.Errorf("ticket %d was not found", ticketID)
+	}
+
+	for _, ticket := range rewards.LotteryTickets {
+		if ticket.Status == "available" {
+			return &ticket, nil
+		}
+	}
+
+	return nil, errors.New("no available weekly chest ticket found")
+}
+
+func resolveClaimableEpochReward(rewards *api.RewardsResponse, args []string) (*api.EpochReward, error) {
+	if rewards == nil {
+		return nil, errors.New("rewards response was empty")
+	}
+
+	if len(args) > 0 && strings.TrimSpace(args[0]) != "" {
+		epochID, err := strconv.Atoi(strings.TrimSpace(args[0]))
+		if err != nil || epochID <= 0 {
+			return nil, errors.New("epoch id must be a positive integer")
+		}
+		for _, reward := range rewards.EpochRewards {
+			if reward.EpochID == epochID {
+				if !reward.Claimable {
+					return nil, fmt.Errorf("epoch %d is not claimable", epochID)
+				}
+				return &reward, nil
+			}
+		}
+		return nil, fmt.Errorf("epoch %d was not found", epochID)
+	}
+
+	for _, reward := range rewards.EpochRewards {
+		if reward.Claimable {
+			return &reward, nil
+		}
+	}
+
+	return nil, errors.New("no claimable epoch reward found")
+}
+
+func parseMerkleProof(proof []string) ([]common.Hash, error) {
+	parsed := make([]common.Hash, 0, len(proof))
+	for _, item := range proof {
+		trimmed := strings.TrimSpace(item)
+		if len(trimmed) != 66 || !strings.HasPrefix(trimmed, "0x") {
+			return nil, fmt.Errorf("invalid merkle proof hash: %s", item)
+		}
+		parsed = append(parsed, common.HexToHash(trimmed))
+	}
+	return parsed, nil
 }
 
 func registerWalletWithCompat(ctx context.Context, cliCtx *cliContext, wallet *evm.Wallet) (*api.RegisterResponse, error) {

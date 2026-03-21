@@ -41,12 +41,16 @@ const (
 		{"name":"batchClaim","type":"function","stateMutability":"nonpayable","inputs":[{"name":"markets","type":"address[]"}],"outputs":[{"type":"uint256"}]},
 		{"name":"maxBatchSize","type":"function","stateMutability":"view","inputs":[],"outputs":[{"type":"uint256"}]}
 	]`
+	rewardsABIJSON = `[
+		{"name":"claim","type":"function","stateMutability":"nonpayable","inputs":[{"name":"epochId","type":"uint256"},{"name":"amount","type":"uint256"},{"name":"proof","type":"bytes32[]"}],"outputs":[]}
+	]`
 )
 
 var (
 	marketABI  = mustParseABI(marketABIJSON)
 	erc20ABI   = mustParseABI(erc20ABIJSON)
 	utilityABI = mustParseABI(utilityABIJSON)
+	rewardsABI = mustParseABI(rewardsABIJSON)
 )
 
 type MarketState struct {
@@ -254,6 +258,10 @@ func BatchClaim(ctx context.Context, rpcURL string, chainID *big.Int, privateKey
 		return common.Hash{}, fmt.Errorf("pack batchClaim: %w", err)
 	}
 	return sendRawTransaction(ctx, rpcURL, chainID, privateKeyHex, utilityAddress, data, big.NewInt(0))
+}
+
+func ClaimRewards(ctx context.Context, rpcURL string, chainID *big.Int, privateKeyHex string, rewardsAddress common.Address, epochID *big.Int, amountWei *big.Int, proof []common.Hash) (common.Hash, error) {
+	return sendContractTransaction(ctx, rpcURL, chainID, privateKeyHex, rewardsAddress, rewardsABI, "claim", big.NewInt(0), epochID, amountWei, proof)
 }
 
 func BuyPosition(ctx context.Context, rpcURL string, chainID *big.Int, privateKeyHex string, marketAddress common.Address, outcome uint8, amountWei *big.Int, minShares *big.Int) (common.Hash, error) {
