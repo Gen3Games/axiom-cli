@@ -68,7 +68,7 @@ func TestRenderKnownTypes(t *testing.T) {
 				PoolBreakdown: &api.MarketPoolBreakdown{
 					TotalPoolXRP: "4.25",
 					MaxTimeBonus: "0",
-					Outcomes: []api.OutcomePoolBreakdown{{Index: 0, Label: "Liverpool", PoolXRP: "3.49", SpotPrice: "44.75%"}},
+					Outcomes:     []api.OutcomePoolBreakdown{{Index: 0, Label: "Liverpool", PoolXRP: "3.49", SpotPrice: "44.75%"}},
 				},
 			},
 			want: []string{"Pool Breakdown", "Max Time Bonus", "Disabled"},
