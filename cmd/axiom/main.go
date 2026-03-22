@@ -18,13 +18,13 @@ import (
 	"github.com/Gen3Games/axiom-cli/internal/ui"
 	axrpl "github.com/Gen3Games/axiom-cli/internal/xrpl"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/types"
 	qrterminal "github.com/mdp/qrterminal/v3"
 	"github.com/spf13/cobra"
 )
 
 const xrplEVMChainID int64 = 1440000
-const axiomRewardsAddress = "0x163cc681d60ca60ac47803eefd7df16a5b005d57"
 
 var (
 	flagAPIURL          string
@@ -805,49 +805,57 @@ func newRewardsCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			amountWei, ok := new(big.Int).SetString(strings.TrimSpace(reward.AmountWei), 10)
-			if !ok {
-				return fmt.Errorf("invalid amountWei for epoch %d", reward.EpochID)
+			txHashHex, _ := cmd.Flags().GetString("tx-hash")
+			txHashHex = strings.TrimSpace(txHashHex)
+			claimedOnChain := false
+			if txHashHex == "" {
+				amountWei, ok := new(big.Int).SetString(strings.TrimSpace(reward.AmountWei), 10)
+				if !ok {
+					return fmt.Errorf("invalid amountWei for epoch %d", reward.EpochID)
+				}
+				proof, err := parseMerkleProof(reward.Proof)
+				if err != nil {
+					return err
+				}
+				rewardsAddress, err := resolveAxiomRewardsAddress(cmd.Context(), ctx.API)
+				if err != nil {
+					return err
+				}
+				txHash, err := claimEpochRewards(
+					cmd.Context(),
+					ctx.Config.EVMRPCURL,
+					big.NewInt(xrplEVMChainID),
+					privateKeyHex,
+					rewardsAddress,
+					big.NewInt(int64(reward.EpochID)),
+					amountWei,
+					proof,
+				)
+				if err != nil {
+					return err
+				}
+				receipt, err := waitForTxReceipt(cmd.Context(), ctx.Config.EVMRPCURL, txHash)
+				if err != nil {
+					return err
+				}
+				if receipt.Status != 1 {
+					return fmt.Errorf("epoch reward claim transaction failed: %s", txHash.Hex())
+				}
+				txHashHex = txHash.Hex()
+				claimedOnChain = true
+			} else {
+				txHash, err := parseTxHash(txHashHex)
+				if err != nil {
+					return err
+				}
+				txHashHex = txHash.Hex()
 			}
-			proof, err := parseMerkleProof(reward.Proof)
+			response, err := syncEpochRewardClaim(cmd.Context(), ctx, wallet, reward.EpochID, txHashHex)
 			if err != nil {
-				return err
-			}
-			txHash, err := claimEpochRewards(
-				cmd.Context(),
-				ctx.Config.EVMRPCURL,
-				big.NewInt(xrplEVMChainID),
-				privateKeyHex,
-				common.HexToAddress(axiomRewardsAddress),
-				big.NewInt(int64(reward.EpochID)),
-				amountWei,
-				proof,
-			)
-			if err != nil {
-				return err
-			}
-			receipt, err := waitForTxReceipt(cmd.Context(), ctx.Config.EVMRPCURL, txHash)
-			if err != nil {
-				return err
-			}
-			if receipt.Status != 1 {
-				return fmt.Errorf("epoch reward claim transaction failed: %s", txHash.Hex())
-			}
-			issuedAt := time.Now().UTC()
-			message := buildRewardsActionMessage(wallet.Address().Hex(), ctx.Config.DeviceID, issuedAt, "sync-epoch-claim", 0, reward.EpochID, txHash.Hex())
-			signature, err := wallet.SignMessage(message)
-			if err != nil {
-				return err
-			}
-			response, err := ctx.API.SyncEpochRewardClaim(cmd.Context(), wallet.Address().Hex(), reward.EpochID, api.RewardsActionRequest{
-				WalletAddress: wallet.Address().Hex(),
-				Signature:     signature,
-				DeviceID:      ctx.Config.DeviceID,
-				IssuedAt:      formatRegistrationIssuedAt(issuedAt),
-				TxHash:        txHash.Hex(),
-			})
-			if err != nil {
-				return err
+				if claimedOnChain {
+					return fmt.Errorf("epoch reward was claimed on-chain in tx %s, but syncing it back to Axiom failed: %w\nRecovery: rerun `axiom rewards claim epoch %d --tx-hash %s` to resubmit the mined transaction hash without sending another on-chain claim", txHashHex, err, reward.EpochID, txHashHex)
+				}
+				return fmt.Errorf("sync epoch %d reward claim: %w", reward.EpochID, err)
 			}
 			return printOutput(ctx.JSON, map[string]any{
 				"walletAddress": wallet.Address().Hex(),
@@ -859,6 +867,7 @@ func newRewardsCommand() *cobra.Command {
 			})
 		},
 	}
+	claimEpochCmd.Flags().String("tx-hash", "", "Skip the on-chain claim and sync an already-mined epoch reward transaction hash")
 	claimCmd.AddCommand(claimEpochCmd)
 
 	cmd.AddCommand(claimCmd)
@@ -1496,6 +1505,46 @@ func resolveClaimableEpochReward(rewards *api.RewardsResponse, args []string) (*
 	}
 
 	return nil, errors.New("no claimable epoch reward found")
+}
+
+func resolveAxiomRewardsAddress(ctx context.Context, client *api.Client) (common.Address, error) {
+	configResponse, err := client.GetConfig(ctx)
+	if err != nil {
+		return common.Address{}, err
+	}
+	address := strings.TrimSpace(configResponse.AxiomRewardsAddress)
+	if address == "" {
+		return common.Address{}, errors.New("the backend does not have a canonical AxiomRewards address configured")
+	}
+	if !common.IsHexAddress(address) {
+		return common.Address{}, fmt.Errorf("the backend returned an invalid AxiomRewards address: %s", address)
+	}
+	return common.HexToAddress(address), nil
+}
+
+func syncEpochRewardClaim(ctx context.Context, cliCtx *cliContext, wallet *evm.Wallet, epochID int, txHash string) (*api.EpochRewardClaimResponse, error) {
+	issuedAt := time.Now().UTC()
+	message := buildRewardsActionMessage(wallet.Address().Hex(), cliCtx.Config.DeviceID, issuedAt, "sync-epoch-claim", 0, epochID, txHash)
+	signature, err := wallet.SignMessage(message)
+	if err != nil {
+		return nil, err
+	}
+	return cliCtx.API.SyncEpochRewardClaim(ctx, wallet.Address().Hex(), epochID, api.RewardsActionRequest{
+		WalletAddress: wallet.Address().Hex(),
+		Signature:     signature,
+		DeviceID:      cliCtx.Config.DeviceID,
+		IssuedAt:      formatRegistrationIssuedAt(issuedAt),
+		TxHash:        txHash,
+	})
+}
+
+func parseTxHash(value string) (common.Hash, error) {
+	trimmed := strings.TrimSpace(value)
+	decoded, err := hexutil.Decode(trimmed)
+	if err != nil || len(decoded) != common.HashLength {
+		return common.Hash{}, errors.New("--tx-hash must be a 32-byte 0x-prefixed transaction hash")
+	}
+	return common.BytesToHash(decoded), nil
 }
 
 func parseMerkleProof(proof []string) ([]common.Hash, error) {

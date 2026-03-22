@@ -499,7 +499,9 @@ func TestRewardsShowAndClaimCommands(t *testing.T) {
 	}
 
 	originalClaimEpochRewards := claimEpochRewards
-	claimEpochRewards = func(_ context.Context, _ string, _ *big.Int, _ string, _ common.Address, _ *big.Int, _ *big.Int, _ []common.Hash) (common.Hash, error) {
+	var claimedContract common.Address
+	claimEpochRewards = func(_ context.Context, _ string, _ *big.Int, _ string, contractAddress common.Address, _ *big.Int, _ *big.Int, _ []common.Hash) (common.Hash, error) {
+		claimedContract = contractAddress
 		return common.HexToHash("0x1111111111111111111111111111111111111111111111111111111111111111"), nil
 	}
 	originalWaitForReceipt := waitForTxReceipt
@@ -530,6 +532,70 @@ func TestRewardsShowAndClaimCommands(t *testing.T) {
 	}
 	if lastAction.TxHash == "" || lastAction.Signature == "" {
 		t.Fatalf("last rewards action = %+v, want signed sync payload with tx hash", lastAction)
+	}
+	if claimedContract.Hex() != "0x00000000000000000000000000000000000000AA" {
+		t.Fatalf("claimEpochRewards contract = %q, want config-provided rewards contract", claimedContract.Hex())
+	}
+}
+
+func TestRewardsClaimEpochRecoveryUsesProvidedTxHash(t *testing.T) {
+	setCLIEnv(t)
+	server, state := newMockAPIServer(t)
+	defer server.Close()
+
+	privateKey := "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+	if _, stderr, err := executeCLI(t, "--json", "wallet", "import", "--private-key", privateKey); err != nil {
+		t.Fatalf("wallet import error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	originalClaimEpochRewards := claimEpochRewards
+	claimCalls := 0
+	claimEpochRewards = func(_ context.Context, _ string, _ *big.Int, _ string, _ common.Address, _ *big.Int, _ *big.Int, _ []common.Hash) (common.Hash, error) {
+		claimCalls++
+		return common.HexToHash("0x1111111111111111111111111111111111111111111111111111111111111111"), nil
+	}
+	originalWaitForReceipt := waitForTxReceipt
+	waitForTxReceipt = func(_ context.Context, _ string, txHash common.Hash) (*types.Receipt, error) {
+		return &types.Receipt{TxHash: txHash, Status: 1}, nil
+	}
+	t.Cleanup(func() {
+		claimEpochRewards = originalClaimEpochRewards
+		waitForTxReceipt = originalWaitForReceipt
+	})
+
+	state.mu.Lock()
+	state.rewardsSyncStatus = http.StatusBadGateway
+	state.rewardsSyncError = "sync unavailable"
+	state.mu.Unlock()
+
+	_, _, err := executeCLI(t, "--json", "--api-url", server.URL+"/api/cli", "rewards", "claim", "epoch")
+	if err == nil {
+		t.Fatal("rewards claim epoch error = nil, want sync recovery error")
+	}
+	if !strings.Contains(err.Error(), "claimed on-chain in tx 0x1111111111111111111111111111111111111111111111111111111111111111") {
+		t.Fatalf("rewards claim epoch error = %q, want on-chain recovery context", err)
+	}
+	if !strings.Contains(err.Error(), "axiom rewards claim epoch 12 --tx-hash 0x1111111111111111111111111111111111111111111111111111111111111111") {
+		t.Fatalf("rewards claim epoch error = %q, want recovery command", err)
+	}
+	if claimCalls != 1 {
+		t.Fatalf("claimEpochRewards calls = %d, want 1 after failed sync", claimCalls)
+	}
+
+	state.mu.Lock()
+	state.rewardsSyncStatus = 0
+	state.rewardsSyncError = ""
+	state.mu.Unlock()
+
+	stdout, stderr, err := executeCLI(t, "--json", "--api-url", server.URL+"/api/cli", "rewards", "claim", "epoch", "12", "--tx-hash", "0x1111111111111111111111111111111111111111111111111111111111111111")
+	if err != nil {
+		t.Fatalf("rewards claim epoch recovery error = %v\nstderr:\n%s", err, stderr)
+	}
+	if claimCalls != 1 {
+		t.Fatalf("claimEpochRewards calls = %d, want sync-only retry to skip another on-chain claim", claimCalls)
+	}
+	if !strings.Contains(stdout, "0x1111111111111111111111111111111111111111111111111111111111111111") {
+		t.Fatalf("rewards claim epoch recovery stdout missing tx hash\nstdout:\n%s", stdout)
 	}
 }
 
@@ -783,6 +849,9 @@ type mockAPIState struct {
 	lastRewardsAction api.RewardsActionRequest
 	lastRewardsPath   string
 	lastDeviceHeader  string
+	rewardsSyncError  string
+	rewardsSyncStatus int
+	rewardsAddress    string
 	mu                sync.Mutex
 }
 
@@ -790,7 +859,7 @@ func newMockAPIServer(t *testing.T) (*httptest.Server, *mockAPIState) {
 	t.Helper()
 
 	now := time.Date(2026, time.March, 10, 12, 0, 0, 0, time.UTC)
-	state := &mockAPIState{}
+	state := &mockAPIState{rewardsAddress: "0x00000000000000000000000000000000000000AA"}
 	markets := []api.MarketListItem{
 		{
 			ID:              "market-0",
@@ -879,7 +948,14 @@ func newMockAPIServer(t *testing.T) (*httptest.Server, *mockAPIState) {
 			state.lastRewardsAction = request
 			state.lastRewardsPath = r.URL.Path
 			state.lastDeviceHeader = r.Header.Get("X-Axiom-CLI-Device")
+			rewardsSyncStatus := state.rewardsSyncStatus
+			rewardsSyncError := state.rewardsSyncError
 			state.mu.Unlock()
+			if rewardsSyncStatus > 0 {
+				w.WriteHeader(rewardsSyncStatus)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": rewardsSyncError})
+				return
+			}
 			_ = json.NewEncoder(w).Encode(api.EpochRewardClaimResponse{
 				Success:       true,
 				WalletAddress: request.WalletAddress,
@@ -997,7 +1073,10 @@ func newMockAPIServer(t *testing.T) (*httptest.Server, *mockAPIState) {
 				RecentHistory:         []api.FundingHistoryItem{{Kind: "bridge", Status: "completed", AmountXRP: "10", TxHash: "0xhash", BridgeTxHash: "0xbridge", CreatedAt: now, UpdatedAt: now}},
 			})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/cli/config":
-			_ = json.NewEncoder(w).Encode(api.ConfigResponse{APIVersion: "v1", Network: "xrpl-mainnet", ChainID: 1440000, NativeSymbol: "XRP", RPCURL: "https://rpc.xrplevm.org", ExplorerBaseURL: "https://explorer.xrplevm.org", AxiomUtilityAddress: "0xutility", DepositWalletAddress: "rDepositWallet"})
+			state.mu.Lock()
+			rewardsAddress := state.rewardsAddress
+			state.mu.Unlock()
+			_ = json.NewEncoder(w).Encode(api.ConfigResponse{APIVersion: "v1", Network: "xrpl-mainnet", ChainID: 1440000, NativeSymbol: "XRP", RPCURL: "https://rpc.xrplevm.org", ExplorerBaseURL: "https://explorer.xrplevm.org", AxiomUtilityAddress: "0xutility", AxiomRewardsAddress: rewardsAddress, DepositWalletAddress: "rDepositWallet"})
 		default:
 			http.NotFound(w, r)
 		}

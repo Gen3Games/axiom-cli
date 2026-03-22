@@ -44,6 +44,7 @@ Response shape:
   "rpcUrl": "https://rpc.xrplevm.org",
   "explorerBaseUrl": "https://explorer.xrplevm.org",
   "axiomUtilityAddress": "0x...",
+  "axiomRewardsAddress": "0x...",
   "depositWalletAddress": "r..."
 }
 ```
@@ -86,10 +87,13 @@ Query parameters:
 - `limit`
 - `offset`
 
-`status` accepts `open`, `active`, `resolved`, `upcoming`, and `all`.
+`status` accepts `open`, `resolved`, and `all`.
 
 - `open` means unresolved markets whose close time has not passed yet
-- `active` means markets that have started and are still open for bets
+- `resolved` means finalized markets whose outcome is available
+- `all` means the backend should return the full default market set
+
+Older backends may still tolerate legacy values such as `active` or `upcoming`, but the CLI only documents and relies on `open|resolved|all`.
 
 `limit=0` means "return all matching markets".
 

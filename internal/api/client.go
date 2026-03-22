@@ -44,6 +44,7 @@ type ConfigResponse struct {
 	RPCURL               string `json:"rpcUrl"`
 	ExplorerBaseURL      string `json:"explorerBaseUrl"`
 	AxiomUtilityAddress  string `json:"axiomUtilityAddress"`
+	AxiomRewardsAddress  string `json:"axiomRewardsAddress"`
 	DepositWalletAddress string `json:"depositWalletAddress"`
 }
 
