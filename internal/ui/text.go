@@ -96,6 +96,7 @@ func renderRegister(response api.RegisterResponse) string {
 		renderKeyValueRows([][2]string{
 			{"Wallet", response.WalletAddress},
 			{"Profile", response.DisplayName},
+			{"Referral Code", response.ReferralCode},
 			{"Destination Tag", fmt.Sprintf("%d", response.DepositDestinationTag)},
 			{"Status", status},
 		}),
@@ -204,6 +205,7 @@ func renderProfile(profile api.ProfileSummary) string {
 			{"Wallet", profile.WalletAddress},
 			{"Display Name", profile.DisplayName},
 			{"Avatar URL", profile.AvatarURL},
+			{"Referral Code", profile.ReferralCode},
 			{"Destination Tag", optionalInt(profile.DepositDestinationTag)},
 			{"Member Since", optionalTime(profile.MemberSince)},
 			{"Last Login", optionalTime(profile.LastLoginAt)},
@@ -326,6 +328,7 @@ func renderRewards(response api.RewardsResponse) string {
 	if response.Summary != nil {
 		summary := response.Summary
 		lines = append(lines, "", heading("Epoch Summary"), renderKeyValueRows([][2]string{
+			{"Referral Code", summary.ReferralCode},
 			{"Current Epoch", optionalInt(summary.CurrentEpochID)},
 			{"Epoch Ends", optionalTime(summary.CurrentEpochEndsAt)},
 			{"Axiom Points", fmt.Sprintf("%d", summary.CurrentEpochPoints)},

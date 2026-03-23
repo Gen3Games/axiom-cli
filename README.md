@@ -119,6 +119,7 @@ Register it and get a destination tag:
 
 ```bash
 axiom auth register
+axiom auth register --ref-code friend-code
 ```
 
 Inspect wallet details and balances:
@@ -201,6 +202,7 @@ The CLI no longer includes support for Vercel deployment-bypass secrets. Product
 - `axiom config`: Show and update persisted CLI configuration
 - `axiom wallet`: Create, import, inspect, balance-check, and reset local wallets
 - `axiom auth`: Register the active wallet with the backend
+- `axiom auth register --ref-code <code>`: Optionally apply a referral code or referrer wallet address during CLI registration
 - `axiom markets`: List markets and fetch market details
 - `axiom markets list --my-positions`: Filter the list to markets where the active wallet has open positions
 - `axiom profile`: Read profile summary, update display metadata, inspect positions, and inspect unclaimed winnings
@@ -214,9 +216,10 @@ Use `--json` on any command when you want machine-readable output for scripts or
 Notable JSON conventions:
 
 - `profile positions` returns an object with `items` and `total`
+- `profile show` includes the wallet's current `referralCode` when one is assigned
 - `markets list` includes all open markets by default; add `--spot-prices` to include `currentSpotPrices`
 - `markets get` includes per-outcome pool breakdown and the market-level time-bonus configuration when available
-- `rewards show` includes daily-task progress, weekly chest tickets, and claimable epoch reward proofs
+- `rewards show` includes the current `referralCode`, daily-task progress, weekly chest tickets, and claimable epoch reward proofs
 - `claim batch` includes `claimedMarkets`, `totalClaimedPayoutUsd`, and `totalClaimedPnlUsd`
 
 ## Funding modes

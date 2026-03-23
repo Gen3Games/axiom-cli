@@ -408,7 +408,7 @@ func newWalletCommand() *cobra.Command {
 
 func newAuthCommand() *cobra.Command {
 	cmd := &cobra.Command{Use: "auth", Short: "Register the active wallet with the Axiom backend"}
-	cmd.AddCommand(&cobra.Command{
+	registerCmd := &cobra.Command{
 		Use:   "register",
 		Short: "Register or refresh the active wallet with the Axiom CLI API",
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -420,7 +420,7 @@ func newAuthCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			response, err := registerWalletWithCompat(cmd.Context(), ctx, wallet)
+			response, err := registerWalletWithCompat(cmd.Context(), ctx, wallet, mustStringFlag(cmd, "ref-code"))
 			if err != nil {
 				return err
 			}
@@ -433,7 +433,9 @@ func newAuthCommand() *cobra.Command {
 			}
 			return printOutput(ctx.JSON, response)
 		},
-	})
+	}
+	registerCmd.Flags().String("ref-code", "", "Optional referral code or referrer wallet address to apply during registration")
+	cmd.AddCommand(registerCmd)
 	return cmd
 }
 
@@ -1559,14 +1561,14 @@ func parseMerkleProof(proof []string) ([]common.Hash, error) {
 	return parsed, nil
 }
 
-func registerWalletWithCompat(ctx context.Context, cliCtx *cliContext, wallet *evm.Wallet) (*api.RegisterResponse, error) {
+func registerWalletWithCompat(ctx context.Context, cliCtx *cliContext, wallet *evm.Wallet, referrerCode string) (*api.RegisterResponse, error) {
 	issuedAt := time.Now().UTC()
 	walletAddress := wallet.Address().Hex()
 
-	return signAndRegisterWallet(ctx, cliCtx, wallet, walletAddress, issuedAt)
+	return signAndRegisterWallet(ctx, cliCtx, wallet, walletAddress, issuedAt, referrerCode)
 }
 
-func signAndRegisterWallet(ctx context.Context, cliCtx *cliContext, wallet *evm.Wallet, walletAddress string, issuedAt time.Time) (*api.RegisterResponse, error) {
+func signAndRegisterWallet(ctx context.Context, cliCtx *cliContext, wallet *evm.Wallet, walletAddress string, issuedAt time.Time, referrerCode string) (*api.RegisterResponse, error) {
 	message := buildRegistrationMessage(walletAddress, cliCtx.Config.DeviceID, issuedAt)
 	signature, err := wallet.SignMessage(message)
 	if err != nil {
@@ -1578,6 +1580,7 @@ func signAndRegisterWallet(ctx context.Context, cliCtx *cliContext, wallet *evm.
 		Signature:     signature,
 		DeviceID:      cliCtx.Config.DeviceID,
 		IssuedAt:      formatRegistrationIssuedAt(issuedAt),
+		ReferrerCode:  strings.TrimSpace(referrerCode),
 	})
 }
 

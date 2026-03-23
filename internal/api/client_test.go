@@ -50,6 +50,7 @@ func TestRegisterWalletSendsExpectedHeadersAndBody(t *testing.T) {
 		Signature:     "0xsig",
 		DeviceID:      "device-123",
 		IssuedAt:      "2026-03-10T00:00:00.000Z",
+		ReferrerCode:  "friend-code",
 	})
 	if err != nil {
 		t.Fatalf("RegisterWallet() error = %v", err)
@@ -68,6 +69,9 @@ func TestRegisterWalletSendsExpectedHeadersAndBody(t *testing.T) {
 	}
 	if gotRequest.WalletAddress != "0xabc" || gotRequest.Signature != "0xsig" {
 		t.Fatalf("request = %+v, want wallet/signature preserved", gotRequest)
+	}
+	if gotRequest.ReferrerCode != "friend-code" {
+		t.Fatalf("referrerCode = %q, want %q", gotRequest.ReferrerCode, "friend-code")
 	}
 }
 
@@ -224,6 +228,7 @@ func TestGetProfileAcceptsVariantResponseShapes(t *testing.T) {
 			"profile": map[string]any{
 				"address":               "0xabc",
 				"displayName":           "agent",
+				"referralCode":          "agent-alpha",
 				"memberSince":           "2026-03-01T00:00:00Z",
 				"lastLoginAt":           "2026-03-11T00:00:00Z",
 				"depositDestinationTag": 4242,
@@ -253,6 +258,9 @@ func TestGetProfileAcceptsVariantResponseShapes(t *testing.T) {
 	}
 	if profile.DisplayName != "agent" {
 		t.Fatalf("DisplayName = %q, want %q", profile.DisplayName, "agent")
+	}
+	if profile.ReferralCode != "agent-alpha" {
+		t.Fatalf("ReferralCode = %q, want %q", profile.ReferralCode, "agent-alpha")
 	}
 }
 
@@ -350,6 +358,7 @@ func TestGetRewardsAcceptsStringTotalReferrals(t *testing.T) {
 			"walletAddress": "0xabc",
 			"summary": map[string]any{
 				"address":            "0xabc",
+				"referralCode":       "agent-alpha",
 				"totalReferrals":     "0",
 				"currentEpochPoints": 0,
 				"tradingPoints":      0,
@@ -392,6 +401,9 @@ func TestGetRewardsAcceptsStringTotalReferrals(t *testing.T) {
 	}
 	if rewards.Summary.TotalReferrals != 0 {
 		t.Fatalf("TotalReferrals = %d, want 0", rewards.Summary.TotalReferrals)
+	}
+	if rewards.Summary.ReferralCode != "agent-alpha" {
+		t.Fatalf("ReferralCode = %q, want %q", rewards.Summary.ReferralCode, "agent-alpha")
 	}
 }
 

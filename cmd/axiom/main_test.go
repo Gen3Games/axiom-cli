@@ -153,15 +153,18 @@ func TestWalletAuthAndReadCommandsWithMockAPI(t *testing.T) {
 		t.Fatalf("wallet import stdout missing address %q\nstdout:\n%s", wallet.Address().Hex(), stdout)
 	}
 
-	stdout, stderr, err = executeCLI(t, "--json", "--api-url", server.URL+"/api/cli", "auth", "register")
+	stdout, stderr, err = executeCLI(t, "--json", "--api-url", server.URL+"/api/cli", "auth", "register", "--ref-code", "friend-code")
 	if err != nil {
 		t.Fatalf("auth register error = %v\nstderr:\n%s", err, stderr)
 	}
-	if !strings.Contains(stdout, "4242") {
+	if !strings.Contains(stdout, "4242") || !strings.Contains(stdout, "default-alpha") {
 		t.Fatalf("auth register stdout missing destination tag\nstdout:\n%s", stdout)
 	}
 	if state.lastRegister.WalletAddress != wallet.Address().Hex() {
 		t.Fatalf("register wallet = %q, want %q", state.lastRegister.WalletAddress, wallet.Address().Hex())
+	}
+	if state.lastRegister.ReferrerCode != "friend-code" {
+		t.Fatalf("register referrerCode = %q, want %q", state.lastRegister.ReferrerCode, "friend-code")
 	}
 	if state.lastRegister.DeviceID == "" || state.lastDeviceHeader == "" {
 		t.Fatalf("register device ID/body header should be non-empty, got body=%q header=%q", state.lastRegister.DeviceID, state.lastDeviceHeader)
@@ -198,7 +201,7 @@ func TestWalletAuthAndReadCommandsWithMockAPI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("profile show error = %v\nstderr:\n%s", err, stderr)
 	}
-	if !strings.Contains(stdout, wallet.Address().Hex()) || !strings.Contains(stdout, "default") {
+	if !strings.Contains(stdout, wallet.Address().Hex()) || !strings.Contains(stdout, "default") || !strings.Contains(stdout, "default-alpha") {
 		t.Fatalf("profile show stdout missing profile data\nstdout:\n%s", stdout)
 	}
 
@@ -212,6 +215,9 @@ func TestWalletAuthAndReadCommandsWithMockAPI(t *testing.T) {
 	}
 	if profilePayload["walletAddress"] != wallet.Address().Hex() {
 		t.Fatalf("walletAddress = %#v, want %q", profilePayload["walletAddress"], wallet.Address().Hex())
+	}
+	if profilePayload["referralCode"] != "default-alpha" {
+		t.Fatalf("referralCode = %#v, want %q", profilePayload["referralCode"], "default-alpha")
 	}
 	statsPayload, ok := profilePayload["stats"].(map[string]any)
 	if !ok || statsPayload["pnlUsd"] == nil || statsPayload["winRate"] == nil {
@@ -494,7 +500,7 @@ func TestRewardsShowAndClaimCommands(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rewards show error = %v\nstderr:\n%s", err, stderr)
 	}
-	if !strings.Contains(stdout, "totalClaimableEpochRewardsXrp") || !strings.Contains(stdout, "dailyChestClaimed") {
+	if !strings.Contains(stdout, "totalClaimableEpochRewardsXrp") || !strings.Contains(stdout, "dailyChestClaimed") || !strings.Contains(stdout, "referralCode") {
 		t.Fatalf("rewards show stdout missing rewards fields\nstdout:\n%s", stdout)
 	}
 
@@ -503,6 +509,8 @@ func TestRewardsShowAndClaimCommands(t *testing.T) {
 		t.Fatalf("rewards show text error = %v\nstderr:\n%s", err, stderr)
 	}
 	for _, want := range []string{
+		"Referral Code",
+		"default-alpha",
 		"Predict using $5+",
 		"Post on X tagging @AxiomProtocol_",
 		"Place a bet of $10+ on a single outcome",
@@ -718,6 +726,7 @@ func TestAuthRegisterUsesMillisecondPrecisionIssuedAt(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(api.RegisterResponse{
 				WalletAddress:         request.WalletAddress,
 				DisplayName:           "default",
+				ReferralCode:          "default-alpha",
 				DepositDestinationTag: 4242,
 				Created:               true,
 			})
@@ -931,6 +940,7 @@ func newMockAPIServer(t *testing.T) (*httptest.Server, *mockAPIState) {
 			_ = json.NewEncoder(w).Encode(api.RegisterResponse{
 				WalletAddress:         request.WalletAddress,
 				DisplayName:           "default",
+				ReferralCode:          "default-alpha",
 				DepositDestinationTag: 4242,
 				Created:               true,
 			})
@@ -1005,6 +1015,7 @@ func newMockAPIServer(t *testing.T) (*httptest.Server, *mockAPIState) {
 				WalletAddress:         filepath.Base(r.URL.Path),
 				DisplayName:           displayName,
 				AvatarURL:             avatarURL,
+				ReferralCode:          "default-alpha",
 				DepositDestinationTag: &tag,
 				MemberSince:           ptrTime(now.Add(-7 * 24 * time.Hour)),
 				LastLoginAt:           ptrTime(now),
@@ -1042,6 +1053,7 @@ func newMockAPIServer(t *testing.T) (*httptest.Server, *mockAPIState) {
 				WalletAddress: filepath.Base(filepath.Dir(r.URL.Path)),
 				Summary: &api.RewardsSummary{
 					Address:             filepath.Base(filepath.Dir(r.URL.Path)),
+					ReferralCode:        "default-alpha",
 					TotalReferrals:      2,
 					CurrentEpochID:      &epochID,
 					CurrentEpochEndsAt:  &endsAt,
@@ -1077,6 +1089,7 @@ func newMockAPIServer(t *testing.T) (*httptest.Server, *mockAPIState) {
 			_ = json.NewEncoder(w).Encode(api.ProfileSummary{
 				WalletAddress:         filepath.Base(r.URL.Path),
 				DisplayName:           "default",
+				ReferralCode:          "default-alpha",
 				DepositDestinationTag: &tag,
 				MemberSince:           ptrTime(now.Add(-7 * 24 * time.Hour)),
 				LastLoginAt:           ptrTime(now),

@@ -60,9 +60,12 @@ Request body:
   "walletAddress": "0x...",
   "signature": "0x...",
   "deviceId": "uuid",
-  "issuedAt": "2026-03-10T00:00:00Z"
+  "issuedAt": "2026-03-10T00:00:00Z",
+  "referrerCode": "friend-code"
 }
 ```
+
+`referrerCode` is optional and may be either a referral code or a referrer wallet address.
 
 Response body:
 
@@ -70,6 +73,7 @@ Response body:
 {
   "walletAddress": "0x...",
   "displayName": "default",
+  "referralCode": "default-alpha",
   "depositDestinationTag": 123456,
   "created": true
 }
@@ -286,6 +290,7 @@ Response body contains:
 - `summary.currentEpochEndsAt`
 - `summary.currentEpochPoints`
 - `summary.estimatedPayoutXrp`
+- `summary.referralCode`
 - `summary.totalReferrals`
 - `dailyTasks.completedCount`
 - `dailyTasks.requiredCount`

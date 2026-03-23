@@ -39,8 +39,8 @@ func TestRenderKnownTypes(t *testing.T) {
 		},
 		{
 			name:  "register",
-			value: api.RegisterResponse{WalletAddress: "0xabc", DisplayName: "default", DepositDestinationTag: 4242, Created: true},
-			want:  []string{"CLI Registration", "Wallet", "Destination Tag", "created"},
+			value: api.RegisterResponse{WalletAddress: "0xabc", DisplayName: "default", ReferralCode: "default-alpha", DepositDestinationTag: 4242, Created: true},
+			want:  []string{"CLI Registration", "Wallet", "Referral Code", "default-alpha", "Destination Tag", "created"},
 		},
 		{
 			name:  "markets",
@@ -78,12 +78,13 @@ func TestRenderKnownTypes(t *testing.T) {
 			value: api.ProfileSummary{
 				WalletAddress:         "0xabc",
 				DisplayName:           "default",
+				ReferralCode:          "default-alpha",
 				DepositDestinationTag: &tag,
 				MemberSince:           &memberSince,
 				LastLoginAt:           &now,
 				Stats:                 api.ProfileStats{TotalPredictions: 12, ResolvedMarkets: 5, OpenMarkets: 7, UnclaimedPayoutUSD: "12.34", UnclaimedPnlUSD: "1.23", LeaderboardRank: &rank, PnlUSD: 4.56, PnlPercent: 7.89, VolumeUSD: 123.45, WinRate: 66.6},
 			},
-			want: []string{"Profile", "Performance", "Win Rate", "66.60%", "$123.45", "$4.56", "4242"},
+			want: []string{"Profile", "Referral Code", "default-alpha", "Performance", "Win Rate", "66.60%", "$123.45", "$4.56", "4242"},
 		},
 		{
 			name:  "positions",

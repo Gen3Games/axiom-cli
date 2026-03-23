@@ -53,11 +53,13 @@ type RegisterRequest struct {
 	Signature     string `json:"signature"`
 	DeviceID      string `json:"deviceId"`
 	IssuedAt      string `json:"issuedAt"`
+	ReferrerCode  string `json:"referrerCode,omitempty"`
 }
 
 type RegisterResponse struct {
 	WalletAddress         string `json:"walletAddress"`
 	DisplayName           string `json:"displayName"`
+	ReferralCode          string `json:"referralCode"`
 	DepositDestinationTag int    `json:"depositDestinationTag"`
 	Created               bool   `json:"created"`
 }
@@ -144,6 +146,7 @@ type ProfileSummary struct {
 	WalletAddress         string       `json:"walletAddress"`
 	DisplayName           string       `json:"displayName"`
 	AvatarURL             string       `json:"avatarUrl"`
+	ReferralCode          string       `json:"referralCode"`
 	DepositDestinationTag *int         `json:"depositDestinationTag"`
 	MemberSince           *time.Time   `json:"memberSince"`
 	LastLoginAt           *time.Time   `json:"lastLoginAt"`
@@ -176,6 +179,7 @@ func (p *ProfileSummary) UnmarshalJSON(data []byte) error {
 		DisplayName           string        `json:"displayName"`
 		Name                  string        `json:"name"`
 		AvatarURL             string        `json:"avatarUrl"`
+		ReferralCode          string        `json:"referralCode"`
 		DepositDestinationTag *int          `json:"depositDestinationTag"`
 		DestinationTag        *int          `json:"destinationTag"`
 		MemberSince           *time.Time    `json:"memberSince"`
@@ -262,6 +266,7 @@ func (p *ProfileSummary) UnmarshalJSON(data []byte) error {
 	p.WalletAddress = firstNonEmptyString(aux.WalletAddress, aux.Address)
 	p.DisplayName = firstNonEmptyString(aux.DisplayName, aux.Name)
 	p.AvatarURL = aux.AvatarURL
+	p.ReferralCode = aux.ReferralCode
 	p.DepositDestinationTag = firstNonNilInt(aux.DepositDestinationTag, aux.DestinationTag)
 	p.MemberSince = firstNonNilTime(aux.MemberSince, aux.CreatedAt)
 	p.LastLoginAt = firstNonNilTime(aux.LastLoginAt, aux.LastLogin)
@@ -386,6 +391,7 @@ type FundingResponse struct {
 
 type RewardsSummary struct {
 	Address             string     `json:"address"`
+	ReferralCode        string     `json:"referralCode"`
 	TotalReferrals      int        `json:"totalReferrals"`
 	CurrentEpochID      *int       `json:"currentEpochId"`
 	CurrentEpochEndsAt  *time.Time `json:"currentEpochEndsAt"`
@@ -402,6 +408,7 @@ type RewardsSummary struct {
 func (r *RewardsSummary) UnmarshalJSON(data []byte) error {
 	type rewardsSummaryAlias struct {
 		Address             string          `json:"address"`
+		ReferralCode        string          `json:"referralCode"`
 		TotalReferrals      json.RawMessage `json:"totalReferrals"`
 		CurrentEpochID      *int            `json:"currentEpochId"`
 		CurrentEpochEndsAt  *time.Time      `json:"currentEpochEndsAt"`
@@ -426,6 +433,7 @@ func (r *RewardsSummary) UnmarshalJSON(data []byte) error {
 	}
 
 	r.Address = aux.Address
+	r.ReferralCode = aux.ReferralCode
 	r.TotalReferrals = totalReferrals
 	r.CurrentEpochID = aux.CurrentEpochID
 	r.CurrentEpochEndsAt = aux.CurrentEpochEndsAt
