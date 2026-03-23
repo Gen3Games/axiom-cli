@@ -345,12 +345,8 @@ func renderRewards(response api.RewardsResponse) string {
 			{"Completed", fmt.Sprintf("%d/%d", tasks.CompletedCount, tasks.RequiredCount)},
 			{"Requirement Met", yesNo(tasks.HasCompletedRequirement)},
 			{"Daily Chest Claimed", yesNo(tasks.DailyChestClaimed)},
-			{"Predict Task", yesNo(tasks.HasPredictTask)},
-			{"Twitter Post Task", yesNo(tasks.HasDailyTwitterPostTask)},
-			{"Big Bet Task", yesNo(tasks.HasBigBetTask)},
-			{"Claim Winnings Task", yesNo(tasks.HasClaimWinningsTask)},
-			{"Multi-Market Task", yesNo(tasks.HasMultiMarketTask)},
 		}))
+		lines = append(lines, "", renderTable([]string{"Task", "Done", "Next Step"}, dailyTaskGuideRows(tasks)))
 	}
 
 	if response.Streak != nil {
@@ -394,6 +390,16 @@ func renderRewards(response api.RewardsResponse) string {
 	}
 
 	return strings.Join(lines, "\n")
+}
+
+func dailyTaskGuideRows(tasks *api.DailyTaskStatus) [][]string {
+	return [][]string{
+		{"Predict using $5+", yesNo(tasks.HasPredictTask), "Run axiom markets list, then axiom predict buy"},
+		{"Post on X tagging @AxiomProtocol_", yesNo(tasks.HasDailyTwitterPostTask), "Complete this task in the web app rewards view"},
+		{"Place a bet of $10+ on a single outcome", yesNo(tasks.HasBigBetTask), "Use axiom predict buy with a $10+ position"},
+		{"Claim winnings from a resolved market", yesNo(tasks.HasClaimWinningsTask), "Run axiom profile unclaimed, then axiom claim batch"},
+		{"Place bets of $1+ on 3+ different markets", yesNo(tasks.HasMultiMarketTask), "Use axiom predict buy on 3 separate markets"},
+	}
 }
 
 func renderBuyQuote(quote evm.BuyQuote) string {

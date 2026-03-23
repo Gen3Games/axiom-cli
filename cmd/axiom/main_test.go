@@ -498,6 +498,25 @@ func TestRewardsShowAndClaimCommands(t *testing.T) {
 		t.Fatalf("rewards show stdout missing rewards fields\nstdout:\n%s", stdout)
 	}
 
+	stdout, stderr, err = executeCLI(t, "--api-url", server.URL+"/api/cli", "rewards", "show")
+	if err != nil {
+		t.Fatalf("rewards show text error = %v\nstderr:\n%s", err, stderr)
+	}
+	for _, want := range []string{
+		"Predict using $5+",
+		"Post on X tagging @AxiomProtocol_",
+		"Place a bet of $10+ on a single outcome",
+		"Claim winnings from a resolved market",
+		"Place bets of $1+ on 3+ different markets",
+		"Run axiom markets list, then axiom predict buy",
+		"Complete this task in the web app rewards view",
+		"Run axiom profile unclaimed, then axiom claim batch",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("rewards show text stdout missing %q\nstdout:\n%s", want, stdout)
+		}
+	}
+
 	originalClaimEpochRewards := claimEpochRewards
 	var claimedContract common.Address
 	claimEpochRewards = func(_ context.Context, _ string, _ *big.Int, _ string, contractAddress common.Address, _ *big.Int, _ *big.Int, _ []common.Hash) (common.Hash, error) {
