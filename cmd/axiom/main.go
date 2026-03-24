@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -25,6 +26,8 @@ import (
 )
 
 const xrplEVMChainID int64 = 1440000
+const defaultClobProjectionURL = "https://clob.axiomprotocol.io"
+const defaultClobEventstoreURL = "https://clob.axiomprotocol.io/api"
 
 var (
 	flagAPIURL          string
@@ -103,6 +106,7 @@ func newRootCommand() *cobra.Command {
 	rootCmd.AddCommand(newFundingCommand())
 	rootCmd.AddCommand(newPredictCommand())
 	rootCmd.AddCommand(newClaimCommand())
+	rootCmd.AddCommand(newClobCommand())
 
 	return rootCmd
 }
@@ -1049,6 +1053,9 @@ func newPredictCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if isClobMarketImplementation(market.MarketImplementation) {
+				return errors.New("predict quote currently supports TieredParimutuel markets only; use `axiom markets get` to inspect CLOB logical markets during Phase 1")
+			}
 			amount, _ := cmd.Flags().GetString("amount")
 			if amount == "" {
 				return errors.New("--amount is required")
@@ -1108,6 +1115,9 @@ func newPredictCommand() *cobra.Command {
 			market, err := ctx.API.GetMarket(cmd.Context(), args[0], mustStringFlag(cmd, "instance-date"))
 			if err != nil {
 				return err
+			}
+			if isClobMarketImplementation(market.MarketImplementation) {
+				return errors.New("predict buy currently supports TieredParimutuel markets only; use `axiom markets get` to inspect CLOB logical markets during Phase 1")
 			}
 			amount, _ := cmd.Flags().GetString("amount")
 			if amount == "" {
@@ -1200,6 +1210,9 @@ func newClaimCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if isClobMarketImplementation(market.MarketImplementation) {
+				return errors.New("claim market currently supports TieredParimutuel markets only; CLOB settlement is intentionally not routed through the parimutuel claim path")
+			}
 			txHash, err := claimSingleMarket(cmd.Context(), ctx.Config.EVMRPCURL, big.NewInt(xrplEVMChainID), privateKeyHex, common.HexToAddress(market.ContractAddress))
 			if err != nil {
 				return err
@@ -1287,6 +1300,217 @@ func newClaimCommand() *cobra.Command {
 	}
 	batchCmd.Flags().Bool("wait", false, "Wait for transaction finality")
 	cmd.AddCommand(batchCmd)
+
+	return cmd
+}
+
+func newClobCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "clob",
+		Short: "Inspect and manage hosted CLOB books, orders, fills, and cancellations",
+	}
+	cmd.PersistentFlags().String("projection-url", firstNonEmpty(os.Getenv("AXIOM_CLOB_PROJECTION_URL"), os.Getenv("CLOB_PROJECTION_URL"), defaultClobProjectionURL), "Override the hosted CLOB projection base URL")
+	cmd.PersistentFlags().String("eventstore-url", firstNonEmpty(os.Getenv("AXIOM_CLOB_EVENTSTORE_URL"), os.Getenv("CLOB_EVENTSTORE_URL"), defaultClobEventstoreURL), "Override the hosted CLOB eventstore base URL")
+
+	bookCmd := &cobra.Command{Use: "book", Short: "Inspect hosted CLOB books"}
+	depthCmd := &cobra.Command{
+		Use:   "depth --market <id> --outcome <index>",
+		Short: "Fetch the hosted depth ladder and book summary for a logical CLOB proposition",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+			market := strings.TrimSpace(mustStringFlag(cmd, "market"))
+			if market == "" {
+				return errors.New("--market is required")
+			}
+			outcome, err := cmd.Flags().GetInt("outcome")
+			if err != nil {
+				return err
+			}
+			projectionURL := strings.TrimSpace(mustStringFlag(cmd, "projection-url"))
+			book, err := ctx.API.GetClobBook(cmd.Context(), projectionURL, market, outcome)
+			if err != nil {
+				return err
+			}
+			depth, err := ctx.API.GetClobDepth(cmd.Context(), projectionURL, market, outcome)
+			if err != nil {
+				return err
+			}
+			return printOutput(ctx.JSON, map[string]any{
+				"book":  book,
+				"depth": depth,
+			})
+		},
+	}
+	depthCmd.Flags().String("market", "", "Logical market ID for the CLOB proposition")
+	depthCmd.Flags().Int("outcome", 0, "Displayed outcome index within the logical market")
+	bookCmd.AddCommand(depthCmd)
+	cmd.AddCommand(bookCmd)
+
+	ordersCmd := &cobra.Command{Use: "orders", Short: "Inspect hosted CLOB orders"}
+	ordersListCmd := &cobra.Command{
+		Use:   "list --market <id> --outcome <index>",
+		Short: "List hosted CLOB orders for a logical proposition or wallet",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+			market := strings.TrimSpace(mustStringFlag(cmd, "market"))
+			if market == "" {
+				return errors.New("--market is required")
+			}
+			outcome, err := cmd.Flags().GetInt("outcome")
+			if err != nil {
+				return err
+			}
+			maker := strings.TrimSpace(mustStringFlag(cmd, "maker"))
+			status := strings.TrimSpace(mustStringFlag(cmd, "status"))
+			limit, err := cmd.Flags().GetInt("limit")
+			if err != nil {
+				return err
+			}
+			activeOnly, err := cmd.Flags().GetBool("active-only")
+			if err != nil {
+				return err
+			}
+			projectionURL := strings.TrimSpace(mustStringFlag(cmd, "projection-url"))
+			filters := url.Values{}
+			filters.Set("clob_id", fmt.Sprintf("%s-%d", market, outcome))
+			if maker != "" {
+				filters.Set("maker", maker)
+			}
+			if status != "" {
+				filters.Set("status", status)
+			}
+			if activeOnly {
+				filters.Set("active_only", "true")
+			}
+			if limit > 0 {
+				filters.Set("limit", strconv.Itoa(limit))
+			}
+			orders, err := ctx.API.ListClobOrders(cmd.Context(), projectionURL, filters)
+			if err != nil {
+				return err
+			}
+			return printOutput(ctx.JSON, map[string]any{
+				"market":  market,
+				"outcome": outcome,
+				"items":   orders,
+				"total":   len(orders),
+			})
+		},
+	}
+	ordersListCmd.Flags().String("market", "", "Logical market ID for the CLOB proposition")
+	ordersListCmd.Flags().Int("outcome", 0, "Displayed outcome index within the logical market")
+	ordersListCmd.Flags().String("maker", "", "Optional maker wallet filter")
+	ordersListCmd.Flags().String("status", "", "Optional order status filter")
+	ordersListCmd.Flags().Bool("active-only", false, "Only return resting active orders")
+	ordersListCmd.Flags().Int("limit", 20, "Maximum number of orders to return")
+	ordersCmd.AddCommand(ordersListCmd)
+	cmd.AddCommand(ordersCmd)
+
+	fillsCmd := &cobra.Command{Use: "fills", Short: "Inspect hosted CLOB fills"}
+	fillsListCmd := &cobra.Command{
+		Use:   "list --market <id> --outcome <index>",
+		Short: "List hosted CLOB fills for a logical proposition or wallet",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+			market := strings.TrimSpace(mustStringFlag(cmd, "market"))
+			if market == "" {
+				return errors.New("--market is required")
+			}
+			outcome, err := cmd.Flags().GetInt("outcome")
+			if err != nil {
+				return err
+			}
+			wallet := strings.TrimSpace(mustStringFlag(cmd, "wallet"))
+			limit, err := cmd.Flags().GetInt("limit")
+			if err != nil {
+				return err
+			}
+			projectionURL := strings.TrimSpace(mustStringFlag(cmd, "projection-url"))
+			filters := url.Values{}
+			filters.Set("clob_id", fmt.Sprintf("%s-%d", market, outcome))
+			if wallet != "" {
+				filters.Set("wallet", wallet)
+			}
+			if limit > 0 {
+				filters.Set("limit", strconv.Itoa(limit))
+			}
+			fills, err := ctx.API.ListClobFills(cmd.Context(), projectionURL, filters)
+			if err != nil {
+				return err
+			}
+			return printOutput(ctx.JSON, map[string]any{
+				"market":  market,
+				"outcome": outcome,
+				"items":   fills,
+				"total":   len(fills),
+			})
+		},
+	}
+	fillsListCmd.Flags().String("market", "", "Logical market ID for the CLOB proposition")
+	fillsListCmd.Flags().Int("outcome", 0, "Displayed outcome index within the logical market")
+	fillsListCmd.Flags().String("wallet", "", "Optional wallet filter for buyer or seller participation")
+	fillsListCmd.Flags().Int("limit", 20, "Maximum number of fills to return")
+	fillsCmd.AddCommand(fillsListCmd)
+	cmd.AddCommand(fillsCmd)
+
+	orderCmd := &cobra.Command{Use: "order", Short: "Manage hosted CLOB orders"}
+	cancelCmd := &cobra.Command{
+		Use:   "cancel --order-id <id> --market <id> --outcome <index>",
+		Short: "Cancel a hosted resting CLOB order using the requester wallet address",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+			orderID := strings.TrimSpace(mustStringFlag(cmd, "order-id"))
+			market := strings.TrimSpace(mustStringFlag(cmd, "market"))
+			requester := strings.TrimSpace(mustStringFlag(cmd, "requester"))
+			if orderID == "" {
+				return errors.New("--order-id is required")
+			}
+			if market == "" {
+				return errors.New("--market is required")
+			}
+			if requester == "" {
+				requester = strings.TrimSpace(ctx.Profile.EVMAddress)
+			}
+			if requester == "" {
+				return errors.New("--requester is required when the active profile does not have an EVM wallet configured")
+			}
+			outcome, err := cmd.Flags().GetInt("outcome")
+			if err != nil {
+				return err
+			}
+			reason := strings.TrimSpace(mustStringFlag(cmd, "reason"))
+			eventstoreURL := strings.TrimSpace(mustStringFlag(cmd, "eventstore-url"))
+			response, err := ctx.API.CancelClobOrder(cmd.Context(), eventstoreURL, orderID, api.ClobCancelOrderRequest{
+				Market:    market,
+				Outcome:   outcome,
+				Requester: requester,
+				Reason:    reason,
+			})
+			if err != nil {
+				return err
+			}
+			return printOutput(ctx.JSON, response)
+		},
+	}
+	cancelCmd.Flags().String("order-id", "", "Order UUID to cancel")
+	cancelCmd.Flags().String("market", "", "Logical market ID for the order book")
+	cancelCmd.Flags().Int("outcome", 0, "Displayed outcome index within the logical market")
+	cancelCmd.Flags().String("requester", "", "Requester wallet address; defaults to the active profile EVM address")
+	cancelCmd.Flags().String("reason", "user-requested", "Optional cancellation reason")
+	orderCmd.AddCommand(cancelCmd)
+	cmd.AddCommand(orderCmd)
 
 	return cmd
 }
@@ -2004,6 +2228,9 @@ func enrichMarketsWithSpotPrices(ctx context.Context, cliCtx *cliContext, respon
 	}
 	for index := range response.Items {
 		item := &response.Items[index]
+		if isClobMarketImplementation(item.MarketImplementation) {
+			continue
+		}
 		if strings.TrimSpace(item.ContractAddress) == "" || len(item.Outcomes) == 0 {
 			continue
 		}
@@ -2013,6 +2240,10 @@ func enrichMarketsWithSpotPrices(ctx context.Context, cliCtx *cliContext, respon
 		}
 		item.CurrentSpotPrices = marketSpotPrices(state, item.Outcomes)
 	}
+}
+
+func isClobMarketImplementation(value string) bool {
+	return strings.EqualFold(strings.TrimSpace(value), "AxiomCTFMarket")
 }
 
 func marketSpotPrices(state *evm.MarketState, outcomes []api.Outcome) []api.OutcomeSpotPrice {

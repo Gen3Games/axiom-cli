@@ -216,6 +216,140 @@ func TestBuildURLPreservesBasePathAndQuery(t *testing.T) {
 	}
 }
 
+func TestGetClobDepthUsesHostedProjectionBase(t *testing.T) {
+	t.Parallel()
+
+	var gotPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.RequestURI()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(ClobDepth{
+			Bids: []ClobDepthLevel{{ClobID: "market-123-1", Side: "buy", Price: 6100, TotalQty: 12500000, OrderCount: 2}},
+			Asks: []ClobDepthLevel{{ClobID: "market-123-1", Side: "sell", Price: 6400, TotalQty: 7000000, OrderCount: 1}},
+		})
+	}))
+	defer server.Close()
+
+	client, err := NewClient("https://example.com/api/cli", "device-123")
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	depth, err := client.GetClobDepth(context.Background(), server.URL, "market-123", 1)
+	if err != nil {
+		t.Fatalf("GetClobDepth() error = %v", err)
+	}
+	if gotPath != "/books/market-123/1/depth" {
+		t.Fatalf("request path = %q, want %q", gotPath, "/books/market-123/1/depth")
+	}
+	if len(depth.Bids) != 1 || depth.Bids[0].Price != 6100 {
+		t.Fatalf("depth.Bids = %+v, want hosted bid ladder", depth.Bids)
+	}
+	if len(depth.Asks) != 1 || depth.Asks[0].Price != 6400 {
+		t.Fatalf("depth.Asks = %+v, want hosted ask ladder", depth.Asks)
+	}
+}
+
+func TestListClobOrdersPreservesQueryFilters(t *testing.T) {
+	t.Parallel()
+
+	var gotQuery string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode([]ClobOrder{{
+			OrderID:   "order-1",
+			ClobID:    "market-123-0",
+			Maker:     "0xabc",
+			Side:      "buy",
+			Status:    "open",
+			Price:     intPtr(6200),
+			Quantity:  5000000,
+			Remaining: 5000000,
+		}})
+	}))
+	defer server.Close()
+
+	client, err := NewClient("https://example.com/api/cli", "device-123")
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	filters := url.Values{}
+	filters.Set("clob_id", "market-123-0")
+	filters.Set("maker", "0xabc")
+	filters.Set("active_only", "true")
+	orders, err := client.ListClobOrders(context.Background(), server.URL, filters)
+	if err != nil {
+		t.Fatalf("ListClobOrders() error = %v", err)
+	}
+	if !strings.Contains(gotQuery, "clob_id=market-123-0") || !strings.Contains(gotQuery, "maker=0xabc") || !strings.Contains(gotQuery, "active_only=true") {
+		t.Fatalf("query = %q, want hosted CLOB filters preserved", gotQuery)
+	}
+	if len(orders) != 1 || orders[0].OrderID != "order-1" {
+		t.Fatalf("orders = %+v, want hosted orders payload", orders)
+	}
+}
+
+func TestCancelClobOrderUsesHostedEventstoreBase(t *testing.T) {
+	t.Parallel()
+
+	var gotMethod string
+	var gotPath string
+	var gotContentType string
+	var gotRequest ClobCancelOrderRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		gotContentType = r.Header.Get("Content-Type")
+		if err := json.NewDecoder(r.Body).Decode(&gotRequest); err != nil {
+			t.Fatalf("Decode(request body) error = %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(ClobOrderResponse{
+			OrderID:           "order-1",
+			RemainingQuantity: 0,
+			TradeCount:        0,
+			WasAddedToBook:    false,
+		})
+	}))
+	defer server.Close()
+
+	client, err := NewClient("https://example.com/api/cli", "device-123")
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	response, err := client.CancelClobOrder(context.Background(), server.URL+"/api", "order-1", ClobCancelOrderRequest{
+		Market:    "market-123",
+		Outcome:   0,
+		Requester: "0xabc",
+		Reason:    "user-requested",
+	})
+	if err != nil {
+		t.Fatalf("CancelClobOrder() error = %v", err)
+	}
+	if gotMethod != http.MethodDelete {
+		t.Fatalf("method = %q, want %q", gotMethod, http.MethodDelete)
+	}
+	if gotPath != "/api/orders/order-1" {
+		t.Fatalf("request path = %q, want %q", gotPath, "/api/orders/order-1")
+	}
+	if gotContentType != "application/json" {
+		t.Fatalf("Content-Type = %q, want %q", gotContentType, "application/json")
+	}
+	if gotRequest.Requester != "0xabc" || gotRequest.Market != "market-123" || gotRequest.Outcome != 0 {
+		t.Fatalf("request = %+v, want requester/market/outcome preserved", gotRequest)
+	}
+	if response.OrderID != "order-1" || response.RemainingQuantity != 0 {
+		t.Fatalf("response = %+v, want cancelled order response payload", response)
+	}
+}
+
+func intPtr(value int) *int {
+	return &value
+}
+
 func TestGetProfileAcceptsVariantResponseShapes(t *testing.T) {
 	t.Parallel()
 
@@ -313,6 +447,76 @@ func TestUpdateProfileSendsExpectedBody(t *testing.T) {
 	}
 	if profile.AvatarURL != avatarURL {
 		t.Fatalf("AvatarURL = %q, want %q", profile.AvatarURL, avatarURL)
+	}
+}
+
+func TestGetMarketParsesImplementationAwarePayload(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/cli/markets/test-clob-market" {
+			t.Fatalf("request path = %q, want %q", r.URL.Path, "/api/cli/markets/test-clob-market")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":                   "test-clob-market",
+			"marketType":           "standalone",
+			"marketImplementation": "AxiomCTFMarket",
+			"title":                "Test CLOB Market",
+			"headline":             nil,
+			"description":          "hidden fixture",
+			"category":             "world",
+			"status":               "active",
+			"startsAt":             "2026-03-20T00:00:00Z",
+			"endsAt":               "2030-12-31T23:59:00Z",
+			"resolveBy":            "2031-01-31T23:59:00Z",
+			"contractAddress":      "0xAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAa",
+			"chainId":              1440000,
+			"isResolved":           false,
+			"isSeries":             false,
+			"metadataUri":          nil,
+			"imageUrl":             nil,
+			"logicalMarketAddresses": []string{
+				"0xAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAa",
+				"0xBbBbBbBbBbBbBbBbBbBbBbBbBbBbBbBbBbBbBbBb",
+			},
+			"ctfOutcomeMarkets": []map[string]any{
+				{
+					"outcomeId":       "yes",
+					"outcomeIndex":    0,
+					"label":           "Yes",
+					"contractAddress": "0xAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAa",
+					"outcomeTokenIds": []string{"1", "2"},
+				},
+			},
+			"outcomes":             []map[string]any{{"index": 0, "label": "Yes", "description": ""}},
+			"settlementToken":      nil,
+			"creator":              nil,
+			"ownerAddress":         nil,
+			"resolvedOutcomeIndex": nil,
+			"resolutionCriteria":   "rules",
+			"tags":                 []string{"internal"},
+		})
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL+"/api/cli", "")
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	market, err := client.GetMarket(context.Background(), "test-clob-market", "")
+	if err != nil {
+		t.Fatalf("GetMarket() error = %v", err)
+	}
+	if market.MarketImplementation != "AxiomCTFMarket" {
+		t.Fatalf("MarketImplementation = %q, want %q", market.MarketImplementation, "AxiomCTFMarket")
+	}
+	if len(market.LogicalMarketAddresses) != 2 {
+		t.Fatalf("LogicalMarketAddresses = %v, want 2 addresses", market.LogicalMarketAddresses)
+	}
+	if len(market.CTFOutcomeMarkets) != 1 || market.CTFOutcomeMarkets[0].Label != "Yes" {
+		t.Fatalf("CTFOutcomeMarkets = %+v, want parsed grouped binding", market.CTFOutcomeMarkets)
 	}
 }
 

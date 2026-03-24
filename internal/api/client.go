@@ -70,6 +70,18 @@ type Outcome struct {
 	Description string `json:"description"`
 }
 
+type CtfOutcomeMarketBinding struct {
+	OutcomeID       string   `json:"outcomeId"`
+	OutcomeIndex    int      `json:"outcomeIndex"`
+	Label           string   `json:"label"`
+	ContractAddress string   `json:"contractAddress"`
+	OutcomeTokenIDs []string `json:"outcomeTokenIds"`
+	MetadataURI     string   `json:"metadataUri"`
+	DeploymentID    string   `json:"deploymentId"`
+	QuestionID      string   `json:"questionId"`
+	ConditionID     string   `json:"conditionId"`
+}
+
 type OutcomeSpotPrice struct {
 	Index            int    `json:"index"`
 	Label            string `json:"label"`
@@ -90,29 +102,32 @@ type MarketPoolBreakdown struct {
 }
 
 type MarketListItem struct {
-	ID                string             `json:"id"`
-	MarketType        string             `json:"marketType"`
-	Title             string             `json:"title"`
-	Headline          string             `json:"headline"`
-	Description       string             `json:"description"`
-	Category          string             `json:"category"`
-	Status            string             `json:"status"`
-	StartsAt          time.Time          `json:"startsAt"`
-	EndsAt            time.Time          `json:"endsAt"`
-	ResolveBy         *time.Time         `json:"resolveBy"`
-	ContractAddress   string             `json:"contractAddress"`
-	ChainID           *int64             `json:"chainId"`
-	IsResolved        bool               `json:"isResolved"`
-	IsSeries          bool               `json:"isSeries"`
-	MetadataURI       string             `json:"metadataUri"`
-	ImageURL          string             `json:"imageUrl"`
-	InstanceID        string             `json:"instanceId"`
-	InstanceDate      *time.Time         `json:"instanceDate"`
-	SequenceNumber    *int               `json:"sequenceNumber"`
-	ReferenceValue    string             `json:"referenceValue"`
-	AssetSymbol       string             `json:"assetSymbol"`
-	Outcomes          []Outcome          `json:"outcomes"`
-	CurrentSpotPrices []OutcomeSpotPrice `json:"currentSpotPrices,omitempty"`
+	ID                     string                    `json:"id"`
+	MarketType             string                    `json:"marketType"`
+	MarketImplementation   string                    `json:"marketImplementation"`
+	Title                  string                    `json:"title"`
+	Headline               string                    `json:"headline"`
+	Description            string                    `json:"description"`
+	Category               string                    `json:"category"`
+	Status                 string                    `json:"status"`
+	StartsAt               time.Time                 `json:"startsAt"`
+	EndsAt                 time.Time                 `json:"endsAt"`
+	ResolveBy              *time.Time                `json:"resolveBy"`
+	ContractAddress        string                    `json:"contractAddress"`
+	ChainID                *int64                    `json:"chainId"`
+	IsResolved             bool                      `json:"isResolved"`
+	IsSeries               bool                      `json:"isSeries"`
+	MetadataURI            string                    `json:"metadataUri"`
+	ImageURL               string                    `json:"imageUrl"`
+	LogicalMarketAddresses []string                  `json:"logicalMarketAddresses"`
+	CTFOutcomeMarkets      []CtfOutcomeMarketBinding `json:"ctfOutcomeMarkets"`
+	InstanceID             string                    `json:"instanceId"`
+	InstanceDate           *time.Time                `json:"instanceDate"`
+	SequenceNumber         *int                      `json:"sequenceNumber"`
+	ReferenceValue         string                    `json:"referenceValue"`
+	AssetSymbol            string                    `json:"assetSymbol"`
+	Outcomes               []Outcome                 `json:"outcomes"`
+	CurrentSpotPrices      []OutcomeSpotPrice        `json:"currentSpotPrices,omitempty"`
 }
 
 type MarketsResponse struct {
@@ -170,6 +185,85 @@ type PositionItem struct {
 type PositionsResponse struct {
 	Items []PositionItem `json:"items"`
 	Total int            `json:"total"`
+}
+
+type ClobBook struct {
+	ClobID        string     `json:"clob_id"`
+	MarketID      string     `json:"market_id"`
+	Outcome       int        `json:"outcome"`
+	Creator       string     `json:"creator"`
+	Status        string     `json:"status"`
+	BidCount      int        `json:"bid_count"`
+	AskCount      int        `json:"ask_count"`
+	TradeCount    int        `json:"trade_count"`
+	LastPrice     *int       `json:"last_price"`
+	Volume24h     int        `json:"volume_24h"`
+	EventSequence int        `json:"event_sequence"`
+	CreatedAt     *time.Time `json:"created_at"`
+	UpdatedAt     *time.Time `json:"updated_at"`
+}
+
+type ClobDepthLevel struct {
+	ClobID     string `json:"clob_id"`
+	Side       string `json:"side"`
+	Price      int    `json:"price"`
+	TotalQty   int    `json:"total_qty"`
+	OrderCount int    `json:"order_count"`
+}
+
+type ClobDepth struct {
+	Bids []ClobDepthLevel `json:"bids"`
+	Asks []ClobDepthLevel `json:"asks"`
+}
+
+type ClobOrder struct {
+	OrderID        string     `json:"order_id"`
+	ClobID         string     `json:"clob_id"`
+	Maker          string     `json:"maker"`
+	Side           string     `json:"side"`
+	OrderType      string     `json:"order_type"`
+	Price          *int       `json:"price"`
+	Quantity       int        `json:"quantity"`
+	Remaining      int        `json:"remaining"`
+	TotalFilled    int        `json:"total_filled"`
+	MatchedPending *int       `json:"matched_pending"`
+	OnchainFilled  *int       `json:"onchain_filled"`
+	Status         string     `json:"status"`
+	EventSequence  int        `json:"event_sequence"`
+	CreatedAt      *time.Time `json:"created_at"`
+	UpdatedAt      *time.Time `json:"updated_at"`
+}
+
+type ClobFill struct {
+	TradeID          string     `json:"trade_id"`
+	ClobID           string     `json:"clob_id"`
+	BuyOrderID       string     `json:"buy_order_id"`
+	SellOrderID      string     `json:"sell_order_id"`
+	TakerSide        string     `json:"taker_side"`
+	Buyer            string     `json:"buyer"`
+	Seller           string     `json:"seller"`
+	Price            int        `json:"price"`
+	Quantity         int        `json:"quantity"`
+	BuyerFee         *int       `json:"buyer_fee"`
+	SellerFee        *int       `json:"seller_fee"`
+	SettlementStatus *string    `json:"settlement_status"`
+	TxHash           *string    `json:"tx_hash"`
+	ConfirmedAt      *time.Time `json:"confirmed_at"`
+	CreatedAt        *time.Time `json:"created_at"`
+}
+
+type ClobOrderResponse struct {
+	OrderID           string `json:"order_id"`
+	RemainingQuantity int    `json:"remaining_quantity"`
+	TradeCount        int    `json:"trade_count"`
+	WasAddedToBook    bool   `json:"was_added_to_book"`
+}
+
+type ClobCancelOrderRequest struct {
+	Market    string `json:"market"`
+	Outcome   int    `json:"outcome"`
+	Requester string `json:"requester"`
+	Reason    string `json:"reason,omitempty"`
 }
 
 func (p *ProfileSummary) UnmarshalJSON(data []byte) error {
@@ -723,6 +817,54 @@ func (c *Client) GetFunding(ctx context.Context, address string, limit int) (*Fu
 	return &out, nil
 }
 
+func (c *Client) GetClobBook(ctx context.Context, projectionBaseURL string, market string, outcome int) (*ClobBook, error) {
+	var out ClobBook
+	if err := c.doJSONAgainstBase(ctx, http.MethodGet, projectionBaseURL, path.Join("books", url.PathEscape(market), strconv.Itoa(outcome)), nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *Client) GetClobDepth(ctx context.Context, projectionBaseURL string, market string, outcome int) (*ClobDepth, error) {
+	var out ClobDepth
+	if err := c.doJSONAgainstBase(ctx, http.MethodGet, projectionBaseURL, path.Join("books", url.PathEscape(market), strconv.Itoa(outcome), "depth"), nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *Client) ListClobOrders(ctx context.Context, projectionBaseURL string, filters url.Values) ([]ClobOrder, error) {
+	requestPath := "orders"
+	if len(filters) > 0 {
+		requestPath += "?" + filters.Encode()
+	}
+	var out []ClobOrder
+	if err := c.doJSONAgainstBase(ctx, http.MethodGet, projectionBaseURL, requestPath, nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *Client) ListClobFills(ctx context.Context, projectionBaseURL string, filters url.Values) ([]ClobFill, error) {
+	requestPath := "fills"
+	if len(filters) > 0 {
+		requestPath += "?" + filters.Encode()
+	}
+	var out []ClobFill
+	if err := c.doJSONAgainstBase(ctx, http.MethodGet, projectionBaseURL, requestPath, nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *Client) CancelClobOrder(ctx context.Context, eventstoreBaseURL string, orderID string, request ClobCancelOrderRequest) (*ClobOrderResponse, error) {
+	var out ClobOrderResponse
+	if err := c.doJSONAgainstBase(ctx, http.MethodDelete, eventstoreBaseURL, path.Join("orders", url.PathEscape(orderID)), request, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 func (c *Client) GetRewards(ctx context.Context, address string) (*RewardsResponse, error) {
 	var out RewardsResponse
 	if err := c.doJSON(ctx, http.MethodGet, path.Join("profile", address, "rewards"), nil, &out); err != nil {
@@ -760,6 +902,18 @@ func (c *Client) doJSON(ctx context.Context, method string, requestPath string, 
 	if err != nil {
 		return fmt.Errorf("build request url: %w", err)
 	}
+	return c.doJSONEndpoint(ctx, method, endpoint, body, out, c.baseURL.Host)
+}
+
+func (c *Client) doJSONAgainstBase(ctx context.Context, method string, baseURL string, requestPath string, body any, out any) error {
+	endpoint, host, err := buildURLAgainstBase(baseURL, requestPath)
+	if err != nil {
+		return fmt.Errorf("build request url: %w", err)
+	}
+	return c.doJSONEndpoint(ctx, method, endpoint, body, out, host)
+}
+
+func (c *Client) doJSONEndpoint(ctx context.Context, method string, endpoint *url.URL, body any, out any, host string) error {
 
 	var reader io.Reader
 	if body != nil {
@@ -785,7 +939,7 @@ func (c *Client) doJSON(ctx context.Context, method string, requestPath string, 
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		if strings.Contains(c.baseURL.Host, "localhost") || strings.Contains(c.baseURL.Host, "127.0.0.1") {
+		if strings.Contains(host, "localhost") || strings.Contains(host, "127.0.0.1") {
 			return fmt.Errorf("request api: %w (local CLI API unreachable; start the webapp or run `axiom config set --api-url https://axiomprotocol.io/api/cli`)", err)
 		}
 		return fmt.Errorf("request api: %w", err)
@@ -802,7 +956,7 @@ func (c *Client) doJSON(ctx context.Context, method string, requestPath string, 
 		if json.Unmarshal(data, &apiErr) == nil && apiErr.Error != "" {
 			return fmt.Errorf("api error (%d): %s", resp.StatusCode, apiErr.Error)
 		}
-		if message, ok := formatProtectedDeploymentError(resp.StatusCode, c.baseURL.Host, data); ok {
+		if message, ok := formatProtectedDeploymentError(resp.StatusCode, host, data); ok {
 			return fmt.Errorf("api error (%d): %s", resp.StatusCode, message)
 		}
 		return fmt.Errorf("api error (%d): %s", resp.StatusCode, strings.TrimSpace(string(data)))
@@ -815,6 +969,29 @@ func (c *Client) doJSON(ctx context.Context, method string, requestPath string, 
 		return fmt.Errorf("decode response: %w", err)
 	}
 	return nil
+}
+
+func buildURLAgainstBase(base string, requestPath string) (*url.URL, string, error) {
+	trimmed := strings.TrimRight(strings.TrimSpace(base), "/")
+	parsedBase, err := url.Parse(trimmed)
+	if err != nil {
+		return nil, "", err
+	}
+	relative, err := url.Parse(requestPath)
+	if err != nil {
+		return nil, "", err
+	}
+	endpoint := *parsedBase
+	basePath := strings.TrimSuffix(endpoint.Path, "/")
+	relPath := strings.TrimPrefix(relative.Path, "/")
+	if relPath != "" {
+		endpoint.Path = path.Join(basePath, relPath)
+	} else {
+		endpoint.Path = basePath
+	}
+	endpoint.RawQuery = relative.RawQuery
+	endpoint.Fragment = relative.Fragment
+	return &endpoint, parsedBase.Host, nil
 }
 
 func formatProtectedDeploymentError(statusCode int, host string, data []byte) (string, bool) {

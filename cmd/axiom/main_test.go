@@ -64,6 +64,11 @@ func TestCommandHelpSmoke(t *testing.T) {
 		{args: []string{"predict", "--help"}, want: "Place predictions on Axiom markets"},
 		{args: []string{"predict", "quote", "--help"}, want: "Preview weighted shares"},
 		{args: []string{"predict", "buy", "--help"}, want: "Buy into an Axiom market outcome"},
+		{args: []string{"clob", "--help"}, want: "Inspect and manage hosted CLOB books, orders, fills, and cancellations"},
+		{args: []string{"clob", "book", "depth", "--help"}, want: "Fetch the hosted depth ladder and book summary for a logical CLOB proposition"},
+		{args: []string{"clob", "orders", "list", "--help"}, want: "List hosted CLOB orders for a logical proposition or wallet"},
+		{args: []string{"clob", "fills", "list", "--help"}, want: "List hosted CLOB fills for a logical proposition or wallet"},
+		{args: []string{"clob", "order", "cancel", "--help"}, want: "Cancel a hosted resting CLOB order using the requester wallet address"},
 		{args: []string{"claim", "--help"}, want: "Claim winnings"},
 		{args: []string{"claim", "market", "--help"}, want: "Claim winnings or refunds"},
 		{args: []string{"claim", "batch", "--help"}, want: "Claim all currently unclaimed"},
@@ -393,6 +398,28 @@ func TestPredictBuyDryRunReturnsQuote(t *testing.T) {
 	quote, ok := payload["quote"].(map[string]any)
 	if !ok || quote["amountXrp"] != "1" {
 		t.Fatalf("quote payload = %#v, want quote object with amountXrp", payload["quote"])
+	}
+}
+
+func TestClaimMarketRejectsClobMarkets(t *testing.T) {
+	setCLIEnv(t)
+	server, _ := newMockAPIServer(t)
+	defer server.Close()
+
+	privateKey := "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+	if _, stderr, err := executeCLI(t, "--json", "wallet", "import", "--private-key", privateKey); err != nil {
+		t.Fatalf("wallet import error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	_, _, err := executeCLI(t, "--api-url", server.URL+"/api/cli", "claim", "market", "clob-1")
+	if err == nil {
+		t.Fatal("claim market clob-1 error = nil, want CLOB routing guard")
+	}
+	if !strings.Contains(err.Error(), "claim market currently supports TieredParimutuel markets only") {
+		t.Fatalf("claim market clob-1 error = %q, want TieredParimutuel-only guidance", err)
+	}
+	if !strings.Contains(err.Error(), "CLOB settlement is intentionally not routed through the parimutuel claim path") {
+		t.Fatalf("claim market clob-1 error = %q, want CLOB settlement guidance", err)
 	}
 }
 
@@ -1041,6 +1068,37 @@ func newMockAPIServer(t *testing.T) (*httptest.Server, *mockAPIState) {
 				OwnerAddress:       "0xowner",
 				ResolutionCriteria: "Close price above $3.00 on the candle.",
 				Tags:               []string{"crypto", "daily"},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/cli/markets/clob-1":
+			resolvedOutcomeIndex := 0
+			_ = json.NewEncoder(w).Encode(api.MarketDetails{
+				MarketListItem: api.MarketListItem{
+					ID:                   "clob-1",
+					MarketType:           "binary",
+					MarketImplementation: "AxiomCTFMarket",
+					Title:                "Will XRP close above $3.00 on Friday?",
+					Category:             "crypto",
+					Status:               "resolved",
+					StartsAt:             now.Add(-24 * time.Hour),
+					EndsAt:               now.Add(-2 * time.Hour),
+					ContractAddress:      "0x00000000000000000000000000000000000000C1",
+					IsResolved:           true,
+					LogicalMarketAddresses: []string{
+						"0x00000000000000000000000000000000000000C1",
+						"0x00000000000000000000000000000000000000C2",
+					},
+					CTFOutcomeMarkets: []api.CtfOutcomeMarketBinding{
+						{OutcomeID: "outcome-yes", OutcomeIndex: 0, Label: "Yes", ContractAddress: "0x00000000000000000000000000000000000000C1", OutcomeTokenIDs: []string{"101", "102"}, QuestionID: "question-yes", ConditionID: "condition-yes"},
+						{OutcomeID: "outcome-no", OutcomeIndex: 1, Label: "No", ContractAddress: "0x00000000000000000000000000000000000000C2", OutcomeTokenIDs: []string{"201", "202"}, QuestionID: "question-no", ConditionID: "condition-no"},
+					},
+					Outcomes: []api.Outcome{{Index: 0, Label: "Yes"}, {Index: 1, Label: "No"}},
+				},
+				SettlementToken:      "0x0000000000000000000000000000000000000000",
+				Creator:              "0xcreator",
+				OwnerAddress:         "0xowner",
+				ResolvedOutcomeIndex: &resolvedOutcomeIndex,
+				ResolutionCriteria:   "Friday close must settle above $3.00.",
+				Tags:                 []string{"crypto", "clob"},
 			})
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/cli/profile/") && strings.HasSuffix(r.URL.Path, "/rewards"):
 			epochID := 12
