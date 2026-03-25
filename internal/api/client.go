@@ -259,6 +259,24 @@ type ClobOrderResponse struct {
 	WasAddedToBook    bool   `json:"was_added_to_book"`
 }
 
+type ClobSignedOrderPayload struct {
+	Maker           string `json:"maker"`
+	Taker           string `json:"taker"`
+	CollateralToken string `json:"collateralToken"`
+	OutcomeToken    string `json:"outcomeToken"`
+	OutcomeTokenID  string `json:"outcomeTokenId"`
+	Side            uint8  `json:"side"`
+	MakerAmount     string `json:"makerAmount"`
+	TakerAmount     string `json:"takerAmount"`
+	Expiration      string `json:"expiration"`
+	Nonce           string `json:"nonce"`
+	FeeRateBps      string `json:"feeRateBps"`
+	Signature       string `json:"signature"`
+	Market          string `json:"market"`
+	Outcome         int    `json:"outcome"`
+	OrderType       uint8  `json:"orderType"`
+}
+
 type ClobCancelOrderRequest struct {
 	Market    string `json:"market"`
 	Outcome   int    `json:"outcome"`
@@ -845,6 +863,14 @@ func (c *Client) ListClobOrders(ctx context.Context, projectionBaseURL string, f
 	return out, nil
 }
 
+func (c *Client) GetClobOrder(ctx context.Context, projectionBaseURL string, orderID string) (*ClobOrder, error) {
+	var out ClobOrder
+	if err := c.doJSONAgainstBase(ctx, http.MethodGet, projectionBaseURL, path.Join("orders", url.PathEscape(orderID)), nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 func (c *Client) ListClobFills(ctx context.Context, projectionBaseURL string, filters url.Values) ([]ClobFill, error) {
 	requestPath := "fills"
 	if len(filters) > 0 {
@@ -855,6 +881,23 @@ func (c *Client) ListClobFills(ctx context.Context, projectionBaseURL string, fi
 		return nil, err
 	}
 	return out, nil
+}
+
+func (c *Client) GetClobFill(ctx context.Context, projectionBaseURL string, fillID string) (*ClobFill, error) {
+	var out ClobFill
+	if err := c.doJSONAgainstBase(ctx, http.MethodGet, projectionBaseURL, path.Join("fills", url.PathEscape(fillID)), nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *Client) SubmitClobOrder(ctx context.Context, eventstoreBaseURL string, signedOrder ClobSignedOrderPayload) (*ClobOrderResponse, error) {
+	var out ClobOrderResponse
+	payload := map[string]any{"signed_order": signedOrder}
+	if err := c.doJSONAgainstBase(ctx, http.MethodPost, eventstoreBaseURL, "orders", payload, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
 }
 
 func (c *Client) CancelClobOrder(ctx context.Context, eventstoreBaseURL string, orderID string, request ClobCancelOrderRequest) (*ClobOrderResponse, error) {

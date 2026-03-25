@@ -167,6 +167,25 @@ func renderMarketDetails(market api.MarketDetails) string {
 		}
 		lines = append(lines, "", heading("Outcomes"), renderTable([]string{"Index", "Label", "Description"}, rows))
 	}
+	if len(market.CTFOutcomeMarkets) > 0 {
+		rows := make([][]string, 0, len(market.CTFOutcomeMarkets))
+		for _, binding := range market.CTFOutcomeMarkets {
+			rows = append(rows, []string{
+				fmt.Sprintf("%d", binding.OutcomeIndex),
+				binding.Label,
+				truncate(binding.ContractAddress, 18),
+				truncate(strings.Join(binding.OutcomeTokenIDs, ", "), 24),
+				truncate(binding.ConditionID, 18),
+			})
+		}
+		lines = append(lines, "", heading("CTF Bindings"), renderTable([]string{"Index", "Label", "Market", "Token IDs", "Condition"}, rows))
+	}
+	if len(market.LogicalMarketAddresses) > 0 {
+		lines = append(lines, "", heading("Logical Market Addresses"))
+		for _, address := range market.LogicalMarketAddresses {
+			lines = append(lines, "• "+address)
+		}
+	}
 	if market.PoolBreakdown != nil && len(market.PoolBreakdown.Outcomes) > 0 {
 		lines = append(lines, "", heading("Pool Breakdown"), renderKeyValueRows([][2]string{
 			{"Total Pool", market.PoolBreakdown.TotalPoolXRP + " XRP"},

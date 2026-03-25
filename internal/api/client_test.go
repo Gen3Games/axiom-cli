@@ -291,6 +291,145 @@ func TestListClobOrdersPreservesQueryFilters(t *testing.T) {
 	}
 }
 
+func TestGetClobOrderUsesHostedProjectionBase(t *testing.T) {
+	t.Parallel()
+
+	var gotPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(ClobOrder{
+			OrderID:   "order-1",
+			ClobID:    "market-123-0",
+			Maker:     "0xabc",
+			Side:      "buy",
+			OrderType: "limit",
+			Price:     intPtr(6200),
+			Quantity:  100,
+			Remaining: 80,
+			Status:    "open",
+		})
+	}))
+	defer server.Close()
+
+	client, err := NewClient("https://example.com/api/cli", "device-123")
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	order, err := client.GetClobOrder(context.Background(), server.URL, "order-1")
+	if err != nil {
+		t.Fatalf("GetClobOrder() error = %v", err)
+	}
+	if gotPath != "/orders/order-1" {
+		t.Fatalf("request path = %q, want %q", gotPath, "/orders/order-1")
+	}
+	if order.OrderID != "order-1" || order.Remaining != 80 {
+		t.Fatalf("order = %+v, want hosted order response", order)
+	}
+}
+
+func TestGetClobFillUsesHostedProjectionBase(t *testing.T) {
+	t.Parallel()
+
+	var gotPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		createdAt := time.Unix(1700000000, 0).UTC()
+		_ = json.NewEncoder(w).Encode(ClobFill{
+			TradeID:   "fill-1",
+			ClobID:    "market-123-0",
+			Buyer:     "0xbuyer",
+			Seller:    "0xseller",
+			Price:     6100,
+			Quantity:  25,
+			CreatedAt: &createdAt,
+		})
+	}))
+	defer server.Close()
+
+	client, err := NewClient("https://example.com/api/cli", "device-123")
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	fill, err := client.GetClobFill(context.Background(), server.URL, "fill-1")
+	if err != nil {
+		t.Fatalf("GetClobFill() error = %v", err)
+	}
+	if gotPath != "/fills/fill-1" {
+		t.Fatalf("request path = %q, want %q", gotPath, "/fills/fill-1")
+	}
+	if fill.TradeID != "fill-1" || fill.Price != 6100 {
+		t.Fatalf("fill = %+v, want hosted fill response", fill)
+	}
+}
+
+func TestSubmitClobOrderUsesHostedEventstoreBase(t *testing.T) {
+	t.Parallel()
+
+	var gotMethod string
+	var gotPath string
+	var gotPayload struct {
+		SignedOrder ClobSignedOrderPayload `json:"signed_order"`
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		if err := json.NewDecoder(r.Body).Decode(&gotPayload); err != nil {
+			t.Fatalf("Decode(request body) error = %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(ClobOrderResponse{
+			OrderID:           "order-2",
+			RemainingQuantity: 40,
+			TradeCount:        1,
+			WasAddedToBook:    true,
+		})
+	}))
+	defer server.Close()
+
+	client, err := NewClient("https://example.com/api/cli", "device-123")
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	response, err := client.SubmitClobOrder(context.Background(), server.URL+"/api", ClobSignedOrderPayload{
+		Maker:           "0xabc",
+		Taker:           "0x0000000000000000000000000000000000000000",
+		CollateralToken: "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE",
+		OutcomeToken:    "0x43e3fa6De5D87dd7265053FA55601d1972984edA",
+		OutcomeTokenID:  "101",
+		Side:            0,
+		MakerAmount:     "5000",
+		TakerAmount:     "10000",
+		Expiration:      "1711929600",
+		Nonce:           "1711926000000",
+		FeeRateBps:      "0",
+		Signature:       "0xdeadbeef",
+		Market:          "market-123",
+		Outcome:         0,
+		OrderType:       0,
+	})
+	if err != nil {
+		t.Fatalf("SubmitClobOrder() error = %v", err)
+	}
+	if gotMethod != http.MethodPost {
+		t.Fatalf("method = %q, want %q", gotMethod, http.MethodPost)
+	}
+	if gotPath != "/api/orders" {
+		t.Fatalf("request path = %q, want %q", gotPath, "/api/orders")
+	}
+	if gotPayload.SignedOrder.Market != "market-123" || gotPayload.SignedOrder.OutcomeTokenID != "101" {
+		t.Fatalf("payload = %+v, want signed order preserved", gotPayload.SignedOrder)
+	}
+	if response.OrderID != "order-2" || !response.WasAddedToBook {
+		t.Fatalf("response = %+v, want created resting order response", response)
+	}
+}
+
 func TestCancelClobOrderUsesHostedEventstoreBase(t *testing.T) {
 	t.Parallel()
 

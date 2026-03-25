@@ -30,10 +30,20 @@ const (
 		{"name":"virtualOutcomeSeeds","type":"function","stateMutability":"view","inputs":[{"type":"uint8"}],"outputs":[{"type":"uint256"}]},
 		{"name":"totalWeightedShares","type":"function","stateMutability":"view","inputs":[{"type":"uint8"}],"outputs":[{"type":"uint256"}]},
 		{"name":"buy","type":"function","stateMutability":"payable","inputs":[{"name":"outcome","type":"uint8"},{"name":"amount","type":"uint256"},{"name":"minShares","type":"uint256"}],"outputs":[]},
-		{"name":"claim","type":"function","stateMutability":"nonpayable","inputs":[],"outputs":[]}
+		{"name":"claim","type":"function","stateMutability":"nonpayable","inputs":[],"outputs":[]},
+		{"name":"redeemWithFees","type":"function","stateMutability":"nonpayable","inputs":[{"name":"indexSets","type":"uint256[]"}],"outputs":[{"type":"uint256"}]},
+		{"name":"metadataUri","type":"function","stateMutability":"view","inputs":[],"outputs":[{"type":"string"}]},
+		{"name":"creator","type":"function","stateMutability":"view","inputs":[],"outputs":[{"type":"address"}]},
+		{"name":"collateralToken","type":"function","stateMutability":"view","inputs":[],"outputs":[{"type":"address"}]},
+		{"name":"conditionalTokens","type":"function","stateMutability":"view","inputs":[],"outputs":[{"type":"address"}]},
+		{"name":"outcomeSlotCount","type":"function","stateMutability":"view","inputs":[],"outputs":[{"type":"uint8"}]},
+		{"name":"questionId","type":"function","stateMutability":"view","inputs":[],"outputs":[{"type":"bytes32"}]},
+		{"name":"conditionId","type":"function","stateMutability":"view","inputs":[],"outputs":[{"type":"bytes32"}]}
 	]`
 	erc20ABIJSON = `[
 		{"name":"approve","type":"function","stateMutability":"nonpayable","inputs":[{"name":"spender","type":"address"},{"name":"amount","type":"uint256"}],"outputs":[{"type":"bool"}]},
+		{"name":"allowance","type":"function","stateMutability":"view","inputs":[{"name":"owner","type":"address"},{"name":"spender","type":"address"}],"outputs":[{"type":"uint256"}]},
+		{"name":"balanceOf","type":"function","stateMutability":"view","inputs":[{"name":"account","type":"address"}],"outputs":[{"type":"uint256"}]},
 		{"name":"decimals","type":"function","stateMutability":"view","inputs":[],"outputs":[{"type":"uint8"}]},
 		{"name":"symbol","type":"function","stateMutability":"view","inputs":[],"outputs":[{"type":"string"}]}
 	]`
@@ -65,6 +75,16 @@ type MarketState struct {
 	OutcomePools        []*big.Int
 	VirtualSeeds        []*big.Int
 	TotalWeightedShares []*big.Int
+}
+
+type CTFMarketMetadata struct {
+	MetadataURI       string
+	Creator           common.Address
+	CollateralToken   common.Address
+	ConditionalTokens common.Address
+	OutcomeSlotCount  uint8
+	QuestionID        common.Hash
+	ConditionID       common.Hash
 }
 
 type BuyQuote struct {
@@ -163,6 +183,53 @@ func LoadMarketState(ctx context.Context, rpcURL string, marketAddress common.Ad
 		OutcomePools:        outcomePools,
 		VirtualSeeds:        virtualSeeds,
 		TotalWeightedShares: totalWeightedShares,
+	}, nil
+}
+
+func LoadCTFMarketMetadata(ctx context.Context, rpcURL string, marketAddress common.Address) (*CTFMarketMetadata, error) {
+	client, err := ethclient.DialContext(ctx, rpcURL)
+	if err != nil {
+		return nil, fmt.Errorf("connect rpc: %w", err)
+	}
+	defer client.Close()
+
+	metadataURI, err := callString(ctx, client, marketAddress, marketABI, "metadataUri")
+	if err != nil {
+		return nil, err
+	}
+	creator, err := callAddress(ctx, client, marketAddress, marketABI, "creator")
+	if err != nil {
+		return nil, err
+	}
+	collateralToken, err := callAddress(ctx, client, marketAddress, marketABI, "collateralToken")
+	if err != nil {
+		return nil, err
+	}
+	conditionalTokens, err := callAddress(ctx, client, marketAddress, marketABI, "conditionalTokens")
+	if err != nil {
+		return nil, err
+	}
+	outcomeSlotCount, err := callUint8(ctx, client, marketAddress, marketABI, "outcomeSlotCount")
+	if err != nil {
+		return nil, err
+	}
+	questionID, err := callBytes32(ctx, client, marketAddress, marketABI, "questionId")
+	if err != nil {
+		return nil, err
+	}
+	conditionID, err := callBytes32(ctx, client, marketAddress, marketABI, "conditionId")
+	if err != nil {
+		return nil, err
+	}
+
+	return &CTFMarketMetadata{
+		MetadataURI:       metadataURI,
+		Creator:           creator,
+		CollateralToken:   collateralToken,
+		ConditionalTokens: conditionalTokens,
+		OutcomeSlotCount:  outcomeSlotCount,
+		QuestionID:        questionID,
+		ConditionID:       conditionID,
 	}, nil
 }
 
@@ -382,6 +449,40 @@ func callAddress(ctx context.Context, client *ethclient.Client, contract common.
 		return common.Address{}, fmt.Errorf("unexpected output type from %s", method)
 	}
 	return result, nil
+}
+
+func callString(ctx context.Context, client *ethclient.Client, contract common.Address, contractABI abi.ABI, method string, args ...any) (string, error) {
+	outputs, err := callContract(ctx, client, contract, contractABI, method, args...)
+	if err != nil {
+		return "", err
+	}
+	if len(outputs) == 0 {
+		return "", fmt.Errorf("no output from %s", method)
+	}
+	result, ok := outputs[0].(string)
+	if !ok {
+		return "", fmt.Errorf("unexpected output type from %s", method)
+	}
+	return result, nil
+}
+
+func callBytes32(ctx context.Context, client *ethclient.Client, contract common.Address, contractABI abi.ABI, method string, args ...any) (common.Hash, error) {
+	outputs, err := callContract(ctx, client, contract, contractABI, method, args...)
+	if err != nil {
+		return common.Hash{}, err
+	}
+	if len(outputs) == 0 {
+		return common.Hash{}, fmt.Errorf("no output from %s", method)
+	}
+	result, ok := outputs[0].([32]byte)
+	if ok {
+		return common.BytesToHash(result[:]), nil
+	}
+	hash, ok := outputs[0].(common.Hash)
+	if !ok {
+		return common.Hash{}, fmt.Errorf("unexpected output type from %s", method)
+	}
+	return hash, nil
 }
 
 func callUint8(ctx context.Context, client *ethclient.Client, contract common.Address, contractABI abi.ABI, method string, args ...any) (uint8, error) {

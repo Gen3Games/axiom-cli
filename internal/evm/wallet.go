@@ -11,9 +11,11 @@ import (
 	ethereum "github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/ethereum/go-ethereum/signer/core/apitypes"
 )
 
 type Wallet struct {
@@ -59,6 +61,19 @@ func (w *Wallet) SignMessage(message string) (string, error) {
 	}
 	signature[64] += 27
 	return "0x" + hex.EncodeToString(signature), nil
+}
+
+func (w *Wallet) SignTypedData(typedData apitypes.TypedData) (string, error) {
+	hash, _, err := apitypes.TypedDataAndHash(typedData)
+	if err != nil {
+		return "", fmt.Errorf("build typed-data hash: %w", err)
+	}
+	signature, err := crypto.Sign(hash, w.privateKey)
+	if err != nil {
+		return "", fmt.Errorf("sign typed data: %w", err)
+	}
+	signature[64] += 27
+	return hexutil.Encode(signature), nil
 }
 
 func GetBalance(ctx context.Context, rpcURL string, address common.Address) (*big.Int, error) {

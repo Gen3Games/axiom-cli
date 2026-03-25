@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"math/big"
 	"net/http"
@@ -37,6 +38,8 @@ func TestCommandHelpSmoke(t *testing.T) {
 		{args: []string{"wallet", "--help"}, want: "Create, import, inspect, and fund local wallets"},
 		{args: []string{"wallet", "create", "--help"}, want: "Create a new XRPL EVM wallet"},
 		{args: []string{"wallet", "import", "--help"}, want: "Import an existing XRPL EVM private key"},
+		{args: []string{"wallet", "accounts", "list", "--help"}, want: "List all local wallet accounts"},
+		{args: []string{"wallet", "accounts", "use", "--help"}, want: "Set the active local wallet account"},
 		{args: []string{"wallet", "xrpl-create", "--help"}, want: "Create a native XRPL wallet"},
 		{args: []string{"wallet", "xrpl-import", "--help"}, want: "Import an XRPL seed"},
 		{args: []string{"wallet", "show", "--help"}, want: "Show local wallet addresses"},
@@ -66,9 +69,15 @@ func TestCommandHelpSmoke(t *testing.T) {
 		{args: []string{"predict", "buy", "--help"}, want: "Buy into an Axiom market outcome"},
 		{args: []string{"clob", "--help"}, want: "Inspect and manage hosted CLOB books, orders, fills, and cancellations"},
 		{args: []string{"clob", "book", "depth", "--help"}, want: "Fetch the hosted depth ladder and book summary for a logical CLOB proposition"},
+		{args: []string{"clob", "smoke", "--help"}, want: "Run a hosted CLOB smoke test using imported CLI accounts"},
+		{args: []string{"clob", "wallet", "status", "--help"}, want: "Show collateral balances, allowances, approvals, and per-outcome token balances for a CLOB market"},
+		{args: []string{"clob", "wallet", "approve", "--help"}, want: "Approve collateral and outcome-token spending for the hosted CLOB exchange"},
 		{args: []string{"clob", "orders", "list", "--help"}, want: "List hosted CLOB orders for a logical proposition or wallet"},
 		{args: []string{"clob", "fills", "list", "--help"}, want: "List hosted CLOB fills for a logical proposition or wallet"},
+		{args: []string{"clob", "order", "place", "--help"}, want: "Sign and submit a hosted CLOB order for a logical CTF market"},
+		{args: []string{"clob", "order", "get", "--help"}, want: "Fetch a single hosted CLOB order by ID"},
 		{args: []string{"clob", "order", "cancel", "--help"}, want: "Cancel a hosted resting CLOB order using the requester wallet address"},
+		{args: []string{"clob", "fills", "get", "--help"}, want: "Fetch a single hosted CLOB fill by ID"},
 		{args: []string{"claim", "--help"}, want: "Claim winnings"},
 		{args: []string{"claim", "market", "--help"}, want: "Claim winnings or refunds"},
 		{args: []string{"claim", "batch", "--help"}, want: "Claim all currently unclaimed"},
@@ -401,7 +410,7 @@ func TestPredictBuyDryRunReturnsQuote(t *testing.T) {
 	}
 }
 
-func TestClaimMarketRejectsClobMarkets(t *testing.T) {
+func TestClaimMarketRedeemsClobPositions(t *testing.T) {
 	setCLIEnv(t)
 	server, _ := newMockAPIServer(t)
 	defer server.Close()
@@ -411,15 +420,198 @@ func TestClaimMarketRejectsClobMarkets(t *testing.T) {
 		t.Fatalf("wallet import error = %v\nstderr:\n%s", err, stderr)
 	}
 
-	_, _, err := executeCLI(t, "--api-url", server.URL+"/api/cli", "claim", "market", "clob-1")
-	if err == nil {
-		t.Fatal("claim market clob-1 error = nil, want CLOB routing guard")
+	originalGetERC1155Balance := getERC1155Balance
+	originalRedeemCTFMarket := redeemCTFMarket
+	getERC1155Balance = func(_ context.Context, _ string, _ common.Address, _ common.Address, tokenID *big.Int) (*big.Int, error) {
+		switch tokenID.String() {
+		case "101":
+			return big.NewInt(5), nil
+		case "202":
+			return big.NewInt(3), nil
+		default:
+			return big.NewInt(0), nil
+		}
 	}
-	if !strings.Contains(err.Error(), "claim market currently supports TieredParimutuel markets only") {
-		t.Fatalf("claim market clob-1 error = %q, want TieredParimutuel-only guidance", err)
+	redeemCTFMarket = func(_ context.Context, _ string, _ *big.Int, _ string, market common.Address, indexSets []*big.Int) (common.Hash, error) {
+		seed := market.Hex()
+		if len(indexSets) > 0 {
+			seed += indexSets[0].String()
+		}
+		return common.BytesToHash([]byte(seed)), nil
 	}
-	if !strings.Contains(err.Error(), "CLOB settlement is intentionally not routed through the parimutuel claim path") {
-		t.Fatalf("claim market clob-1 error = %q, want CLOB settlement guidance", err)
+	t.Cleanup(func() {
+		getERC1155Balance = originalGetERC1155Balance
+		redeemCTFMarket = originalRedeemCTFMarket
+	})
+
+	stdout, stderr, err := executeCLI(t, "--json", "--api-url", server.URL+"/api/cli", "claim", "market", "clob-1")
+	if err != nil {
+		t.Fatalf("claim market clob-1 error = %v\nstderr:\n%s", err, stderr)
+	}
+	if !strings.Contains(stdout, "redeemedLegs") || !strings.Contains(stdout, "transactions") {
+		t.Fatalf("claim market clob-1 stdout missing redemption payload\nstdout:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "Yes") || !strings.Contains(stdout, "No") {
+		t.Fatalf("claim market clob-1 stdout missing redeemed side labels\nstdout:\n%s", stdout)
+	}
+}
+
+func TestWalletAccountsListAndUse(t *testing.T) {
+	setCLIEnv(t)
+
+	if _, stderr, err := executeCLI(t, "--json", "wallet", "import", "--private-key", "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"); err != nil {
+		t.Fatalf("wallet import default error = %v\nstderr:\n%s", err, stderr)
+	}
+	if _, stderr, err := executeCLI(t, "--json", "wallet", "import", "--account", "trader-two", "--private-key", "59c6995e998f97a5a0044966f094538e1d7dff27c1d312bb7f6d1ab8d1b2b5d7"); err != nil {
+		t.Fatalf("wallet import trader-two error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	stdout, stderr, err := executeCLI(t, "--json", "wallet", "accounts", "list")
+	if err != nil {
+		t.Fatalf("wallet accounts list error = %v\nstderr:\n%s", err, stderr)
+	}
+	if !strings.Contains(stdout, "\"account\": \"default\"") || !strings.Contains(stdout, "\"account\": \"trader-two\"") {
+		t.Fatalf("wallet accounts list stdout missing accounts\nstdout:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "\"activeAccount\": \"default\"") {
+		t.Fatalf("wallet accounts list stdout missing active account\nstdout:\n%s", stdout)
+	}
+
+	stdout, stderr, err = executeCLI(t, "--json", "wallet", "accounts", "use", "trader-two")
+	if err != nil {
+		t.Fatalf("wallet accounts use error = %v\nstderr:\n%s", err, stderr)
+	}
+	if !strings.Contains(stdout, "\"activeAccount\": \"trader-two\"") {
+		t.Fatalf("wallet accounts use stdout missing new active account\nstdout:\n%s", stdout)
+	}
+
+	stdout, stderr, err = executeCLI(t, "--json", "wallet", "show")
+	if err != nil {
+		t.Fatalf("wallet show after account switch error = %v\nstderr:\n%s", err, stderr)
+	}
+	if !strings.Contains(stdout, "\"profile\": \"trader-two\"") {
+		t.Fatalf("wallet show stdout missing switched account\nstdout:\n%s", stdout)
+	}
+}
+
+func TestClobSmokeDryRunUsesImportedAccount(t *testing.T) {
+	setCLIEnv(t)
+	server, _ := newMockAPIServer(t)
+	defer server.Close()
+
+	if _, stderr, err := executeCLI(t, "--json", "wallet", "import", "--private-key", "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"); err != nil {
+		t.Fatalf("wallet import error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	originalGetERC20Balance := getERC20Balance
+	originalGetERC20Allowance := getERC20Allowance
+	originalIsERC1155ApprovedForAll := isERC1155ApprovedForAll
+	originalGetERC1155Balance := getERC1155Balance
+	getERC20Balance = func(_ context.Context, _ string, _ common.Address, _ common.Address) (*big.Int, error) {
+		return big.NewInt(1_000_000), nil
+	}
+	getERC20Allowance = func(_ context.Context, _ string, _ common.Address, _ common.Address, _ common.Address) (*big.Int, error) {
+		return big.NewInt(1_000_000), nil
+	}
+	isERC1155ApprovedForAll = func(_ context.Context, _ string, _ common.Address, _ common.Address, _ common.Address) (bool, error) {
+		return true, nil
+	}
+	getERC1155Balance = func(_ context.Context, _ string, _ common.Address, _ common.Address, _ *big.Int) (*big.Int, error) {
+		return big.NewInt(0), nil
+	}
+	t.Cleanup(func() {
+		getERC20Balance = originalGetERC20Balance
+		getERC20Allowance = originalGetERC20Allowance
+		isERC1155ApprovedForAll = originalIsERC1155ApprovedForAll
+		getERC1155Balance = originalGetERC1155Balance
+	})
+
+	stdout, stderr, err := executeCLI(
+		t,
+		"--json",
+		"--api-url", server.URL+"/api/cli",
+		"clob",
+		"--projection-url", server.URL,
+		"smoke",
+		"clob-1",
+	)
+	if err != nil {
+		t.Fatalf("clob smoke dry-run error = %v\nstderr:\n%s", err, stderr)
+	}
+	if !strings.Contains(stdout, "\"mode\": \"dry-run\"") || !strings.Contains(stdout, "\"marketId\": \"clob-1\"") {
+		t.Fatalf("clob smoke dry-run stdout missing smoke payload\nstdout:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "primaryWallet") || !strings.Contains(stdout, "order") || !strings.Contains(stdout, "\"account\": \"default\"") {
+		t.Fatalf("clob smoke dry-run stdout missing wallet or order sections\nstdout:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "0x00000000000000000000000000000000000000C1") {
+		t.Fatalf("clob smoke dry-run stdout missing binding address\nstdout:\n%s", stdout)
+	}
+}
+
+func TestClobSmokeLiveSubmitsAndCancelsOrder(t *testing.T) {
+	setCLIEnv(t)
+	server, state := newMockAPIServer(t)
+	defer server.Close()
+	state.clobConflictsLeft = 2
+
+	if _, stderr, err := executeCLI(t, "--json", "wallet", "import", "--private-key", "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"); err != nil {
+		t.Fatalf("wallet import default error = %v\nstderr:\n%s", err, stderr)
+	}
+	if _, stderr, err := executeCLI(t, "--json", "wallet", "import", "--account", "trader-two", "--private-key", "59c6995e998f97a5a0044966f094538e1d7dff27c1d312bb7f6d1ab8d1b2b5d7"); err != nil {
+		t.Fatalf("wallet import trader-two error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	originalGetERC20Balance := getERC20Balance
+	originalGetERC20Allowance := getERC20Allowance
+	originalIsERC1155ApprovedForAll := isERC1155ApprovedForAll
+	originalGetERC1155Balance := getERC1155Balance
+	getERC20Balance = func(_ context.Context, _ string, _ common.Address, _ common.Address) (*big.Int, error) {
+		return big.NewInt(1_000_000), nil
+	}
+	getERC20Allowance = func(_ context.Context, _ string, _ common.Address, _ common.Address, _ common.Address) (*big.Int, error) {
+		return big.NewInt(1_000_000), nil
+	}
+	isERC1155ApprovedForAll = func(_ context.Context, _ string, _ common.Address, _ common.Address, _ common.Address) (bool, error) {
+		return true, nil
+	}
+	getERC1155Balance = func(_ context.Context, _ string, _ common.Address, _ common.Address, _ *big.Int) (*big.Int, error) {
+		return big.NewInt(0), nil
+	}
+	t.Cleanup(func() {
+		getERC20Balance = originalGetERC20Balance
+		getERC20Allowance = originalGetERC20Allowance
+		isERC1155ApprovedForAll = originalIsERC1155ApprovedForAll
+		getERC1155Balance = originalGetERC1155Balance
+	})
+
+	stdout, stderr, err := executeCLI(
+		t,
+		"--json",
+		"--api-url", server.URL+"/api/cli",
+		"clob",
+		"--projection-url", server.URL,
+		"--eventstore-url", server.URL+"/api",
+		"smoke",
+		"clob-1",
+		"--secondary-account", "trader-two",
+		"--live",
+	)
+	if err != nil {
+		t.Fatalf("clob smoke live error = %v\nstderr:\n%s", err, stderr)
+	}
+	for _, want := range []string{"\"mode\": \"live\"", "submission", "fetchedOrder", "cancel", "secondaryWallet"} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("clob smoke live stdout missing %q\nstdout:\n%s", want, stdout)
+		}
+	}
+	if !strings.Contains(stdout, "\"orderId\": \"order-1\"") {
+		t.Fatalf("clob smoke live stdout missing order id\nstdout:\n%s", stdout)
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.clobSubmitCalls != 3 {
+		t.Fatalf("clob submit calls = %d, want 3 after two retryable conflicts", state.clobSubmitCalls)
 	}
 }
 
@@ -904,9 +1096,14 @@ type mockAPIState struct {
 	lastRewardsAction api.RewardsActionRequest
 	lastRewardsPath   string
 	lastDeviceHeader  string
+	lastClobOrder     api.ClobSignedOrderPayload
+	clobSubmitCalls   int
+	clobConflictsLeft int
 	rewardsSyncError  string
 	rewardsSyncStatus int
 	rewardsAddress    string
+	clobOrders        map[string]api.ClobOrder
+	clobFills         []api.ClobFill
 	mu                sync.Mutex
 }
 
@@ -914,7 +1111,7 @@ func newMockAPIServer(t *testing.T) (*httptest.Server, *mockAPIState) {
 	t.Helper()
 
 	now := time.Date(2026, time.March, 10, 12, 0, 0, 0, time.UTC)
-	state := &mockAPIState{rewardsAddress: "0x00000000000000000000000000000000000000AA"}
+	state := &mockAPIState{rewardsAddress: "0x00000000000000000000000000000000000000AA", clobOrders: make(map[string]api.ClobOrder)}
 	markets := []api.MarketListItem{
 		{
 			ID:              "market-0",
@@ -955,6 +1152,77 @@ func newMockAPIServer(t *testing.T) (*httptest.Server, *mockAPIState) {
 		w.Header().Set("Content-Type", "application/json")
 
 		switch {
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/books/") && strings.HasSuffix(r.URL.Path, "/depth"):
+			_ = json.NewEncoder(w).Encode(api.ClobDepth{
+				Bids: []api.ClobDepthLevel{{ClobID: "clob-1-0", Side: "buy", Price: 45, TotalQty: 12, OrderCount: 2}},
+				Asks: []api.ClobDepthLevel{{ClobID: "clob-1-0", Side: "sell", Price: 55, TotalQty: 8, OrderCount: 1}},
+			})
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/books/"):
+			_ = json.NewEncoder(w).Encode(api.ClobBook{ClobID: "clob-1-0", MarketID: "clob-1", Outcome: 0, Creator: "0xcreator", Status: "open", BidCount: 2, AskCount: 1, TradeCount: 0, Volume24h: 0, EventSequence: 1, CreatedAt: ptrTime(now), UpdatedAt: ptrTime(now)})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/orders":
+			var body struct {
+				SignedOrder api.ClobSignedOrderPayload `json:"signed_order"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("Decode(clob submit body) error = %v", err)
+			}
+			state.mu.Lock()
+			state.clobSubmitCalls++
+			state.lastClobOrder = body.SignedOrder
+			if state.clobConflictsLeft > 0 {
+				state.clobConflictsLeft--
+				state.mu.Unlock()
+				w.WriteHeader(http.StatusUnprocessableEntity)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": "save aggregate: append events: version conflict: stream was modified"})
+				break
+			}
+			orderID := fmt.Sprintf("order-%d", len(state.clobOrders)+1)
+			price := 1
+			state.clobOrders[orderID] = api.ClobOrder{OrderID: orderID, ClobID: fmt.Sprintf("%s-%d", body.SignedOrder.Market, body.SignedOrder.Outcome), Maker: body.SignedOrder.Maker, Side: "buy", OrderType: "limit", Price: &price, Quantity: 1, Remaining: 1, TotalFilled: 0, Status: "open", EventSequence: len(state.clobOrders) + 1, CreatedAt: ptrTime(now), UpdatedAt: ptrTime(now)}
+			state.mu.Unlock()
+			_ = json.NewEncoder(w).Encode(api.ClobOrderResponse{OrderID: orderID, RemainingQuantity: 1, TradeCount: 0, WasAddedToBook: true})
+		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/api/orders/"):
+			orderID := filepath.Base(r.URL.Path)
+			state.mu.Lock()
+			order := state.clobOrders[orderID]
+			order.Status = "cancelled"
+			order.Remaining = 0
+			order.UpdatedAt = ptrTime(now)
+			state.clobOrders[orderID] = order
+			state.mu.Unlock()
+			_ = json.NewEncoder(w).Encode(api.ClobOrderResponse{OrderID: orderID, RemainingQuantity: 0, TradeCount: 0, WasAddedToBook: false})
+		case r.Method == http.MethodGet && r.URL.Path == "/orders":
+			state.mu.Lock()
+			orders := make([]api.ClobOrder, 0, len(state.clobOrders))
+			for _, order := range state.clobOrders {
+				if maker := strings.TrimSpace(r.URL.Query().Get("maker")); maker != "" && !strings.EqualFold(order.Maker, maker) {
+					continue
+				}
+				if clobID := strings.TrimSpace(r.URL.Query().Get("clob_id")); clobID != "" && order.ClobID != clobID {
+					continue
+				}
+				if activeOnly := strings.TrimSpace(r.URL.Query().Get("active_only")); activeOnly == "true" && order.Status != "open" {
+					continue
+				}
+				orders = append(orders, order)
+			}
+			state.mu.Unlock()
+			_ = json.NewEncoder(w).Encode(orders)
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/orders/"):
+			orderID := filepath.Base(r.URL.Path)
+			state.mu.Lock()
+			order, ok := state.clobOrders[orderID]
+			state.mu.Unlock()
+			if !ok {
+				http.NotFound(w, r)
+				break
+			}
+			_ = json.NewEncoder(w).Encode(order)
+		case r.Method == http.MethodGet && r.URL.Path == "/fills":
+			state.mu.Lock()
+			fills := append([]api.ClobFill(nil), state.clobFills...)
+			state.mu.Unlock()
+			_ = json.NewEncoder(w).Encode(fills)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/cli/register":
 			var request api.RegisterRequest
 			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {

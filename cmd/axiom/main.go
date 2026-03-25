@@ -30,21 +30,28 @@ const defaultClobProjectionURL = "https://clob.axiomprotocol.io"
 const defaultClobEventstoreURL = "https://clob.axiomprotocol.io/api"
 
 var (
-	flagAPIURL          string
-	flagRPCURL          string
-	flagXRPLURL         string
-	flagJSON            bool
-	flagProfile         string
-	getEVMBalance       = evm.GetBalance
-	getXRPLBalance      = axrpl.GetBalance
-	loadMarketState     = evm.LoadMarketState
-	quoteBuy            = evm.QuoteBuy
-	buyPosition         = evm.BuyPosition
-	claimEpochRewards   = evm.ClaimRewards
-	claimSingleMarket   = evm.ClaimMarket
-	batchClaimMarkets   = evm.BatchClaim
-	waitForTxReceipt    = waitForReceipt
-	submitBridgePayment = axrpl.SubmitBridgePayment
+	flagAPIURL               string
+	flagRPCURL               string
+	flagXRPLURL              string
+	flagJSON                 bool
+	flagProfile              string
+	getEVMBalance            = evm.GetBalance
+	getXRPLBalance           = axrpl.GetBalance
+	loadMarketState          = evm.LoadMarketState
+	quoteBuy                 = evm.QuoteBuy
+	buyPosition              = evm.BuyPosition
+	claimEpochRewards        = evm.ClaimRewards
+	claimSingleMarket        = evm.ClaimMarket
+	batchClaimMarkets        = evm.BatchClaim
+	waitForTxReceipt         = waitForReceipt
+	submitBridgePayment      = axrpl.SubmitBridgePayment
+	getERC20Balance          = evm.GetERC20Balance
+	getERC20Allowance        = evm.GetERC20Allowance
+	approveERC20             = evm.ApproveERC20
+	getERC1155Balance        = evm.GetERC1155Balance
+	isERC1155ApprovedForAll  = evm.IsERC1155ApprovedForAll
+	setERC1155ApprovalForAll = evm.SetERC1155ApprovalForAll
+	redeemCTFMarket          = evm.RedeemCTFMarket
 )
 
 type cliContext struct {
@@ -95,7 +102,8 @@ func newRootCommand() *cobra.Command {
 	rootCmd.PersistentFlags().StringVar(&flagRPCURL, "rpc-url", "", "Override the XRPL EVM RPC URL")
 	rootCmd.PersistentFlags().StringVar(&flagXRPLURL, "xrpl-rpc-url", "", "Override the XRPL JSON-RPC URL")
 	rootCmd.PersistentFlags().BoolVar(&flagJSON, "json", false, "Emit JSON output")
-	rootCmd.PersistentFlags().StringVar(&flagProfile, "profile", "", "Use a specific local profile")
+	rootCmd.PersistentFlags().StringVar(&flagProfile, "profile", "", "Use a specific local account profile")
+	rootCmd.PersistentFlags().StringVar(&flagProfile, "account", "", "Use a specific local wallet account")
 
 	rootCmd.AddCommand(newConfigCommand())
 	rootCmd.AddCommand(newWalletCommand())
@@ -168,7 +176,7 @@ func newConfigCommand() *cobra.Command {
 func newWalletCommand() *cobra.Command {
 	cmd := &cobra.Command{Use: "wallet", Short: "Create, import, inspect, and fund local wallets"}
 
-	cmd.AddCommand(&cobra.Command{
+	createCmd := &cobra.Command{
 		Use:   "create",
 		Short: "Create a new XRPL EVM wallet and store the private key in the OS keychain",
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -176,29 +184,36 @@ func newWalletCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			accountName, profile := resolveWalletAccountProfile(cmd, ctx)
 			wallet, privateKeyHex, err := evm.NewRandomWallet()
 			if err != nil {
 				return err
 			}
-			secretStore, err := app.SaveSecret(app.EVMSecretKey(ctx.ProfileName), privateKeyHex)
+			secretStore, err := app.SaveSecret(app.EVMSecretKey(accountName), privateKeyHex)
 			if err != nil {
 				return err
 			}
-			profile := ctx.Profile
 			profile.EVMAddress = wallet.Address().Hex()
 			ctx.Config.SetCurrentProfile(profile)
+			if shouldActivateWalletAccount(cmd, ctx, accountName) {
+				ctx.Config.ActiveProfile = accountName
+			}
 			if err := app.SaveConfig(ctx.Config); err != nil {
 				return err
 			}
 			return printOutput(ctx.JSON, map[string]any{
-				"profile":          ctx.ProfileName,
+				"account":          accountName,
+				"activeAccount":    ctx.Config.ActiveProfile,
 				"evmAddress":       wallet.Address().Hex(),
 				"storedIn":         string(secretStore),
 				"storedInKeychain": secretStore == app.SecretStoreKeychain,
 				"nextStep":         "Run `axiom auth register` to get your Axiom destination tag.",
 			})
 		},
-	})
+	}
+	createCmd.Flags().String("account", "", "Import the wallet into a specific local account")
+	createCmd.Flags().Bool("activate", false, "Set the target account as the active account after creation")
+	cmd.AddCommand(createCmd)
 
 	importCmd := &cobra.Command{
 		Use:   "import",
@@ -208,6 +223,7 @@ func newWalletCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			accountName, profile := resolveWalletAccountProfile(cmd, ctx)
 			privateKey, _ := cmd.Flags().GetString("private-key")
 			if strings.TrimSpace(privateKey) == "" {
 				return errors.New("--private-key is required")
@@ -216,18 +232,21 @@ func newWalletCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			secretStore, err := app.SaveSecret(app.EVMSecretKey(ctx.ProfileName), wallet.PrivateKeyHex())
+			secretStore, err := app.SaveSecret(app.EVMSecretKey(accountName), wallet.PrivateKeyHex())
 			if err != nil {
 				return err
 			}
-			profile := ctx.Profile
 			profile.EVMAddress = wallet.Address().Hex()
 			ctx.Config.SetCurrentProfile(profile)
+			if shouldActivateWalletAccount(cmd, ctx, accountName) {
+				ctx.Config.ActiveProfile = accountName
+			}
 			if err := app.SaveConfig(ctx.Config); err != nil {
 				return err
 			}
 			return printOutput(ctx.JSON, map[string]any{
-				"profile":          ctx.ProfileName,
+				"account":          accountName,
+				"activeAccount":    ctx.Config.ActiveProfile,
 				"evmAddress":       wallet.Address().Hex(),
 				"storedIn":         string(secretStore),
 				"storedInKeychain": secretStore == app.SecretStoreKeychain,
@@ -235,9 +254,11 @@ func newWalletCommand() *cobra.Command {
 		},
 	}
 	importCmd.Flags().String("private-key", "", "Hex-encoded secp256k1 private key")
+	importCmd.Flags().String("account", "", "Import the wallet into a specific local account")
+	importCmd.Flags().Bool("activate", false, "Set the target account as the active account after import")
 	cmd.AddCommand(importCmd)
 
-	cmd.AddCommand(&cobra.Command{
+	xrplCreateCmd := &cobra.Command{
 		Use:   "xrpl-create",
 		Short: "Create a native XRPL wallet for direct bridge funding submissions",
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -245,28 +266,35 @@ func newWalletCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			accountName, profile := resolveWalletAccountProfile(cmd, ctx)
 			wallet, err := axrpl.NewRandomWallet()
 			if err != nil {
 				return err
 			}
-			secretStore, err := app.SaveSecret(app.XRPLSecretKey(ctx.ProfileName), wallet.Seed())
+			secretStore, err := app.SaveSecret(app.XRPLSecretKey(accountName), wallet.Seed())
 			if err != nil {
 				return err
 			}
-			profile := ctx.Profile
 			profile.XRPLAddress = wallet.Address()
 			ctx.Config.SetCurrentProfile(profile)
+			if shouldActivateWalletAccount(cmd, ctx, accountName) {
+				ctx.Config.ActiveProfile = accountName
+			}
 			if err := app.SaveConfig(ctx.Config); err != nil {
 				return err
 			}
 			return printOutput(ctx.JSON, map[string]any{
-				"profile":          ctx.ProfileName,
+				"account":          accountName,
+				"activeAccount":    ctx.Config.ActiveProfile,
 				"xrplAddress":      wallet.Address(),
 				"storedIn":         string(secretStore),
 				"storedInKeychain": secretStore == app.SecretStoreKeychain,
 			})
 		},
-	})
+	}
+	xrplCreateCmd.Flags().String("account", "", "Import the wallet into a specific local account")
+	xrplCreateCmd.Flags().Bool("activate", false, "Set the target account as the active account after creation")
+	cmd.AddCommand(xrplCreateCmd)
 
 	importXRPLCmd := &cobra.Command{
 		Use:   "xrpl-import",
@@ -276,6 +304,7 @@ func newWalletCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			accountName, profile := resolveWalletAccountProfile(cmd, ctx)
 			seed, _ := cmd.Flags().GetString("seed")
 			if strings.TrimSpace(seed) == "" {
 				return errors.New("--seed is required")
@@ -284,18 +313,21 @@ func newWalletCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			secretStore, err := app.SaveSecret(app.XRPLSecretKey(ctx.ProfileName), wallet.Seed())
+			secretStore, err := app.SaveSecret(app.XRPLSecretKey(accountName), wallet.Seed())
 			if err != nil {
 				return err
 			}
-			profile := ctx.Profile
 			profile.XRPLAddress = wallet.Address()
 			ctx.Config.SetCurrentProfile(profile)
+			if shouldActivateWalletAccount(cmd, ctx, accountName) {
+				ctx.Config.ActiveProfile = accountName
+			}
 			if err := app.SaveConfig(ctx.Config); err != nil {
 				return err
 			}
 			return printOutput(ctx.JSON, map[string]any{
-				"profile":          ctx.ProfileName,
+				"account":          accountName,
+				"activeAccount":    ctx.Config.ActiveProfile,
 				"xrplAddress":      wallet.Address(),
 				"storedIn":         string(secretStore),
 				"storedInKeychain": secretStore == app.SecretStoreKeychain,
@@ -303,7 +335,72 @@ func newWalletCommand() *cobra.Command {
 		},
 	}
 	importXRPLCmd.Flags().String("seed", "", "XRPL family seed (s...) or compatible secret")
+	importXRPLCmd.Flags().String("account", "", "Import the wallet into a specific local account")
+	importXRPLCmd.Flags().Bool("activate", false, "Set the target account as the active account after import")
 	cmd.AddCommand(importXRPLCmd)
+
+	accountsCmd := &cobra.Command{Use: "accounts", Short: "List and select local wallet accounts"}
+	accountsCmd.AddCommand(&cobra.Command{
+		Use:   "list",
+		Short: "List all local wallet accounts",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+			accountNames := make([]string, 0, len(ctx.Config.Profiles))
+			for name := range ctx.Config.Profiles {
+				accountNames = append(accountNames, name)
+			}
+			sort.Strings(accountNames)
+			accounts := make([]map[string]any, 0, len(accountNames))
+			for _, name := range accountNames {
+				profile := ctx.Config.Profiles[name]
+				accounts = append(accounts, map[string]any{
+					"account":               name,
+					"active":                name == ctx.Config.ActiveProfile,
+					"evmAddress":            profile.EVMAddress,
+					"xrplAddress":           profile.XRPLAddress,
+					"depositDestinationTag": profile.DepositDestinationTag,
+				})
+			}
+			return printOutput(ctx.JSON, map[string]any{
+				"activeAccount": ctx.Config.ActiveProfile,
+				"items":         accounts,
+				"total":         len(accounts),
+			})
+		},
+	})
+	accountsCmd.AddCommand(&cobra.Command{
+		Use:   "use <account>",
+		Short: "Set the active local wallet account",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+			accountName := strings.TrimSpace(args[0])
+			if accountName == "" {
+				return errors.New("account name is required")
+			}
+			profile, ok := ctx.Config.Profiles[accountName]
+			if !ok {
+				return fmt.Errorf("local account %q does not exist", accountName)
+			}
+			ctx.Config.ActiveProfile = accountName
+			ctx.Config.SetCurrentProfile(profile)
+			if err := app.SaveConfig(ctx.Config); err != nil {
+				return err
+			}
+			return printOutput(ctx.JSON, map[string]any{
+				"activeAccount": accountName,
+				"evmAddress":    profile.EVMAddress,
+				"xrplAddress":   profile.XRPLAddress,
+			})
+		},
+	})
+	cmd.AddCommand(accountsCmd)
 
 	cmd.AddCommand(&cobra.Command{
 		Use:   "show",
@@ -536,7 +633,7 @@ func newMarketsCommand() *cobra.Command {
 				return err
 			}
 			instanceDate, _ := cmd.Flags().GetString("instance-date")
-			response, err := ctx.API.GetMarket(cmd.Context(), args[0], instanceDate)
+			response, err := loadMarketWithClobFallback(cmd.Context(), ctx, args[0], instanceDate)
 			if err != nil {
 				return err
 			}
@@ -1049,7 +1146,7 @@ func newPredictCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			market, err := ctx.API.GetMarket(cmd.Context(), args[0], mustStringFlag(cmd, "instance-date"))
+			market, err := loadMarketWithClobFallback(cmd.Context(), ctx, args[0], mustStringFlag(cmd, "instance-date"))
 			if err != nil {
 				return err
 			}
@@ -1112,7 +1209,7 @@ func newPredictCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			market, err := ctx.API.GetMarket(cmd.Context(), args[0], mustStringFlag(cmd, "instance-date"))
+			market, err := loadMarketWithClobFallback(cmd.Context(), ctx, args[0], mustStringFlag(cmd, "instance-date"))
 			if err != nil {
 				return err
 			}
@@ -1202,16 +1299,71 @@ func newClaimCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			_, privateKeyHex, err := requireEVMWalletWithKey(ctx)
+			wallet, privateKeyHex, err := requireEVMWalletWithKey(ctx)
 			if err != nil {
 				return err
 			}
-			market, err := ctx.API.GetMarket(cmd.Context(), args[0], mustStringFlag(cmd, "instance-date"))
+			market, err := loadMarketWithClobFallback(cmd.Context(), ctx, args[0], mustStringFlag(cmd, "instance-date"))
 			if err != nil {
 				return err
 			}
 			if isClobMarketImplementation(market.MarketImplementation) {
-				return errors.New("claim market currently supports TieredParimutuel markets only; CLOB settlement is intentionally not routed through the parimutuel claim path")
+				outcomeToken := resolveHexAddressOrDefault("", evm.DefaultClobConditionalTokens)
+				legs, err := buildClobRedemptionPlan(cmd.Context(), ctx, market, wallet.Address(), outcomeToken)
+				if err != nil {
+					return err
+				}
+				if len(legs) == 0 {
+					return printOutput(ctx.JSON, map[string]any{
+						"market":   market.Title,
+						"marketId": market.ID,
+						"message":  "No redeemable resolved CLOB positions were found for the active wallet.",
+					})
+				}
+
+				indexSetsByContract := make(map[string][]*big.Int)
+				legsByContract := make(map[string][]clobRedemptionLeg)
+				for _, leg := range legs {
+					contract := common.HexToAddress(leg.ContractAddress).Hex()
+					indexSetsByContract[contract] = append(indexSetsByContract[contract], big.NewInt(int64(leg.IndexSet)))
+					legsByContract[contract] = append(legsByContract[contract], leg)
+				}
+
+				contractAddresses := make([]string, 0, len(indexSetsByContract))
+				for contract := range indexSetsByContract {
+					contractAddresses = append(contractAddresses, contract)
+				}
+				sort.Strings(contractAddresses)
+
+				transactions := make([]map[string]any, 0, len(contractAddresses))
+				for _, contract := range contractAddresses {
+					txHash, redeemErr := redeemCTFMarket(cmd.Context(), ctx.Config.EVMRPCURL, big.NewInt(xrplEVMChainID), privateKeyHex, common.HexToAddress(contract), indexSetsByContract[contract])
+					if redeemErr != nil {
+						return redeemErr
+					}
+					entry := map[string]any{
+						"contractAddress": contract,
+						"txHash":          txHash.Hex(),
+						"legs":            legsByContract[contract],
+					}
+					if mustBoolFlag(cmd, "wait") {
+						receipt, waitErr := waitForReceipt(cmd.Context(), ctx.Config.EVMRPCURL, txHash)
+						if waitErr != nil {
+							return waitErr
+						}
+						entry["receiptStatus"] = receipt.Status
+					}
+					transactions = append(transactions, entry)
+				}
+
+				return printOutput(ctx.JSON, map[string]any{
+					"market":        market.Title,
+					"marketId":      market.ID,
+					"walletAddress": wallet.Address().Hex(),
+					"contracts":     len(contractAddresses),
+					"redeemedLegs":  legs,
+					"transactions":  transactions,
+				})
 			}
 			txHash, err := claimSingleMarket(cmd.Context(), ctx.Config.EVMRPCURL, big.NewInt(xrplEVMChainID), privateKeyHex, common.HexToAddress(market.ContractAddress))
 			if err != nil {
@@ -1311,6 +1463,8 @@ func newClobCommand() *cobra.Command {
 	}
 	cmd.PersistentFlags().String("projection-url", firstNonEmpty(os.Getenv("AXIOM_CLOB_PROJECTION_URL"), os.Getenv("CLOB_PROJECTION_URL"), defaultClobProjectionURL), "Override the hosted CLOB projection base URL")
 	cmd.PersistentFlags().String("eventstore-url", firstNonEmpty(os.Getenv("AXIOM_CLOB_EVENTSTORE_URL"), os.Getenv("CLOB_EVENTSTORE_URL"), defaultClobEventstoreURL), "Override the hosted CLOB eventstore base URL")
+	cmd.PersistentFlags().String("exchange-address", evm.DefaultClobExchangeAddress, "Override the on-chain AxiomCTFExchange address used for signing and approvals")
+	cmd.PersistentFlags().String("outcome-token-address", evm.DefaultClobConditionalTokens, "Override the on-chain AxiomConditionalTokens address used for balances and approvals")
 
 	bookCmd := &cobra.Command{Use: "book", Short: "Inspect hosted CLOB books"}
 	depthCmd := &cobra.Command{
@@ -1348,10 +1502,153 @@ func newClobCommand() *cobra.Command {
 	depthCmd.Flags().Int("outcome", 0, "Displayed outcome index within the logical market")
 	bookCmd.AddCommand(depthCmd)
 	cmd.AddCommand(bookCmd)
+	cmd.AddCommand(newClobSmokeCommand())
+
+	walletCmd := &cobra.Command{Use: "wallet", Short: "Inspect and prepare the active wallet for hosted CLOB trading"}
+	statusCmd := &cobra.Command{
+		Use:   "status <market-id-or-address>",
+		Short: "Show collateral balances, allowances, approvals, and per-outcome token balances for a CLOB market",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+			walletAddress, err := resolveProfileAddress(ctx, nil)
+			if override := strings.TrimSpace(mustStringFlag(cmd, "wallet")); override != "" {
+				walletAddress = override
+				err = nil
+			}
+			if err != nil {
+				return err
+			}
+			market, err := loadMarketWithClobFallback(cmd.Context(), ctx, args[0], mustStringFlag(cmd, "instance-date"))
+			if err != nil {
+				return err
+			}
+			if !isClobMarketImplementation(market.MarketImplementation) {
+				return errors.New("clob wallet status requires an AxiomCTFMarket logical market")
+			}
+			status, err := buildClobWalletStatus(
+				cmd.Context(),
+				ctx,
+				market,
+				common.HexToAddress(walletAddress),
+				resolveHexAddressOrDefault(mustStringFlag(cmd, "exchange-address"), evm.DefaultClobExchangeAddress),
+				resolveHexAddressOrDefault(mustStringFlag(cmd, "outcome-token-address"), evm.DefaultClobConditionalTokens),
+			)
+			if err != nil {
+				return err
+			}
+			return printOutput(ctx.JSON, status)
+		},
+	}
+	statusCmd.Flags().String("wallet", "", "Wallet address to inspect; defaults to the active profile EVM address")
+	statusCmd.Flags().String("instance-date", "", "Instance date for recurring markets in YYYY-MM-DD format")
+	walletCmd.AddCommand(statusCmd)
+
+	approveCmd := &cobra.Command{
+		Use:   "approve <market-id-or-address>",
+		Short: "Approve collateral and outcome-token spending for the hosted CLOB exchange",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+			wallet, privateKeyHex, err := requireEVMWalletWithKey(ctx)
+			if err != nil {
+				return err
+			}
+			market, err := loadMarketWithClobFallback(cmd.Context(), ctx, args[0], mustStringFlag(cmd, "instance-date"))
+			if err != nil {
+				return err
+			}
+			if !isClobMarketImplementation(market.MarketImplementation) {
+				return errors.New("clob wallet approve requires an AxiomCTFMarket logical market")
+			}
+
+			skipCollateral := mustBoolFlag(cmd, "skip-collateral")
+			skipOutcome := mustBoolFlag(cmd, "skip-outcome")
+			if skipCollateral && skipOutcome {
+				return errors.New("nothing to approve: remove --skip-collateral or --skip-outcome")
+			}
+
+			exchangeAddress := resolveHexAddressOrDefault(mustStringFlag(cmd, "exchange-address"), evm.DefaultClobExchangeAddress)
+			outcomeToken := resolveHexAddressOrDefault(mustStringFlag(cmd, "outcome-token-address"), evm.DefaultClobConditionalTokens)
+			collateralToken := resolveClobCollateralToken(market)
+			transactions := make([]map[string]any, 0, 2)
+
+			if !skipCollateral {
+				approveAmount, parseErr := evm.ParseBigInt(firstNonEmpty(strings.TrimSpace(mustStringFlag(cmd, "collateral-amount")), clobMaxUint256))
+				if parseErr != nil {
+					return parseErr
+				}
+				txHash, approveErr := approveERC20(cmd.Context(), ctx.Config.EVMRPCURL, big.NewInt(xrplEVMChainID), privateKeyHex, collateralToken, exchangeAddress, approveAmount)
+				if approveErr != nil {
+					return approveErr
+				}
+				entry := map[string]any{
+					"kind":          "collateral-approve",
+					"walletAddress": wallet.Address().Hex(),
+					"token":         collateralToken.Hex(),
+					"spender":       exchangeAddress.Hex(),
+					"amountWei":     approveAmount.String(),
+					"amountXrp":     formatWeiToXRP(approveAmount),
+					"txHash":        txHash.Hex(),
+				}
+				if mustBoolFlag(cmd, "wait") {
+					receipt, waitErr := waitForReceipt(cmd.Context(), ctx.Config.EVMRPCURL, txHash)
+					if waitErr != nil {
+						return waitErr
+					}
+					entry["receiptStatus"] = receipt.Status
+				}
+				transactions = append(transactions, entry)
+			}
+
+			if !skipOutcome {
+				txHash, approveErr := setERC1155ApprovalForAll(cmd.Context(), ctx.Config.EVMRPCURL, big.NewInt(xrplEVMChainID), privateKeyHex, outcomeToken, exchangeAddress, true)
+				if approveErr != nil {
+					return approveErr
+				}
+				entry := map[string]any{
+					"kind":          "outcome-approval-for-all",
+					"walletAddress": wallet.Address().Hex(),
+					"token":         outcomeToken.Hex(),
+					"operator":      exchangeAddress.Hex(),
+					"approved":      true,
+					"txHash":        txHash.Hex(),
+				}
+				if mustBoolFlag(cmd, "wait") {
+					receipt, waitErr := waitForReceipt(cmd.Context(), ctx.Config.EVMRPCURL, txHash)
+					if waitErr != nil {
+						return waitErr
+					}
+					entry["receiptStatus"] = receipt.Status
+				}
+				transactions = append(transactions, entry)
+			}
+
+			return printOutput(ctx.JSON, map[string]any{
+				"market":        market.Title,
+				"marketId":      market.ID,
+				"walletAddress": wallet.Address().Hex(),
+				"transactions":  transactions,
+			})
+		},
+	}
+	approveCmd.Flags().String("collateral-amount", clobMaxUint256, "Collateral approval amount in wei; defaults to max uint256")
+	approveCmd.Flags().Bool("skip-collateral", false, "Skip ERC-20 collateral approval")
+	approveCmd.Flags().Bool("skip-outcome", false, "Skip ERC-1155 setApprovalForAll")
+	approveCmd.Flags().Bool("wait", false, "Wait for the approval transaction receipts")
+	approveCmd.Flags().String("instance-date", "", "Instance date for recurring markets in YYYY-MM-DD format")
+	walletCmd.AddCommand(approveCmd)
+	cmd.AddCommand(walletCmd)
 
 	ordersCmd := &cobra.Command{Use: "orders", Short: "Inspect hosted CLOB orders"}
 	ordersListCmd := &cobra.Command{
-		Use:   "list --market <id> --outcome <index>",
+		Use:   "list",
 		Short: "List hosted CLOB orders for a logical proposition or wallet",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx, err := buildCLIContext()
@@ -1359,14 +1656,18 @@ func newClobCommand() *cobra.Command {
 				return err
 			}
 			market := strings.TrimSpace(mustStringFlag(cmd, "market"))
-			if market == "" {
-				return errors.New("--market is required")
-			}
+			mine := mustBoolFlag(cmd, "mine")
 			outcome, err := cmd.Flags().GetInt("outcome")
 			if err != nil {
 				return err
 			}
 			maker := strings.TrimSpace(mustStringFlag(cmd, "maker"))
+			if mine {
+				maker = firstNonEmpty(maker, ctx.Profile.EVMAddress)
+			}
+			if market == "" && maker == "" {
+				return errors.New("provide --market with --outcome, or use --maker/--mine for wallet-wide order history")
+			}
 			status := strings.TrimSpace(mustStringFlag(cmd, "status"))
 			limit, err := cmd.Flags().GetInt("limit")
 			if err != nil {
@@ -1378,7 +1679,9 @@ func newClobCommand() *cobra.Command {
 			}
 			projectionURL := strings.TrimSpace(mustStringFlag(cmd, "projection-url"))
 			filters := url.Values{}
-			filters.Set("clob_id", fmt.Sprintf("%s-%d", market, outcome))
+			if market != "" {
+				filters.Set("clob_id", fmt.Sprintf("%s-%d", market, outcome))
+			}
 			if maker != "" {
 				filters.Set("maker", maker)
 			}
@@ -1395,17 +1698,21 @@ func newClobCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return printOutput(ctx.JSON, map[string]any{
-				"market":  market,
-				"outcome": outcome,
-				"items":   orders,
-				"total":   len(orders),
-			})
+			payload := map[string]any{"items": orders, "total": len(orders)}
+			if market != "" {
+				payload["market"] = market
+				payload["outcome"] = outcome
+			}
+			if maker != "" {
+				payload["maker"] = maker
+			}
+			return printOutput(ctx.JSON, payload)
 		},
 	}
-	ordersListCmd.Flags().String("market", "", "Logical market ID for the CLOB proposition")
+	ordersListCmd.Flags().String("market", "", "Logical market ID for the CLOB proposition; optional when using --maker or --mine")
 	ordersListCmd.Flags().Int("outcome", 0, "Displayed outcome index within the logical market")
 	ordersListCmd.Flags().String("maker", "", "Optional maker wallet filter")
+	ordersListCmd.Flags().Bool("mine", false, "Filter orders to the active profile wallet")
 	ordersListCmd.Flags().String("status", "", "Optional order status filter")
 	ordersListCmd.Flags().Bool("active-only", false, "Only return resting active orders")
 	ordersListCmd.Flags().Int("limit", 20, "Maximum number of orders to return")
@@ -1414,7 +1721,7 @@ func newClobCommand() *cobra.Command {
 
 	fillsCmd := &cobra.Command{Use: "fills", Short: "Inspect hosted CLOB fills"}
 	fillsListCmd := &cobra.Command{
-		Use:   "list --market <id> --outcome <index>",
+		Use:   "list",
 		Short: "List hosted CLOB fills for a logical proposition or wallet",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx, err := buildCLIContext()
@@ -1422,21 +1729,27 @@ func newClobCommand() *cobra.Command {
 				return err
 			}
 			market := strings.TrimSpace(mustStringFlag(cmd, "market"))
-			if market == "" {
-				return errors.New("--market is required")
-			}
+			mine := mustBoolFlag(cmd, "mine")
 			outcome, err := cmd.Flags().GetInt("outcome")
 			if err != nil {
 				return err
 			}
 			wallet := strings.TrimSpace(mustStringFlag(cmd, "wallet"))
+			if mine {
+				wallet = firstNonEmpty(wallet, ctx.Profile.EVMAddress)
+			}
+			if market == "" && wallet == "" {
+				return errors.New("provide --market with --outcome, or use --wallet/--mine for wallet-wide fill history")
+			}
 			limit, err := cmd.Flags().GetInt("limit")
 			if err != nil {
 				return err
 			}
 			projectionURL := strings.TrimSpace(mustStringFlag(cmd, "projection-url"))
 			filters := url.Values{}
-			filters.Set("clob_id", fmt.Sprintf("%s-%d", market, outcome))
+			if market != "" {
+				filters.Set("clob_id", fmt.Sprintf("%s-%d", market, outcome))
+			}
 			if wallet != "" {
 				filters.Set("wallet", wallet)
 			}
@@ -1447,22 +1760,167 @@ func newClobCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return printOutput(ctx.JSON, map[string]any{
-				"market":  market,
-				"outcome": outcome,
-				"items":   fills,
-				"total":   len(fills),
-			})
+			payload := map[string]any{"items": fills, "total": len(fills)}
+			if market != "" {
+				payload["market"] = market
+				payload["outcome"] = outcome
+			}
+			if wallet != "" {
+				payload["wallet"] = wallet
+			}
+			return printOutput(ctx.JSON, payload)
 		},
 	}
-	fillsListCmd.Flags().String("market", "", "Logical market ID for the CLOB proposition")
+	fillsListCmd.Flags().String("market", "", "Logical market ID for the CLOB proposition; optional when using --wallet or --mine")
 	fillsListCmd.Flags().Int("outcome", 0, "Displayed outcome index within the logical market")
 	fillsListCmd.Flags().String("wallet", "", "Optional wallet filter for buyer or seller participation")
+	fillsListCmd.Flags().Bool("mine", false, "Filter fills to the active profile wallet")
 	fillsListCmd.Flags().Int("limit", 20, "Maximum number of fills to return")
 	fillsCmd.AddCommand(fillsListCmd)
 	cmd.AddCommand(fillsCmd)
 
 	orderCmd := &cobra.Command{Use: "order", Short: "Manage hosted CLOB orders"}
+	placeCmd := &cobra.Command{
+		Use:   "place <market-id-or-address>",
+		Short: "Sign and submit a hosted CLOB order for a logical CTF market",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+			wallet, _, err := requireEVMWalletWithKey(ctx)
+			if err != nil {
+				return err
+			}
+			market, err := loadMarketWithClobFallback(cmd.Context(), ctx, args[0], mustStringFlag(cmd, "instance-date"))
+			if err != nil {
+				return err
+			}
+			if !isClobMarketImplementation(market.MarketImplementation) {
+				return errors.New("clob order place requires an AxiomCTFMarket logical market")
+			}
+
+			selection, err := resolveClobSelection(
+				market,
+				mustStringFlag(cmd, "outcome"),
+				mustStringFlag(cmd, "label"),
+				mustStringFlag(cmd, "displayed-side"),
+				mustStringFlag(cmd, "exchange-address"),
+				mustStringFlag(cmd, "outcome-token-address"),
+			)
+			if err != nil {
+				return err
+			}
+
+			side := strings.ToLower(strings.TrimSpace(mustStringFlag(cmd, "side")))
+			orderType := strings.ToLower(strings.TrimSpace(mustStringFlag(cmd, "type")))
+			quantity, err := parseClobQuantity(mustStringFlag(cmd, "quantity"))
+			if err != nil {
+				return err
+			}
+			priceBps := 0
+			if orderType != "market" {
+				priceBps, err = parseClobPriceToBps(mustStringFlag(cmd, "price"))
+				if err != nil {
+					return err
+				}
+			}
+
+			payload, err := buildClobSignedOrder(
+				wallet,
+				market.ID,
+				selection,
+				side,
+				orderType,
+				priceBps,
+				quantity,
+				mustStringFlag(cmd, "expiry"),
+				big.NewInt(xrplEVMChainID),
+			)
+			if err != nil {
+				return err
+			}
+
+			if mustBoolFlag(cmd, "dry-run") {
+				preview := map[string]any{
+					"market":          market.Title,
+					"marketId":        market.ID,
+					"outcomeLabel":    selection.LogicalOutcome.Label,
+					"outcomeIndex":    selection.Binding.OutcomeIndex,
+					"displayedSide":   selection.DisplayedSide,
+					"side":            side,
+					"orderType":       orderType,
+					"priceBps":        priceBps,
+					"quantity":        quantity,
+					"maker":           payload.Maker,
+					"collateralToken": payload.CollateralToken,
+					"outcomeToken":    payload.OutcomeToken,
+					"outcomeTokenId":  payload.OutcomeTokenID,
+					"makerAmount":     payload.MakerAmount,
+					"takerAmount":     payload.TakerAmount,
+					"expiration":      payload.Expiration,
+					"nonce":           payload.Nonce,
+				}
+				return printOutput(ctx.JSON, map[string]any{"dryRun": true, "order": preview})
+			}
+
+			response, err := ctx.API.SubmitClobOrder(cmd.Context(), strings.TrimSpace(mustStringFlag(cmd, "eventstore-url")), payload)
+			if err != nil {
+				return err
+			}
+			return printOutput(ctx.JSON, map[string]any{
+				"market":          market.Title,
+				"marketId":        market.ID,
+				"outcomeLabel":    selection.LogicalOutcome.Label,
+				"outcomeIndex":    selection.Binding.OutcomeIndex,
+				"displayedSide":   selection.DisplayedSide,
+				"side":            side,
+				"orderType":       orderType,
+				"priceBps":        priceBps,
+				"quantity":        quantity,
+				"orderId":         response.OrderID,
+				"tradeCount":      response.TradeCount,
+				"remainingShares": response.RemainingQuantity,
+				"resting":         response.WasAddedToBook,
+				"message":         describeClobOrderResult(orderType, response),
+			})
+		},
+	}
+	placeCmd.Flags().String("outcome", "", "Logical outcome index to trade")
+	placeCmd.Flags().String("label", "", "Logical outcome label to trade")
+	placeCmd.Flags().String("displayed-side", "", "Displayed side to trade: yes or no; inferred for single-binding binary markets")
+	placeCmd.Flags().String("side", "buy", "Order side: buy or sell")
+	placeCmd.Flags().String("type", "limit", "Order type: limit, market, ioc, fok")
+	placeCmd.Flags().String("price", "", "Limit price in displayed percent units, for example 52.5")
+	placeCmd.Flags().String("quantity", "", "Whole-number share quantity")
+	placeCmd.Flags().String("expiry", "24h", "Expiry preset: 1h, 24h, 7d, never")
+	placeCmd.Flags().Bool("dry-run", false, "Build and sign the order locally without submitting it")
+	placeCmd.Flags().String("instance-date", "", "Instance date for recurring markets in YYYY-MM-DD format")
+	orderCmd.AddCommand(placeCmd)
+
+	getOrderCmd := &cobra.Command{
+		Use:   "get --order-id <id>",
+		Short: "Fetch a single hosted CLOB order by ID",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+			orderID := strings.TrimSpace(mustStringFlag(cmd, "order-id"))
+			if orderID == "" {
+				return errors.New("--order-id is required")
+			}
+			order, err := ctx.API.GetClobOrder(cmd.Context(), strings.TrimSpace(mustStringFlag(cmd, "projection-url")), orderID)
+			if err != nil {
+				return err
+			}
+			return printOutput(ctx.JSON, order)
+		},
+	}
+	getOrderCmd.Flags().String("order-id", "", "Hosted order UUID")
+	orderCmd.AddCommand(getOrderCmd)
+
 	cancelCmd := &cobra.Command{
 		Use:   "cancel --order-id <id> --market <id> --outcome <index>",
 		Short: "Cancel a hosted resting CLOB order using the requester wallet address",
@@ -1512,6 +1970,28 @@ func newClobCommand() *cobra.Command {
 	orderCmd.AddCommand(cancelCmd)
 	cmd.AddCommand(orderCmd)
 
+	fillGetCmd := &cobra.Command{
+		Use:   "get --fill-id <id>",
+		Short: "Fetch a single hosted CLOB fill by ID",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+			fillID := strings.TrimSpace(mustStringFlag(cmd, "fill-id"))
+			if fillID == "" {
+				return errors.New("--fill-id is required")
+			}
+			fill, err := ctx.API.GetClobFill(cmd.Context(), strings.TrimSpace(mustStringFlag(cmd, "projection-url")), fillID)
+			if err != nil {
+				return err
+			}
+			return printOutput(ctx.JSON, fill)
+		},
+	}
+	fillGetCmd.Flags().String("fill-id", "", "Hosted fill UUID")
+	fillsCmd.AddCommand(fillGetCmd)
+
 	return cmd
 }
 
@@ -1544,15 +2024,38 @@ func buildCLIContext() (*cliContext, error) {
 	return &cliContext{Config: cfg, API: client, Profile: profile, ProfileName: cfg.ActiveProfile, JSON: flagJSON || cfg.OutputFormat == "json"}, nil
 }
 
+func resolveWalletAccountProfile(cmd *cobra.Command, ctx *cliContext) (string, app.Profile) {
+	accountName := strings.TrimSpace(mustStringFlag(cmd, "account"))
+	if accountName == "" {
+		return ctx.ProfileName, ctx.Profile
+	}
+	profile, ok := ctx.Config.Profiles[accountName]
+	if !ok {
+		profile = app.Profile{Name: accountName}
+	}
+	if profile.Name == "" {
+		profile.Name = accountName
+	}
+	return accountName, profile
+}
+
+func shouldActivateWalletAccount(cmd *cobra.Command, ctx *cliContext, accountName string) bool {
+	return accountName == ctx.ProfileName || mustBoolFlag(cmd, "activate")
+}
+
 func requireEVMWallet(ctx *cliContext) (*evm.Wallet, error) {
 	wallet, _, err := requireEVMWalletWithKey(ctx)
 	return wallet, err
 }
 
 func requireEVMWalletWithKey(ctx *cliContext) (*evm.Wallet, string, error) {
-	secret, err := app.LoadSecret(app.EVMSecretKey(ctx.ProfileName))
+	return requireEVMWalletWithKeyForProfile(ctx.Config, ctx.ProfileName)
+}
+
+func requireEVMWalletWithKeyForProfile(cfg *app.Config, profileName string) (*evm.Wallet, string, error) {
+	secret, err := app.LoadSecret(app.EVMSecretKey(profileName))
 	if err != nil {
-		return nil, "", fmt.Errorf("no EVM private key stored for profile %q: %w", ctx.ProfileName, err)
+		return nil, "", fmt.Errorf("no EVM private key stored for profile %q: %w", profileName, err)
 	}
 	wallet, err := evm.WalletFromPrivateKeyHex(secret)
 	if err != nil {
