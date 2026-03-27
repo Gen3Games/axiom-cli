@@ -535,3 +535,34 @@ func sortedClobBindings(bindings []api.CtfOutcomeMarketBinding) []api.CtfOutcome
 func isZeroAddress(value string) bool {
 	return strings.EqualFold(strings.TrimSpace(value), evm.ClobZeroAddress)
 }
+
+func resolveSplitMergeBinding(market *api.MarketDetails, labelFlag string) (api.CtfOutcomeMarketBinding, error) {
+	bindings := sortedClobBindings(market.CTFOutcomeMarkets)
+	if len(bindings) == 0 {
+		return api.CtfOutcomeMarketBinding{}, errors.New("market has no CTF outcome bindings")
+	}
+	label := strings.TrimSpace(labelFlag)
+	if label == "" {
+		if len(bindings) == 1 {
+			b := bindings[0]
+			if strings.TrimSpace(b.ConditionID) == "" || len(b.ConditionID) != 66 {
+				return api.CtfOutcomeMarketBinding{}, fmt.Errorf("binding %q has no usable conditionId", b.Label)
+			}
+			return b, nil
+		}
+		return api.CtfOutcomeMarketBinding{}, errors.New("multiple bindings found; use --label to select one")
+	}
+	for _, b := range bindings {
+		if strings.EqualFold(b.Label, label) {
+			if strings.TrimSpace(b.ConditionID) == "" || len(b.ConditionID) != 66 {
+				return api.CtfOutcomeMarketBinding{}, fmt.Errorf("binding %q has no usable conditionId", b.Label)
+			}
+			return b, nil
+		}
+	}
+	labels := make([]string, 0, len(bindings))
+	for _, b := range bindings {
+		labels = append(labels, b.Label)
+	}
+	return api.CtfOutcomeMarketBinding{}, fmt.Errorf("no binding found for label %q; available: %s", label, strings.Join(labels, ", "))
+}

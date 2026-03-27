@@ -30,7 +30,13 @@ const erc1155ABIJSON = `[
 	{"name":"setApprovalForAll","type":"function","stateMutability":"nonpayable","inputs":[{"name":"operator","type":"address"},{"name":"approved","type":"bool"}],"outputs":[]}
 ]`
 
+const conditionalTokensABIJSON = `[
+	{"name":"splitPosition","type":"function","stateMutability":"nonpayable","inputs":[{"name":"collateralToken","type":"address"},{"name":"parentCollectionId","type":"bytes32"},{"name":"conditionId","type":"bytes32"},{"name":"partition","type":"uint256[]"},{"name":"amount","type":"uint256"}],"outputs":[]},
+	{"name":"mergePositions","type":"function","stateMutability":"nonpayable","inputs":[{"name":"collateralToken","type":"address"},{"name":"parentCollectionId","type":"bytes32"},{"name":"conditionId","type":"bytes32"},{"name":"partition","type":"uint256[]"},{"name":"amount","type":"uint256"}],"outputs":[]}
+]`
+
 var erc1155ABI = mustParseABI(erc1155ABIJSON)
+var conditionalTokensABI = mustParseABI(conditionalTokensABIJSON)
 
 func BuildClobTypedData(domainChainID *big.Int, verifyingContract common.Address, order apitypes.TypedDataMessage) apitypes.TypedData {
 	chainID := cloneBigInt(domainChainID)
@@ -173,6 +179,16 @@ func ParseBigInt(value string) (*big.Int, error) {
 		return nil, fmt.Errorf("invalid integer value: %s", value)
 	}
 	return parsed, nil
+}
+
+func SplitPosition(ctx context.Context, rpcURL string, chainID *big.Int, privateKeyHex string, conditionalTokens common.Address, collateralToken common.Address, conditionID common.Hash, partition []*big.Int, amount *big.Int) (common.Hash, error) {
+	parentCollectionID := common.Hash{}
+	return sendContractTransaction(ctx, rpcURL, chainID, privateKeyHex, conditionalTokens, conditionalTokensABI, "splitPosition", big.NewInt(0), collateralToken, parentCollectionID, conditionID, partition, amount)
+}
+
+func MergePositions(ctx context.Context, rpcURL string, chainID *big.Int, privateKeyHex string, conditionalTokens common.Address, collateralToken common.Address, conditionID common.Hash, partition []*big.Int, amount *big.Int) (common.Hash, error) {
+	parentCollectionID := common.Hash{}
+	return sendContractTransaction(ctx, rpcURL, chainID, privateKeyHex, conditionalTokens, conditionalTokensABI, "mergePositions", big.NewInt(0), collateralToken, parentCollectionID, conditionID, partition, amount)
 }
 
 func dialClient(ctx context.Context, rpcURL string) (*ethclient.Client, error) {

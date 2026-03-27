@@ -52,6 +52,8 @@ var (
 	isERC1155ApprovedForAll  = evm.IsERC1155ApprovedForAll
 	setERC1155ApprovalForAll = evm.SetERC1155ApprovalForAll
 	redeemCTFMarket          = evm.RedeemCTFMarket
+	splitPosition            = evm.SplitPosition
+	mergePositions           = evm.MergePositions
 )
 
 type cliContext struct {
@@ -1991,6 +1993,311 @@ func newClobCommand() *cobra.Command {
 	}
 	fillGetCmd.Flags().String("fill-id", "", "Hosted fill UUID")
 	fillsCmd.AddCommand(fillGetCmd)
+
+	splitCmd := &cobra.Command{
+		Use:   "split <market-id-or-address>",
+		Short: "Split collateral into a complete set of YES and NO conditional tokens",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+			wallet, privateKeyHex, err := requireEVMWalletWithKey(ctx)
+			if err != nil {
+				return err
+			}
+			market, err := loadMarketWithClobFallback(cmd.Context(), ctx, args[0], mustStringFlag(cmd, "instance-date"))
+			if err != nil {
+				return err
+			}
+			if !isClobMarketImplementation(market.MarketImplementation) {
+				return errors.New("clob split requires an AxiomCTFMarket logical market")
+			}
+			binding, err := resolveSplitMergeBinding(market, mustStringFlag(cmd, "label"))
+			if err != nil {
+				return err
+			}
+			conditionalTokens := resolveHexAddressOrDefault(mustStringFlag(cmd, "outcome-token-address"), evm.DefaultClobConditionalTokens)
+			collateralToken := resolveClobCollateralToken(market)
+			conditionID := common.HexToHash(binding.ConditionID)
+			partition := []*big.Int{big.NewInt(1), big.NewInt(2)}
+			amountStr := strings.TrimSpace(mustStringFlag(cmd, "amount"))
+			if amountStr == "" {
+				return errors.New("--amount is required")
+			}
+			amount, err := evm.ParseBigInt(amountStr)
+			if err != nil {
+				return fmt.Errorf("invalid --amount: %w", err)
+			}
+			if amount.Sign() <= 0 {
+				return errors.New("--amount must be greater than zero")
+			}
+
+			if mustBoolFlag(cmd, "dry-run") {
+				yesTokenID, _, _ := resolveDisplayedTokenID(binding, "yes", collateralToken)
+				noTokenID, _, _ := resolveDisplayedTokenID(binding, "no", collateralToken)
+				preview := map[string]any{
+					"dryRun":            true,
+					"action":            "split",
+					"market":            market.Title,
+					"marketId":          market.ID,
+					"outcomeLabel":      binding.Label,
+					"conditionalTokens": conditionalTokens.Hex(),
+					"collateralToken":   collateralToken.Hex(),
+					"conditionId":       conditionID.Hex(),
+					"partition":         []string{"1", "2"},
+					"amountWei":         amount.String(),
+					"amountXrp":         formatWeiToXRP(amount),
+					"wallet":            wallet.Address().Hex(),
+				}
+				if yesTokenID != nil {
+					preview["yesTokenId"] = yesTokenID.String()
+				}
+				if noTokenID != nil {
+					preview["noTokenId"] = noTokenID.String()
+				}
+				return printOutput(ctx.JSON, preview)
+			}
+
+			txHash, err := splitPosition(cmd.Context(), ctx.Config.EVMRPCURL, big.NewInt(xrplEVMChainID), privateKeyHex, conditionalTokens, collateralToken, conditionID, partition, amount)
+			if err != nil {
+				return fmt.Errorf("split transaction failed: %w", err)
+			}
+			result := map[string]any{
+				"action":       "split",
+				"market":       market.Title,
+				"marketId":     market.ID,
+				"outcomeLabel": binding.Label,
+				"amountWei":    amount.String(),
+				"amountXrp":    formatWeiToXRP(amount),
+				"txHash":       txHash.Hex(),
+				"wallet":       wallet.Address().Hex(),
+			}
+			if mustBoolFlag(cmd, "wait") {
+				receipt, waitErr := waitForReceipt(cmd.Context(), ctx.Config.EVMRPCURL, txHash)
+				if waitErr != nil {
+					return waitErr
+				}
+				result["receiptStatus"] = receipt.Status
+				if receipt.Status == 0 {
+					return fmt.Errorf("split transaction reverted (tx %s)", txHash.Hex())
+				}
+			}
+			return printOutput(ctx.JSON, result)
+		},
+	}
+	splitCmd.Flags().String("label", "", "Outcome label to identify the binding for split")
+	splitCmd.Flags().String("amount", "", "Amount of collateral to split in wei")
+	splitCmd.Flags().Bool("wait", false, "Wait for the split transaction receipt")
+	splitCmd.Flags().Bool("dry-run", false, "Preview the split without broadcasting a transaction")
+	splitCmd.Flags().String("instance-date", "", "Instance date for recurring markets in YYYY-MM-DD format")
+	cmd.AddCommand(splitCmd)
+
+	mergeCmd := &cobra.Command{
+		Use:   "merge <market-id-or-address>",
+		Short: "Merge matching YES and NO conditional tokens back into collateral",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+			wallet, privateKeyHex, err := requireEVMWalletWithKey(ctx)
+			if err != nil {
+				return err
+			}
+			market, err := loadMarketWithClobFallback(cmd.Context(), ctx, args[0], mustStringFlag(cmd, "instance-date"))
+			if err != nil {
+				return err
+			}
+			if !isClobMarketImplementation(market.MarketImplementation) {
+				return errors.New("clob merge requires an AxiomCTFMarket logical market")
+			}
+			binding, err := resolveSplitMergeBinding(market, mustStringFlag(cmd, "label"))
+			if err != nil {
+				return err
+			}
+			conditionalTokens := resolveHexAddressOrDefault(mustStringFlag(cmd, "outcome-token-address"), evm.DefaultClobConditionalTokens)
+			collateralToken := resolveClobCollateralToken(market)
+			conditionID := common.HexToHash(binding.ConditionID)
+			partition := []*big.Int{big.NewInt(1), big.NewInt(2)}
+			amountStr := strings.TrimSpace(mustStringFlag(cmd, "amount"))
+			if amountStr == "" {
+				return errors.New("--amount is required")
+			}
+			amount, err := evm.ParseBigInt(amountStr)
+			if err != nil {
+				return fmt.Errorf("invalid --amount: %w", err)
+			}
+			if amount.Sign() <= 0 {
+				return errors.New("--amount must be greater than zero")
+			}
+
+			if mustBoolFlag(cmd, "dry-run") {
+				yesTokenID, _, _ := resolveDisplayedTokenID(binding, "yes", collateralToken)
+				noTokenID, _, _ := resolveDisplayedTokenID(binding, "no", collateralToken)
+				preview := map[string]any{
+					"dryRun":            true,
+					"action":            "merge",
+					"market":            market.Title,
+					"marketId":          market.ID,
+					"outcomeLabel":      binding.Label,
+					"conditionalTokens": conditionalTokens.Hex(),
+					"collateralToken":   collateralToken.Hex(),
+					"conditionId":       conditionID.Hex(),
+					"partition":         []string{"1", "2"},
+					"amountWei":         amount.String(),
+					"amountXrp":         formatWeiToXRP(amount),
+					"wallet":            wallet.Address().Hex(),
+				}
+				if yesTokenID != nil {
+					preview["yesTokenId"] = yesTokenID.String()
+				}
+				if noTokenID != nil {
+					preview["noTokenId"] = noTokenID.String()
+				}
+				return printOutput(ctx.JSON, preview)
+			}
+
+			txHash, err := mergePositions(cmd.Context(), ctx.Config.EVMRPCURL, big.NewInt(xrplEVMChainID), privateKeyHex, conditionalTokens, collateralToken, conditionID, partition, amount)
+			if err != nil {
+				return fmt.Errorf("merge transaction failed: %w", err)
+			}
+			result := map[string]any{
+				"action":       "merge",
+				"market":       market.Title,
+				"marketId":     market.ID,
+				"outcomeLabel": binding.Label,
+				"amountWei":    amount.String(),
+				"amountXrp":    formatWeiToXRP(amount),
+				"txHash":       txHash.Hex(),
+				"wallet":       wallet.Address().Hex(),
+			}
+			if mustBoolFlag(cmd, "wait") {
+				receipt, waitErr := waitForReceipt(cmd.Context(), ctx.Config.EVMRPCURL, txHash)
+				if waitErr != nil {
+					return waitErr
+				}
+				result["receiptStatus"] = receipt.Status
+				if receipt.Status == 0 {
+					return fmt.Errorf("merge transaction reverted (tx %s)", txHash.Hex())
+				}
+			}
+			return printOutput(ctx.JSON, result)
+		},
+	}
+	mergeCmd.Flags().String("label", "", "Outcome label to identify the binding for merge")
+	mergeCmd.Flags().String("amount", "", "Amount of matched YES+NO shares to merge in wei")
+	mergeCmd.Flags().Bool("wait", false, "Wait for the merge transaction receipt")
+	mergeCmd.Flags().Bool("dry-run", false, "Preview the merge without broadcasting a transaction")
+	mergeCmd.Flags().String("instance-date", "", "Instance date for recurring markets in YYYY-MM-DD format")
+	cmd.AddCommand(mergeCmd)
+
+	splitStatusCmd := &cobra.Command{
+		Use:   "split-status <market-id-or-address>",
+		Short: "Show split and merge eligibility, balances, and max amounts for a CLOB market",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+			walletAddress, err := resolveProfileAddress(ctx, nil)
+			if override := strings.TrimSpace(mustStringFlag(cmd, "wallet")); override != "" {
+				walletAddress = override
+				err = nil
+			}
+			if err != nil {
+				return err
+			}
+			market, err := loadMarketWithClobFallback(cmd.Context(), ctx, args[0], mustStringFlag(cmd, "instance-date"))
+			if err != nil {
+				return err
+			}
+			if !isClobMarketImplementation(market.MarketImplementation) {
+				return errors.New("clob split-status requires an AxiomCTFMarket logical market")
+			}
+			binding, err := resolveSplitMergeBinding(market, mustStringFlag(cmd, "label"))
+			if err != nil {
+				return err
+			}
+			conditionalTokens := resolveHexAddressOrDefault(mustStringFlag(cmd, "outcome-token-address"), evm.DefaultClobConditionalTokens)
+			collateralToken := resolveClobCollateralToken(market)
+			owner := common.HexToAddress(walletAddress)
+
+			collateralBalance, err := getERC20Balance(cmd.Context(), ctx.Config.EVMRPCURL, collateralToken, owner)
+			if err != nil {
+				return err
+			}
+			collateralAllowance, err := getERC20Allowance(cmd.Context(), ctx.Config.EVMRPCURL, collateralToken, owner, conditionalTokens)
+			if err != nil {
+				return err
+			}
+			yesTokenID, _, _ := resolveDisplayedTokenID(binding, "yes", collateralToken)
+			noTokenID, _, _ := resolveDisplayedTokenID(binding, "no", collateralToken)
+			yesBalance := big.NewInt(0)
+			noBalance := big.NewInt(0)
+			if yesTokenID != nil {
+				yesBalance, err = getERC1155Balance(cmd.Context(), ctx.Config.EVMRPCURL, conditionalTokens, owner, yesTokenID)
+				if err != nil {
+					return err
+				}
+			}
+			if noTokenID != nil {
+				noBalance, err = getERC1155Balance(cmd.Context(), ctx.Config.EVMRPCURL, conditionalTokens, owner, noTokenID)
+				if err != nil {
+					return err
+				}
+			}
+			maxMergeable := new(big.Int).Set(yesBalance)
+			if noBalance.Cmp(maxMergeable) < 0 {
+				maxMergeable.Set(noBalance)
+			}
+
+			operatorApproved, err := isERC1155ApprovedForAll(cmd.Context(), ctx.Config.EVMRPCURL, conditionalTokens, owner, conditionalTokens)
+			if err != nil {
+				return err
+			}
+
+			status := map[string]any{
+				"market":                     market.Title,
+				"marketId":                   market.ID,
+				"outcomeLabel":               binding.Label,
+				"wallet":                     walletAddress,
+				"conditionalTokens":          conditionalTokens.Hex(),
+				"collateralToken":            collateralToken.Hex(),
+				"conditionId":                binding.ConditionID,
+				"collateralBalanceWei":       collateralBalance.String(),
+				"collateralBalanceXrp":       formatWeiToXRP(collateralBalance),
+				"collateralAllowanceWei":     collateralAllowance.String(),
+				"collateralAllowanceXrp":     formatWeiToXRP(collateralAllowance),
+				"splitApproved":              collateralAllowance.Sign() > 0,
+				"yesBalanceWei":              yesBalance.String(),
+				"yesBalanceXrp":              formatWeiToXRP(yesBalance),
+				"noBalanceWei":               noBalance.String(),
+				"noBalanceXrp":               formatWeiToXRP(noBalance),
+				"maxMergeableWei":            maxMergeable.String(),
+				"maxMergeableXrp":            formatWeiToXRP(maxMergeable),
+				"mergeOperatorApproved":      operatorApproved,
+				"maxSplitWei":               collateralBalance.String(),
+				"maxSplitXrp":               formatWeiToXRP(collateralBalance),
+				"splitReady":                collateralBalance.Sign() > 0 && collateralAllowance.Sign() > 0,
+				"mergeReady":                maxMergeable.Sign() > 0 && operatorApproved,
+			}
+			if yesTokenID != nil {
+				status["yesTokenId"] = yesTokenID.String()
+			}
+			if noTokenID != nil {
+				status["noTokenId"] = noTokenID.String()
+			}
+			return printOutput(ctx.JSON, status)
+		},
+	}
+	splitStatusCmd.Flags().String("label", "", "Outcome label to inspect")
+	splitStatusCmd.Flags().String("wallet", "", "Wallet address to inspect; defaults to the active profile EVM address")
+	splitStatusCmd.Flags().String("instance-date", "", "Instance date for recurring markets in YYYY-MM-DD format")
+	cmd.AddCommand(splitStatusCmd)
 
 	return cmd
 }
