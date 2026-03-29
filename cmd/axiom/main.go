@@ -51,6 +51,7 @@ var (
 	getERC1155Balance        = evm.GetERC1155Balance
 	isERC1155ApprovedForAll  = evm.IsERC1155ApprovedForAll
 	setERC1155ApprovalForAll = evm.SetERC1155ApprovalForAll
+	loadCTFMarketMetadata    = evm.LoadCTFMarketMetadata
 	redeemCTFMarket          = evm.RedeemCTFMarket
 	splitPosition            = evm.SplitPosition
 	mergePositions           = evm.MergePositions
@@ -1310,8 +1311,7 @@ func newClaimCommand() *cobra.Command {
 				return err
 			}
 			if isClobMarketImplementation(market.MarketImplementation) {
-				outcomeToken := resolveHexAddressOrDefault("", evm.DefaultClobConditionalTokens)
-				legs, err := buildClobRedemptionPlan(cmd.Context(), ctx, market, wallet.Address(), outcomeToken)
+				legs, err := buildClobRedemptionPlan(cmd.Context(), ctx, market, wallet.Address())
 				if err != nil {
 					return err
 				}
@@ -2255,10 +2255,7 @@ func newClobCommand() *cobra.Command {
 				maxMergeable.Set(noBalance)
 			}
 
-			operatorApproved, err := isERC1155ApprovedForAll(cmd.Context(), ctx.Config.EVMRPCURL, conditionalTokens, owner, conditionalTokens)
-			if err != nil {
-				return err
-			}
+			summary := summarizeClobSplitStatus(collateralBalance, collateralAllowance, yesBalance, noBalance)
 
 			status := map[string]any{
 				"market":                 market.Title,
@@ -2277,13 +2274,13 @@ func newClobCommand() *cobra.Command {
 				"yesBalanceXrp":          formatWeiToXRP(yesBalance),
 				"noBalanceWei":           noBalance.String(),
 				"noBalanceXrp":           formatWeiToXRP(noBalance),
-				"maxMergeableWei":        maxMergeable.String(),
-				"maxMergeableXrp":        formatWeiToXRP(maxMergeable),
-				"mergeOperatorApproved":  operatorApproved,
-				"maxSplitWei":            collateralBalance.String(),
-				"maxSplitXrp":            formatWeiToXRP(collateralBalance),
-				"splitReady":             collateralBalance.Sign() > 0 && collateralAllowance.Sign() > 0,
-				"mergeReady":             maxMergeable.Sign() > 0 && operatorApproved,
+				"maxMergeableWei":        summary.MaxMergeableWei.String(),
+				"maxMergeableXrp":        formatWeiToXRP(summary.MaxMergeableWei),
+				"mergeApprovalRequired":  summary.MergeApprovalRequired,
+				"maxSplitWei":            summary.MaxSplitWei.String(),
+				"maxSplitXrp":            formatWeiToXRP(summary.MaxSplitWei),
+				"splitReady":             summary.SplitReady,
+				"mergeReady":             summary.MergeReady,
 			}
 			if yesTokenID != nil {
 				status["yesTokenId"] = yesTokenID.String()

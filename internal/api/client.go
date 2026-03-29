@@ -71,15 +71,16 @@ type Outcome struct {
 }
 
 type CtfOutcomeMarketBinding struct {
-	OutcomeID       string   `json:"outcomeId"`
-	OutcomeIndex    int      `json:"outcomeIndex"`
-	Label           string   `json:"label"`
-	ContractAddress string   `json:"contractAddress"`
-	OutcomeTokenIDs []string `json:"outcomeTokenIds"`
-	MetadataURI     string   `json:"metadataUri"`
-	DeploymentID    string   `json:"deploymentId"`
-	QuestionID      string   `json:"questionId"`
-	ConditionID     string   `json:"conditionId"`
+	OutcomeID         string   `json:"outcomeId"`
+	OutcomeIndex      int      `json:"outcomeIndex"`
+	Label             string   `json:"label"`
+	ContractAddress   string   `json:"contractAddress"`
+	ConditionalTokens string   `json:"conditionalTokens,omitempty"`
+	OutcomeTokenIDs   []string `json:"outcomeTokenIds"`
+	MetadataURI       string   `json:"metadataUri"`
+	DeploymentID      string   `json:"deploymentId"`
+	QuestionID        string   `json:"questionId"`
+	ConditionID       string   `json:"conditionId"`
 }
 
 type OutcomeSpotPrice struct {

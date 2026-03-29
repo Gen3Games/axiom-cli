@@ -88,6 +88,15 @@ type clobRedemptionLeg struct {
 	IndexSet        int    `json:"indexSet"`
 }
 
+type clobSplitStatusSummary struct {
+	MaxSplitWei           *big.Int
+	MaxMergeableWei       *big.Int
+	SplitApproved         bool
+	SplitReady            bool
+	MergeReady            bool
+	MergeApprovalRequired bool
+}
+
 func parseClobPriceToBps(value string) (int, error) {
 	parsed, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
 	if err != nil {
@@ -260,7 +269,7 @@ func hydrateStandaloneClobMarket(ctx context.Context, cliCtx *cliContext, market
 		return market, nil
 	}
 
-	metadata, err := evm.LoadCTFMarketMetadata(ctx, cliCtx.Config.EVMRPCURL, common.HexToAddress(market.ContractAddress))
+	metadata, err := loadCTFMarketMetadata(ctx, cliCtx.Config.EVMRPCURL, common.HexToAddress(market.ContractAddress))
 	if err != nil {
 		return market, nil
 	}
@@ -289,17 +298,35 @@ func hydrateStandaloneClobMarket(ctx context.Context, cliCtx *cliContext, market
 	noTokenID := evm.ComputeCTFPositionID(metadata.CollateralToken, metadata.ConditionID, 1)
 	market.CTFOutcomeMarkets = []api.CtfOutcomeMarketBinding{
 		{
-			OutcomeID:       market.ID + ":0",
-			OutcomeIndex:    0,
-			Label:           market.Outcomes[0].Label,
-			ContractAddress: common.HexToAddress(market.ContractAddress).Hex(),
-			OutcomeTokenIDs: []string{yesTokenID.String(), noTokenID.String()},
-			MetadataURI:     metadata.MetadataURI,
-			QuestionID:      metadata.QuestionID.Hex(),
-			ConditionID:     metadata.ConditionID.Hex(),
+			OutcomeID:         market.ID + ":0",
+			OutcomeIndex:      0,
+			Label:             market.Outcomes[0].Label,
+			ContractAddress:   common.HexToAddress(market.ContractAddress).Hex(),
+			ConditionalTokens: metadata.ConditionalTokens.Hex(),
+			OutcomeTokenIDs:   []string{yesTokenID.String(), noTokenID.String()},
+			MetadataURI:       metadata.MetadataURI,
+			QuestionID:        metadata.QuestionID.Hex(),
+			ConditionID:       metadata.ConditionID.Hex(),
 		},
 	}
 	return market, nil
+}
+
+func resolveClobBindingOutcomeToken(ctx context.Context, cliCtx *cliContext, binding api.CtfOutcomeMarketBinding) (common.Address, error) {
+	if common.IsHexAddress(strings.TrimSpace(binding.ConditionalTokens)) && !isZeroAddress(binding.ConditionalTokens) {
+		return common.HexToAddress(binding.ConditionalTokens), nil
+	}
+	if !common.IsHexAddress(strings.TrimSpace(binding.ContractAddress)) {
+		return common.Address{}, fmt.Errorf("binding %q has no usable contract address", binding.Label)
+	}
+	metadata, err := loadCTFMarketMetadata(ctx, cliCtx.Config.EVMRPCURL, common.HexToAddress(binding.ContractAddress))
+	if err != nil {
+		return common.Address{}, err
+	}
+	if metadata == nil || metadata.ConditionalTokens == (common.Address{}) {
+		return common.Address{}, fmt.Errorf("binding %q did not expose a usable conditional tokens contract", binding.Label)
+	}
+	return metadata.ConditionalTokens, nil
 }
 
 func resolveDisplayedTokenID(binding api.CtfOutcomeMarketBinding, displayedSide string, collateralToken common.Address) (*big.Int, string, error) {
@@ -483,11 +510,22 @@ func buildClobWalletStatus(ctx context.Context, cliCtx *cliContext, market *api.
 	}, nil
 }
 
-func buildClobRedemptionPlan(ctx context.Context, cliCtx *cliContext, market *api.MarketDetails, walletAddress common.Address, outcomeToken common.Address) ([]clobRedemptionLeg, error) {
+func buildClobRedemptionPlan(ctx context.Context, cliCtx *cliContext, market *api.MarketDetails, walletAddress common.Address) ([]clobRedemptionLeg, error) {
 	collateralToken := resolveClobCollateralToken(market)
 	bindings := sortedClobBindings(market.CTFOutcomeMarkets)
 	legs := make([]clobRedemptionLeg, 0)
+	outcomeTokensByContract := make(map[string]common.Address, len(bindings))
 	for _, binding := range bindings {
+		contractAddress := common.HexToAddress(binding.ContractAddress).Hex()
+		outcomeToken, ok := outcomeTokensByContract[contractAddress]
+		if !ok {
+			resolvedOutcomeToken, err := resolveClobBindingOutcomeToken(ctx, cliCtx, binding)
+			if err != nil {
+				return nil, err
+			}
+			outcomeToken = resolvedOutcomeToken
+			outcomeTokensByContract[contractAddress] = outcomeToken
+		}
 		for _, displayedSide := range []string{"yes", "no"} {
 			tokenID, tokenIDRaw, err := resolveDisplayedTokenID(binding, displayedSide, collateralToken)
 			if err != nil {
@@ -512,6 +550,29 @@ func buildClobRedemptionPlan(ctx context.Context, cliCtx *cliContext, market *ap
 		}
 	}
 	return legs, nil
+}
+
+func summarizeClobSplitStatus(collateralBalance *big.Int, collateralAllowance *big.Int, yesBalance *big.Int, noBalance *big.Int) clobSplitStatusSummary {
+	maxSplit := cloneBigInt(collateralBalance)
+	allowance := cloneBigInt(collateralAllowance)
+	if allowance.Cmp(maxSplit) < 0 {
+		maxSplit.Set(allowance)
+	}
+
+	maxMergeable := cloneBigInt(yesBalance)
+	noBalanceValue := cloneBigInt(noBalance)
+	if noBalanceValue.Cmp(maxMergeable) < 0 {
+		maxMergeable.Set(noBalanceValue)
+	}
+
+	return clobSplitStatusSummary{
+		MaxSplitWei:           maxSplit,
+		MaxMergeableWei:       maxMergeable,
+		SplitApproved:         allowance.Sign() > 0,
+		SplitReady:            maxSplit.Sign() > 0,
+		MergeReady:            maxMergeable.Sign() > 0,
+		MergeApprovalRequired: false,
+	}
 }
 
 func clobDisplayedSideToIndexSet(displayedSide string) int {

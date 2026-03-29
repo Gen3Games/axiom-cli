@@ -422,14 +422,25 @@ func TestClaimMarketRedeemsClobPositions(t *testing.T) {
 
 	originalGetERC1155Balance := getERC1155Balance
 	originalRedeemCTFMarket := redeemCTFMarket
-	getERC1155Balance = func(_ context.Context, _ string, _ common.Address, _ common.Address, tokenID *big.Int) (*big.Int, error) {
-		switch tokenID.String() {
-		case "101":
+	originalLoadCTFMarketMetadata := loadCTFMarketMetadata
+	getERC1155Balance = func(_ context.Context, _ string, token common.Address, _ common.Address, tokenID *big.Int) (*big.Int, error) {
+		switch {
+		case token == common.HexToAddress("0x00000000000000000000000000000000000000D1") && tokenID.String() == "101":
 			return big.NewInt(5), nil
-		case "202":
+		case token == common.HexToAddress("0x00000000000000000000000000000000000000D2") && tokenID.String() == "202":
 			return big.NewInt(3), nil
 		default:
 			return big.NewInt(0), nil
+		}
+	}
+	loadCTFMarketMetadata = func(_ context.Context, _ string, market common.Address) (*evm.CTFMarketMetadata, error) {
+		switch market.Hex() {
+		case common.HexToAddress("0x00000000000000000000000000000000000000C1").Hex():
+			return &evm.CTFMarketMetadata{ConditionalTokens: common.HexToAddress("0x00000000000000000000000000000000000000D1")}, nil
+		case common.HexToAddress("0x00000000000000000000000000000000000000C2").Hex():
+			return &evm.CTFMarketMetadata{ConditionalTokens: common.HexToAddress("0x00000000000000000000000000000000000000D2")}, nil
+		default:
+			return nil, fmt.Errorf("unexpected market %s", market.Hex())
 		}
 	}
 	redeemCTFMarket = func(_ context.Context, _ string, _ *big.Int, _ string, market common.Address, indexSets []*big.Int) (common.Hash, error) {
@@ -441,6 +452,7 @@ func TestClaimMarketRedeemsClobPositions(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		getERC1155Balance = originalGetERC1155Balance
+		loadCTFMarketMetadata = originalLoadCTFMarketMetadata
 		redeemCTFMarket = originalRedeemCTFMarket
 	})
 
