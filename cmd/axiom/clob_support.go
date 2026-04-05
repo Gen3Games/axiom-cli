@@ -406,11 +406,21 @@ func buildClobOrderAmounts(side string, priceBps int, quantity int) (*big.Int, *
 	if priceValue <= 0 {
 		priceValue = 10000
 	}
-	quantityValue := int64(quantity)
+	// 1 share = 1e18 wei; prices are in basis points (1 bps = 0.01%).
+	// makerAmount and takerAmount must be expressed in wei so the on-chain
+	// exchange contract accepts them.
+	//
+	// For a buy:  maker pays collateral  = quantity * price/10000 shares  (in wei)
+	//             taker delivers outcome  = quantity shares               (in wei)
+	// For a sell: maker delivers outcome  = quantity shares               (in wei)
+	//             taker pays collateral   = quantity * price/10000 shares (in wei)
+	shareWei := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil) // 1e18
+	quantityWei := new(big.Int).Mul(big.NewInt(int64(quantity)), shareWei)
+	costWei := new(big.Int).Mul(big.NewInt(int64(quantity)*priceValue), new(big.Int).Div(shareWei, big.NewInt(10000)))
 	if side == "buy" {
-		return big.NewInt(quantityValue * priceValue), big.NewInt(quantityValue * 10000)
+		return costWei, quantityWei
 	}
-	return big.NewInt(quantityValue * 10000), big.NewInt(quantityValue * priceValue)
+	return quantityWei, costWei
 }
 
 func resolveClobExpiration(preset string) int64 {

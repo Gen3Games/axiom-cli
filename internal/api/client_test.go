@@ -114,7 +114,7 @@ func TestListAllMarketsAggregatesPages(t *testing.T) {
 		t.Fatalf("NewClient() error = %v", err)
 	}
 
-	response, err := client.ListAllMarkets(context.Background(), "active", "", "", 0)
+	response, err := client.ListAllMarkets(context.Background(), "active", "", "", "", 0)
 	if err != nil {
 		t.Fatalf("ListAllMarkets() error = %v", err)
 	}

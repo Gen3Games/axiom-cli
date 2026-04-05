@@ -553,6 +553,7 @@ func newMarketsCommand() *cobra.Command {
 			"Use `axiom markets list` to browse markets and narrow results with filters such as:",
 			"  --status open|resolved",
 			"  --category hourly|sports|streak|...",
+			"  --type clob|binary|...",
 			"  --search <text>",
 			"  --limit <n> (0 fetches all matching markets)",
 			"  --offset <n>",
@@ -568,6 +569,7 @@ func newMarketsCommand() *cobra.Command {
 		Example: strings.Join([]string{
 			"axiom markets list",
 			"axiom markets list --category hourly",
+			"axiom markets list --type clob",
 			"axiom markets list --status open --spot-prices",
 			"axiom markets list --status resolved --limit 50",
 			"axiom markets list --search XRP --offset 20",
@@ -580,22 +582,30 @@ func newMarketsCommand() *cobra.Command {
 			status, _ := cmd.Flags().GetString("status")
 			search, _ := cmd.Flags().GetString("search")
 			category, _ := cmd.Flags().GetString("category")
+			marketType, _ := cmd.Flags().GetString("type")
+			normalizedImpl := ""
+			if strings.TrimSpace(marketType) != "" {
+				normalizedImpl = normalizeMarketImplementation(strings.TrimSpace(marketType))
+			}
 			limit, _ := cmd.Flags().GetInt("limit")
 			offset, _ := cmd.Flags().GetInt("offset")
 			myPositions, _ := cmd.Flags().GetBool("my-positions")
 			spotPrices, _ := cmd.Flags().GetBool("spot-prices")
 			var response *api.MarketsResponse
-			needsLocalFiltering := strings.TrimSpace(category) != "" || myPositions
+			needsLocalFiltering := strings.TrimSpace(category) != "" || normalizedImpl != "" || myPositions
 			if needsLocalFiltering || limit <= 0 {
-				response, err = ctx.API.ListAllMarkets(cmd.Context(), status, search, "", 0)
+				response, err = ctx.API.ListAllMarkets(cmd.Context(), status, search, "", normalizedImpl, 0)
 			} else {
-				response, err = ctx.API.ListMarkets(cmd.Context(), status, search, "", limit, offset)
+				response, err = ctx.API.ListMarkets(cmd.Context(), status, search, "", normalizedImpl, limit, offset)
 			}
 			if err != nil {
 				return err
 			}
 			if strings.TrimSpace(category) != "" {
 				response = filterMarketsByCategory(response, category, 0, 0)
+			}
+			if normalizedImpl != "" {
+				response = filterMarketsByType(response, marketType)
 			}
 			if myPositions {
 				if ctx.Profile.EVMAddress == "" {
@@ -619,6 +629,7 @@ func newMarketsCommand() *cobra.Command {
 	}
 	listCmd.Flags().String("status", "open", "Filter by status: open or resolved")
 	listCmd.Flags().String("category", "", "Filter by market category (for example hourly, sports, streak)")
+	listCmd.Flags().String("type", "", "Filter by market implementation type (for example clob, parimutuel)")
 	listCmd.Flags().String("search", "", "Search by title or headline")
 	listCmd.Flags().Bool("my-positions", false, "Only return markets where the active wallet currently has open positions")
 	listCmd.Flags().Bool("spot-prices", false, "Fetch current spot odds from XRPL EVM for each returned market")
@@ -2864,6 +2875,33 @@ func renderBridgeFundingPreview(preview bridgeFundingPreview) string {
 	}
 
 	return strings.Join(sections, "\n")
+}
+
+func filterMarketsByType(response *api.MarketsResponse, marketType string) *api.MarketsResponse {
+	trimmed := normalizeMarketImplementation(strings.TrimSpace(marketType))
+	filtered := make([]api.MarketListItem, 0, len(response.Items))
+	for _, item := range response.Items {
+		if strings.EqualFold(strings.TrimSpace(item.MarketImplementation), trimmed) {
+			filtered = append(filtered, item)
+		}
+	}
+	return &api.MarketsResponse{
+		Items:  filtered,
+		Total:  len(filtered),
+		Limit:  len(filtered),
+		Offset: 0,
+	}
+}
+
+func normalizeMarketImplementation(input string) string {
+	switch strings.ToLower(input) {
+	case "clob", "ctf", "axiomctfmarket":
+		return "AxiomCTFMarket"
+	case "parimutuel", "tieredparimutuel":
+		return "TieredParimutuel"
+	default:
+		return input
+	}
 }
 
 func filterMarketsByCategory(response *api.MarketsResponse, category string, limit int, offset int) *api.MarketsResponse {

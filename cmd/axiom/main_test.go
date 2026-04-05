@@ -579,10 +579,10 @@ func TestClobSmokeLiveSubmitsAndCancelsOrder(t *testing.T) {
 	originalIsERC1155ApprovedForAll := isERC1155ApprovedForAll
 	originalGetERC1155Balance := getERC1155Balance
 	getERC20Balance = func(_ context.Context, _ string, _ common.Address, _ common.Address) (*big.Int, error) {
-		return big.NewInt(1_000_000), nil
+		return new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil), nil
 	}
 	getERC20Allowance = func(_ context.Context, _ string, _ common.Address, _ common.Address, _ common.Address) (*big.Int, error) {
-		return big.NewInt(1_000_000), nil
+		return new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil), nil
 	}
 	isERC1155ApprovedForAll = func(_ context.Context, _ string, _ common.Address, _ common.Address, _ common.Address) (bool, error) {
 		return true, nil
