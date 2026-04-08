@@ -2033,34 +2033,45 @@ func newClobCommand() *cobra.Command {
 			collateralToken := resolveClobCollateralToken(market)
 			conditionID := common.HexToHash(binding.ConditionID)
 			partition := []*big.Int{big.NewInt(1), big.NewInt(2)}
-			amountStr := strings.TrimSpace(mustStringFlag(cmd, "amount"))
-			if amountStr == "" {
-				return errors.New("--amount is required")
-			}
-			amount, err := evm.ParseBigInt(amountStr)
+			amount, err := parseClobAmount(mustStringFlag(cmd, "amount"))
 			if err != nil {
-				return fmt.Errorf("invalid --amount: %w", err)
-			}
-			if amount.Sign() <= 0 {
-				return errors.New("--amount must be greater than zero")
+				return err
 			}
 
+			// Check collateral balance to ensure the wallet can afford the split.
+			collateralBalance, err := getERC20Balance(cmd.Context(), ctx.Config.EVMRPCURL, collateralToken, wallet.Address())
+			if err != nil {
+				return fmt.Errorf("check collateral balance: %w", err)
+			}
+			if collateralBalance.Cmp(amount) < 0 {
+				return fmt.Errorf("insufficient collateral: balance %s wei (%s XRP) is below split amount %s wei (%s XRP)",
+					collateralBalance.String(), formatWeiToXRP(collateralBalance),
+					amount.String(), formatWeiToXRP(amount))
+			}
+
+			yesTokenID, _, _ := resolveDisplayedTokenID(binding, "yes", collateralToken)
+			noTokenID, _, _ := resolveDisplayedTokenID(binding, "no", collateralToken)
+
 			if mustBoolFlag(cmd, "dry-run") {
-				yesTokenID, _, _ := resolveDisplayedTokenID(binding, "yes", collateralToken)
-				noTokenID, _, _ := resolveDisplayedTokenID(binding, "no", collateralToken)
+				// Check current allowance for the dry-run preview.
+				currentAllowance, _ := getERC20Allowance(cmd.Context(), ctx.Config.EVMRPCURL, collateralToken, wallet.Address(), conditionalTokens)
+				needsApproval := currentAllowance == nil || currentAllowance.Cmp(amount) < 0
 				preview := map[string]any{
-					"dryRun":            true,
-					"action":            "split",
-					"market":            market.Title,
-					"marketId":          market.ID,
-					"outcomeLabel":      binding.Label,
-					"conditionalTokens": conditionalTokens.Hex(),
-					"collateralToken":   collateralToken.Hex(),
-					"conditionId":       conditionID.Hex(),
-					"partition":         []string{"1", "2"},
-					"amountWei":         amount.String(),
-					"amountXrp":         formatWeiToXRP(amount),
-					"wallet":            wallet.Address().Hex(),
+					"dryRun":               true,
+					"action":               "split",
+					"market":               market.Title,
+					"marketId":             market.ID,
+					"outcomeLabel":         binding.Label,
+					"conditionalTokens":    conditionalTokens.Hex(),
+					"collateralToken":      collateralToken.Hex(),
+					"conditionId":          conditionID.Hex(),
+					"partition":            []string{"1", "2"},
+					"amountWei":            amount.String(),
+					"amountXrp":            formatWeiToXRP(amount),
+					"wallet":               wallet.Address().Hex(),
+					"collateralBalanceWei": collateralBalance.String(),
+					"collateralBalanceXrp": formatWeiToXRP(collateralBalance),
+					"needsApproval":        needsApproval,
 				}
 				if yesTokenID != nil {
 					preview["yesTokenId"] = yesTokenID.String()
@@ -2071,6 +2082,39 @@ func newClobCommand() *cobra.Command {
 				return printOutput(ctx.JSON, preview)
 			}
 
+			// Step A: ensure collateral approval for ConditionalTokens contract.
+			approvalTxs := make([]map[string]any, 0, 1)
+			if !mustBoolFlag(cmd, "skip-approval") {
+				currentAllowance, err := getERC20Allowance(cmd.Context(), ctx.Config.EVMRPCURL, collateralToken, wallet.Address(), conditionalTokens)
+				if err != nil {
+					return fmt.Errorf("check collateral allowance: %w", err)
+				}
+				if currentAllowance.Cmp(amount) < 0 {
+					approveMax, _ := evm.ParseBigInt(clobMaxUint256)
+					approveTxHash, err := approveERC20(cmd.Context(), ctx.Config.EVMRPCURL, big.NewInt(xrplEVMChainID), privateKeyHex, collateralToken, conditionalTokens, approveMax)
+					if err != nil {
+						return fmt.Errorf("collateral approval failed: %w", err)
+					}
+					entry := map[string]any{
+						"kind":    "collateral-approve-for-split",
+						"token":   collateralToken.Hex(),
+						"spender": conditionalTokens.Hex(),
+						"txHash":  approveTxHash.Hex(),
+					}
+					// Always wait for the approval receipt so the split tx succeeds.
+					receipt, waitErr := waitForReceipt(cmd.Context(), ctx.Config.EVMRPCURL, approveTxHash)
+					if waitErr != nil {
+						return fmt.Errorf("wait for approval receipt: %w", waitErr)
+					}
+					entry["receiptStatus"] = receipt.Status
+					if receipt.Status == 0 {
+						return fmt.Errorf("collateral approval reverted (tx %s)", approveTxHash.Hex())
+					}
+					approvalTxs = append(approvalTxs, entry)
+				}
+			}
+
+			// Step B: execute splitPosition.
 			txHash, err := splitPosition(cmd.Context(), ctx.Config.EVMRPCURL, big.NewInt(xrplEVMChainID), privateKeyHex, conditionalTokens, collateralToken, conditionID, partition, amount)
 			if err != nil {
 				return fmt.Errorf("split transaction failed: %w", err)
@@ -2084,6 +2128,15 @@ func newClobCommand() *cobra.Command {
 				"amountXrp":    formatWeiToXRP(amount),
 				"txHash":       txHash.Hex(),
 				"wallet":       wallet.Address().Hex(),
+			}
+			if yesTokenID != nil {
+				result["yesTokenId"] = yesTokenID.String()
+			}
+			if noTokenID != nil {
+				result["noTokenId"] = noTokenID.String()
+			}
+			if len(approvalTxs) > 0 {
+				result["approvals"] = approvalTxs
 			}
 			if mustBoolFlag(cmd, "wait") {
 				receipt, waitErr := waitForReceipt(cmd.Context(), ctx.Config.EVMRPCURL, txHash)
@@ -2099,9 +2152,10 @@ func newClobCommand() *cobra.Command {
 		},
 	}
 	splitCmd.Flags().String("label", "", "Outcome label to identify the binding for split")
-	splitCmd.Flags().String("amount", "", "Amount of collateral to split in wei")
+	splitCmd.Flags().String("amount", "", "Amount of collateral to split (decimal XRP like 0.01 or integer wei)")
 	splitCmd.Flags().Bool("wait", false, "Wait for the split transaction receipt")
 	splitCmd.Flags().Bool("dry-run", false, "Preview the split without broadcasting a transaction")
+	splitCmd.Flags().Bool("skip-approval", false, "Skip the automatic collateral approval to the ConditionalTokens contract")
 	splitCmd.Flags().String("instance-date", "", "Instance date for recurring markets in YYYY-MM-DD format")
 	cmd.AddCommand(splitCmd)
 
@@ -2133,21 +2187,63 @@ func newClobCommand() *cobra.Command {
 			collateralToken := resolveClobCollateralToken(market)
 			conditionID := common.HexToHash(binding.ConditionID)
 			partition := []*big.Int{big.NewInt(1), big.NewInt(2)}
+
+			// Resolve YES and NO token IDs and read on-chain balances.
+			yesTokenID, _, _ := resolveDisplayedTokenID(binding, "yes", collateralToken)
+			noTokenID, _, _ := resolveDisplayedTokenID(binding, "no", collateralToken)
+
+			yesBalance := big.NewInt(0)
+			noBalance := big.NewInt(0)
+			if yesTokenID != nil {
+				yesBalance, err = getERC1155Balance(cmd.Context(), ctx.Config.EVMRPCURL, conditionalTokens, wallet.Address(), yesTokenID)
+				if err != nil {
+					return fmt.Errorf("read YES balance: %w", err)
+				}
+			}
+			if noTokenID != nil {
+				noBalance, err = getERC1155Balance(cmd.Context(), ctx.Config.EVMRPCURL, conditionalTokens, wallet.Address(), noTokenID)
+				if err != nil {
+					return fmt.Errorf("read NO balance: %w", err)
+				}
+			}
+
+			// Compute max mergeable = min(yesBalance, noBalance).
+			maxMergeable := new(big.Int).Set(yesBalance)
+			if noBalance.Cmp(maxMergeable) < 0 {
+				maxMergeable.Set(noBalance)
+			}
+
+			// Determine merge amount: --max uses max mergeable; --amount specifies explicit value.
+			var amount *big.Int
+			useMax := mustBoolFlag(cmd, "max")
 			amountStr := strings.TrimSpace(mustStringFlag(cmd, "amount"))
-			if amountStr == "" {
-				return errors.New("--amount is required")
+			if useMax && amountStr != "" {
+				return errors.New("cannot use both --max and --amount; choose one")
 			}
-			amount, err := evm.ParseBigInt(amountStr)
-			if err != nil {
-				return fmt.Errorf("invalid --amount: %w", err)
+			if useMax {
+				if maxMergeable.Sign() <= 0 {
+					return errors.New("nothing to merge: both YES and NO balances are needed")
+				}
+				amount = new(big.Int).Set(maxMergeable)
+			} else {
+				if amountStr == "" {
+					return errors.New("--amount or --max is required")
+				}
+				amount, err = parseClobAmount(amountStr)
+				if err != nil {
+					return err
+				}
 			}
-			if amount.Sign() <= 0 {
-				return errors.New("--amount must be greater than zero")
+
+			// Validate the amount does not exceed what's mergeable.
+			if amount.Cmp(maxMergeable) > 0 {
+				return fmt.Errorf("merge amount %s wei (%s XRP) exceeds max mergeable %s wei (%s XRP); YES=%s, NO=%s",
+					amount.String(), formatWeiToXRP(amount),
+					maxMergeable.String(), formatWeiToXRP(maxMergeable),
+					yesBalance.String(), noBalance.String())
 			}
 
 			if mustBoolFlag(cmd, "dry-run") {
-				yesTokenID, _, _ := resolveDisplayedTokenID(binding, "yes", collateralToken)
-				noTokenID, _, _ := resolveDisplayedTokenID(binding, "no", collateralToken)
 				preview := map[string]any{
 					"dryRun":            true,
 					"action":            "merge",
@@ -2161,6 +2257,12 @@ func newClobCommand() *cobra.Command {
 					"amountWei":         amount.String(),
 					"amountXrp":         formatWeiToXRP(amount),
 					"wallet":            wallet.Address().Hex(),
+					"yesBalanceWei":     yesBalance.String(),
+					"yesBalanceXrp":     formatWeiToXRP(yesBalance),
+					"noBalanceWei":      noBalance.String(),
+					"noBalanceXrp":      formatWeiToXRP(noBalance),
+					"maxMergeableWei":   maxMergeable.String(),
+					"maxMergeableXrp":   formatWeiToXRP(maxMergeable),
 				}
 				if yesTokenID != nil {
 					preview["yesTokenId"] = yesTokenID.String()
@@ -2176,14 +2278,26 @@ func newClobCommand() *cobra.Command {
 				return fmt.Errorf("merge transaction failed: %w", err)
 			}
 			result := map[string]any{
-				"action":       "merge",
-				"market":       market.Title,
-				"marketId":     market.ID,
-				"outcomeLabel": binding.Label,
-				"amountWei":    amount.String(),
-				"amountXrp":    formatWeiToXRP(amount),
-				"txHash":       txHash.Hex(),
-				"wallet":       wallet.Address().Hex(),
+				"action":          "merge",
+				"market":          market.Title,
+				"marketId":        market.ID,
+				"outcomeLabel":    binding.Label,
+				"amountWei":       amount.String(),
+				"amountXrp":       formatWeiToXRP(amount),
+				"txHash":          txHash.Hex(),
+				"wallet":          wallet.Address().Hex(),
+				"yesBalanceWei":   yesBalance.String(),
+				"yesBalanceXrp":   formatWeiToXRP(yesBalance),
+				"noBalanceWei":    noBalance.String(),
+				"noBalanceXrp":    formatWeiToXRP(noBalance),
+				"maxMergeableWei": maxMergeable.String(),
+				"maxMergeableXrp": formatWeiToXRP(maxMergeable),
+			}
+			if yesTokenID != nil {
+				result["yesTokenId"] = yesTokenID.String()
+			}
+			if noTokenID != nil {
+				result["noTokenId"] = noTokenID.String()
 			}
 			if mustBoolFlag(cmd, "wait") {
 				receipt, waitErr := waitForReceipt(cmd.Context(), ctx.Config.EVMRPCURL, txHash)
@@ -2199,7 +2313,8 @@ func newClobCommand() *cobra.Command {
 		},
 	}
 	mergeCmd.Flags().String("label", "", "Outcome label to identify the binding for merge")
-	mergeCmd.Flags().String("amount", "", "Amount of matched YES+NO shares to merge in wei")
+	mergeCmd.Flags().String("amount", "", "Amount of matched YES+NO shares to merge (decimal XRP like 0.01 or integer wei)")
+	mergeCmd.Flags().Bool("max", false, "Merge the maximum possible amount: min(YES balance, NO balance)")
 	mergeCmd.Flags().Bool("wait", false, "Wait for the merge transaction receipt")
 	mergeCmd.Flags().Bool("dry-run", false, "Preview the merge without broadcasting a transaction")
 	mergeCmd.Flags().String("instance-date", "", "Instance date for recurring markets in YYYY-MM-DD format")

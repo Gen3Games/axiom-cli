@@ -23,3 +23,9 @@ coverage.html
 
 # Platform-specific files
 Thumbs.db
+
+# IDE and editor files
+commands.txt
+
+# Manual test scripts
+test-*.txt

@@ -402,25 +402,27 @@ func buildClobSignedOrder(wallet *evm.Wallet, marketID string, selection *clobSe
 }
 
 func buildClobOrderAmounts(side string, priceBps int, quantity int) (*big.Int, *big.Int) {
-	priceValue := int64(priceBps)
-	if priceValue <= 0 {
-		priceValue = 10000
+	q := big.NewInt(int64(quantity))
+	p := big.NewInt(int64(priceBps))
+	scale := big.NewInt(10000) // BpsScale — must match the server's AmountsFromPriceQty
+
+	// Market orders (price=0): use BpsScale so amounts are non-zero.
+	if priceBps <= 0 {
+		p = new(big.Int).Set(scale)
 	}
-	// 1 share = 1e18 wei; prices are in basis points (1 bps = 0.01%).
-	// makerAmount and takerAmount must be expressed in wei so the on-chain
-	// exchange contract accepts them.
-	//
-	// For a buy:  maker pays collateral  = quantity * price/10000 shares  (in wei)
-	//             taker delivers outcome  = quantity shares               (in wei)
-	// For a sell: maker delivers outcome  = quantity shares               (in wei)
-	//             taker pays collateral   = quantity * price/10000 shares (in wei)
-	shareWei := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil) // 1e18
-	quantityWei := new(big.Int).Mul(big.NewInt(int64(quantity)), shareWei)
-	costWei := new(big.Int).Mul(big.NewInt(int64(quantity)*priceValue), new(big.Int).Div(shareWei, big.NewInt(10000)))
+
+	// Amounts are kept scaled by BpsScale to avoid integer-division precision
+	// loss. DerivePrice and DeriveQuantity on the server reverse this losslessly:
+	//   BUY:  makerAmount = qty * price,    takerAmount = qty * BpsScale
+	//   SELL: makerAmount = qty * BpsScale, takerAmount = qty * price
 	if side == "buy" {
-		return costWei, quantityWei
+		makerAmount := new(big.Int).Mul(q, p)
+		takerAmount := new(big.Int).Mul(q, scale)
+		return makerAmount, takerAmount
 	}
-	return quantityWei, costWei
+	makerAmount := new(big.Int).Mul(q, scale)
+	takerAmount := new(big.Int).Mul(q, p)
+	return makerAmount, takerAmount
 }
 
 func resolveClobExpiration(preset string) int64 {
@@ -636,4 +638,38 @@ func resolveSplitMergeBinding(market *api.MarketDetails, labelFlag string) (api.
 		labels = append(labels, b.Label)
 	}
 	return api.CtfOutcomeMarketBinding{}, fmt.Errorf("no binding found for label %q; available: %s", label, strings.Join(labels, ", "))
+}
+
+// parseClobAmount parses --amount as either a decimal XRP value (e.g. "0.01")
+// or a raw wei integer. If the string contains a dot it is treated as XRP and
+// converted to 18-decimal wei; otherwise it is parsed as an integer in wei.
+func parseClobAmount(raw string) (*big.Int, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil, errors.New("--amount is required")
+	}
+	if strings.Contains(trimmed, ".") {
+		value, ok := new(big.Rat).SetString(trimmed)
+		if !ok {
+			return nil, fmt.Errorf("invalid amount: %s", trimmed)
+		}
+		if value.Sign() <= 0 {
+			return nil, fmt.Errorf("amount must be greater than zero")
+		}
+		value.Mul(value, big.NewRat(1_000_000_000_000_000_000, 1))
+		if !value.IsInt() {
+			return nil, fmt.Errorf("amount has too many decimal places: %s", trimmed)
+		}
+		result := new(big.Int)
+		result.Div(value.Num(), value.Denom())
+		return result, nil
+	}
+	amount, err := evm.ParseBigInt(trimmed)
+	if err != nil {
+		return nil, fmt.Errorf("invalid --amount: %w", err)
+	}
+	if amount.Sign() <= 0 {
+		return nil, errors.New("--amount must be greater than zero")
+	}
+	return amount, nil
 }
