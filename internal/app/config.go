@@ -9,20 +9,22 @@ import (
 )
 
 const (
-	defaultAPIBaseURL  = "https://axiomprotocol.io/api/cli"
-	defaultEVMRPCURL   = "https://rpc.xrplevm.org"
-	defaultXRPLRPCURL  = "https://s1.ripple.com:51234"
-	keyringServiceName = "axiom-cli"
+	defaultAPIBaseURL        = "https://axiomprotocol.io/api/cli"
+	defaultConsoleAPIBaseURL = "https://console.axiomprotocol.io/api/cli"
+	defaultEVMRPCURL         = "https://rpc.xrplevm.org"
+	defaultXRPLRPCURL        = "https://s1.ripple.com:51234"
+	keyringServiceName       = "axiom-cli"
 )
 
 type Config struct {
-	APIBaseURL    string             `json:"apiBaseUrl"`
-	EVMRPCURL     string             `json:"evmRpcUrl"`
-	XRPLRPCURL    string             `json:"xrplRpcUrl"`
-	DeviceID      string             `json:"deviceId"`
-	ActiveProfile string             `json:"activeProfile"`
-	OutputFormat  string             `json:"outputFormat"`
-	Profiles      map[string]Profile `json:"profiles"`
+	APIBaseURL        string             `json:"apiBaseUrl"`
+	ConsoleAPIBaseURL string             `json:"consoleApiBaseUrl"`
+	EVMRPCURL         string             `json:"evmRpcUrl"`
+	XRPLRPCURL        string             `json:"xrplRpcUrl"`
+	DeviceID          string             `json:"deviceId"`
+	ActiveProfile     string             `json:"activeProfile"`
+	OutputFormat      string             `json:"outputFormat"`
+	Profiles          map[string]Profile `json:"profiles"`
 }
 
 type Profile struct {
@@ -34,11 +36,12 @@ type Profile struct {
 
 func DefaultConfig() *Config {
 	return &Config{
-		APIBaseURL:    valueOrDefault(os.Getenv("AXIOM_CLI_API_URL"), defaultAPIBaseURL),
-		EVMRPCURL:     valueOrDefault(os.Getenv("AXIOM_CLI_RPC_URL"), defaultEVMRPCURL),
-		XRPLRPCURL:    valueOrDefault(os.Getenv("AXIOM_CLI_XRPL_RPC_URL"), defaultXRPLRPCURL),
-		ActiveProfile: "default",
-		OutputFormat:  "text",
+		APIBaseURL:        valueOrDefault(os.Getenv("AXIOM_CLI_API_URL"), defaultAPIBaseURL),
+		ConsoleAPIBaseURL: valueOrDefault(os.Getenv("AXIOM_CLI_CONSOLE_API_URL"), defaultConsoleAPIBaseURL),
+		EVMRPCURL:         valueOrDefault(os.Getenv("AXIOM_CLI_RPC_URL"), defaultEVMRPCURL),
+		XRPLRPCURL:        valueOrDefault(os.Getenv("AXIOM_CLI_XRPL_RPC_URL"), defaultXRPLRPCURL),
+		ActiveProfile:     "default",
+		OutputFormat:      "text",
 		Profiles: map[string]Profile{
 			"default": {Name: "default"},
 		},

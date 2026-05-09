@@ -65,6 +65,7 @@ func renderConfig(cfg app.Config) string {
 		heading("CLI Configuration"),
 		renderKeyValueRows([][2]string{
 			{"API Base URL", cfg.APIBaseURL},
+			{"Console API Base URL", cfg.ConsoleAPIBaseURL},
 			{"XRPL EVM RPC", cfg.EVMRPCURL},
 			{"XRPL RPC", cfg.XRPLRPCURL},
 			{"Active Profile", cfg.ActiveProfile},

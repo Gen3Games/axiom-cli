@@ -48,6 +48,61 @@ type ConfigResponse struct {
 	DepositWalletAddress string `json:"depositWalletAddress"`
 }
 
+type MarketContractAddresses struct {
+	MarketFactory     string `json:"marketFactory"`
+	ProtocolConfig    string `json:"protocolConfig"`
+	VaultRegistry     string `json:"vaultRegistry"`
+	CTFExchange       string `json:"ctfExchange"`
+	CTFLauncher       string `json:"ctfLauncher"`
+	ConditionalTokens string `json:"conditionalTokens"`
+}
+
+type marketContractAddressesResponse struct {
+	Success   bool                    `json:"success"`
+	Network   string                  `json:"network"`
+	Addresses MarketContractAddresses `json:"addresses"`
+	Error     string                  `json:"error"`
+}
+
+type OutcomeMetadata struct {
+	Index       int    `json:"index"`
+	Label       string `json:"label"`
+	Description string `json:"description,omitempty"`
+}
+
+type MarketMetadata struct {
+	Name               string            `json:"name"`
+	Headline           string            `json:"headline,omitempty"`
+	Description        string            `json:"description"`
+	Category           string            `json:"category"`
+	Tags               []string          `json:"tags"`
+	Outcomes           []OutcomeMetadata `json:"outcomes"`
+	ResolutionCriteria string            `json:"resolutionCriteria"`
+	EvidenceSources    []string          `json:"evidenceSources,omitempty"`
+	Image              string            `json:"image,omitempty"`
+	CreatedAt          string            `json:"createdAt"`
+	EndsAt             string            `json:"endsAt"`
+	OutcomeCount       int               `json:"outcomeCount"`
+}
+
+type UploadMetadataRequest struct {
+	Network       string         `json:"network"`
+	WalletAddress string         `json:"walletAddress"`
+	Metadata      MarketMetadata `json:"metadata"`
+	Message       string         `json:"message"`
+	Signature     string         `json:"signature"`
+}
+
+type UploadMetadataResponse struct {
+	Success       bool   `json:"success"`
+	Network       string `json:"network"`
+	SignerAddress string `json:"signerAddress"`
+	CID           string `json:"cid"`
+	IPFSURI       string `json:"ipfsUri"`
+	GatewayURL    string `json:"gatewayUrl"`
+	Error         string `json:"error"`
+}
+
 type RegisterRequest struct {
 	WalletAddress string `json:"walletAddress"`
 	Signature     string `json:"signature"`
@@ -704,6 +759,44 @@ func (c *Client) GetConfig(ctx context.Context) (*ConfigResponse, error) {
 	return &out, nil
 }
 
+func (c *Client) GetMarketContractAddresses(ctx context.Context, network string) (*MarketContractAddresses, error) {
+	values := url.Values{}
+	if trimmed := strings.TrimSpace(network); trimmed != "" {
+		values.Set("network", trimmed)
+	}
+
+	requestPath := "api/markets/contract-addresses"
+	if encoded := values.Encode(); encoded != "" {
+		requestPath += "?" + encoded
+	}
+
+	var out marketContractAddressesResponse
+	if err := c.doJSONFromAppRoot(ctx, http.MethodGet, requestPath, nil, &out); err != nil {
+		return nil, err
+	}
+	if !out.Success {
+		if strings.TrimSpace(out.Error) != "" {
+			return nil, fmt.Errorf("api error: %s", out.Error)
+		}
+		return nil, fmt.Errorf("api error: failed to load market contract addresses")
+	}
+	return &out.Addresses, nil
+}
+
+func (c *Client) UploadMarketMetadata(ctx context.Context, request UploadMetadataRequest) (*UploadMetadataResponse, error) {
+	var out UploadMetadataResponse
+	if err := c.doJSONFromAppRoot(ctx, http.MethodPost, "api/markets/upload-metadata", request, &out); err != nil {
+		return nil, err
+	}
+	if !out.Success {
+		if strings.TrimSpace(out.Error) != "" {
+			return nil, fmt.Errorf("api error: %s", out.Error)
+		}
+		return nil, fmt.Errorf("api error: failed to upload market metadata")
+	}
+	return &out, nil
+}
+
 func (c *Client) RegisterWallet(ctx context.Context, request RegisterRequest) (*RegisterResponse, error) {
 	var out RegisterResponse
 	if err := c.doJSON(ctx, http.MethodPost, "register", request, &out); err != nil {
@@ -952,6 +1045,14 @@ func (c *Client) doJSON(ctx context.Context, method string, requestPath string, 
 	return c.doJSONEndpoint(ctx, method, endpoint, body, out, c.baseURL.Host)
 }
 
+func (c *Client) doJSONFromAppRoot(ctx context.Context, method string, requestPath string, body any, out any) error {
+	endpoint, err := c.buildURLFromAppRoot(requestPath)
+	if err != nil {
+		return fmt.Errorf("build request url: %w", err)
+	}
+	return c.doJSONEndpoint(ctx, method, endpoint, body, out, c.baseURL.Host)
+}
+
 func (c *Client) doJSONAgainstBase(ctx context.Context, method string, baseURL string, requestPath string, body any, out any) error {
 	endpoint, host, err := buildURLAgainstBase(baseURL, requestPath)
 	if err != nil {
@@ -987,7 +1088,7 @@ func (c *Client) doJSONEndpoint(ctx context.Context, method string, endpoint *ur
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		if strings.Contains(host, "localhost") || strings.Contains(host, "127.0.0.1") {
-			return fmt.Errorf("request api: %w (local CLI API unreachable; start the webapp or run `axiom config set --api-url https://axiomprotocol.io/api/cli`)", err)
+			return fmt.Errorf("request api: %w (local API unreachable; set `axiom config set --api-url https://axiomprotocol.io/api/cli` for app APIs or `axiom config set --console-api-url https://console.axiomprotocol.io/api/cli` for console APIs)", err)
 		}
 		return fmt.Errorf("request api: %w", err)
 	}
@@ -1050,7 +1151,7 @@ func formatProtectedDeploymentError(statusCode int, host string, data []byte) (s
 	if !strings.Contains(lowerBody, "vercel authentication") && !strings.Contains(lowerBody, "authentication required") {
 		return "", false
 	}
-	return fmt.Sprintf("received a Vercel Authentication page from %s; your CLI API base URL is pointed at a protected deployment. Run `axiom config set --api-url https://axiomprotocol.io/api/cli` or pass `--api-url https://axiomprotocol.io/api/cli`.", host), true
+	return fmt.Sprintf("received a Vercel Authentication page from %s; your API base URL is pointed at a protected deployment. Use `axiom config set --api-url https://axiomprotocol.io/api/cli` for app APIs or `axiom config set --console-api-url https://console.axiomprotocol.io/api/cli` for console APIs.", host), true
 }
 
 func (c *Client) buildURL(requestPath string) (*url.URL, error) {
@@ -1069,4 +1170,45 @@ func (c *Client) buildURL(requestPath string) (*url.URL, error) {
 	endpoint.RawQuery = relative.RawQuery
 	endpoint.Fragment = relative.Fragment
 	return &endpoint, nil
+}
+
+func (c *Client) buildURLFromAppRoot(requestPath string) (*url.URL, error) {
+	relative, err := url.Parse(requestPath)
+	if err != nil {
+		return nil, err
+	}
+
+	endpoint := *c.baseURL
+	basePath := appRootBasePath(endpoint.Path)
+	relPath := strings.TrimPrefix(relative.Path, "/")
+	if relPath != "" {
+		endpoint.Path = path.Join(basePath, relPath)
+	} else {
+		endpoint.Path = basePath
+	}
+	if !strings.HasPrefix(endpoint.Path, "/") {
+		endpoint.Path = "/" + endpoint.Path
+	}
+	endpoint.RawQuery = relative.RawQuery
+	endpoint.Fragment = relative.Fragment
+	return &endpoint, nil
+}
+
+func appRootBasePath(basePath string) string {
+	trimmed := strings.TrimSuffix(strings.TrimSpace(basePath), "/")
+	switch {
+	case strings.HasSuffix(trimmed, "/api/cli"):
+		trimmed = strings.TrimSuffix(trimmed, "/api/cli")
+	case strings.HasSuffix(trimmed, "/api"):
+		trimmed = strings.TrimSuffix(trimmed, "/api")
+	default:
+		trimmed = ""
+	}
+	if trimmed == "" {
+		return "/"
+	}
+	if !strings.HasPrefix(trimmed, "/") {
+		return "/" + trimmed
+	}
+	return trimmed
 }

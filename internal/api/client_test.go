@@ -165,7 +165,7 @@ func TestGetConfigLocalhostErrorIncludesHint(t *testing.T) {
 	if err == nil {
 		t.Fatal("GetConfig() error = nil, want connection failure")
 	}
-	if !strings.Contains(err.Error(), "local CLI API unreachable") {
+	if !strings.Contains(err.Error(), "local API unreachable") {
 		t.Fatalf("GetConfig() error = %q, want localhost hint", err)
 	}
 }
@@ -213,6 +213,106 @@ func TestBuildURLPreservesBasePathAndQuery(t *testing.T) {
 	want, _ := url.Parse("https://example.com/api/cli/markets?limit=10&offset=20")
 	if endpoint.String() != want.String() {
 		t.Fatalf("buildURL() = %q, want %q", endpoint.String(), want.String())
+	}
+}
+
+func TestGetMarketContractAddressesUsesAppRootEndpoint(t *testing.T) {
+	t.Parallel()
+
+	var gotPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.RequestURI()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"success": true,
+			"network": "xrpl-mainnet",
+			"addresses": map[string]any{
+				"marketFactory":     "0x00000000000000000000000000000000000000F1",
+				"protocolConfig":    "0x00000000000000000000000000000000000000F2",
+				"vaultRegistry":     "0x00000000000000000000000000000000000000F3",
+				"ctfExchange":       "0x00000000000000000000000000000000000000F4",
+				"ctfLauncher":       "0x00000000000000000000000000000000000000F5",
+				"conditionalTokens": "0x00000000000000000000000000000000000000F6",
+			},
+		})
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL+"/api/cli", "device-123")
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	response, err := client.GetMarketContractAddresses(context.Background(), "xrpl-mainnet")
+	if err != nil {
+		t.Fatalf("GetMarketContractAddresses() error = %v", err)
+	}
+	if gotPath != "/api/markets/contract-addresses?network=xrpl-mainnet" {
+		t.Fatalf("request path = %q, want %q", gotPath, "/api/markets/contract-addresses?network=xrpl-mainnet")
+	}
+	if response.MarketFactory != "0x00000000000000000000000000000000000000F1" {
+		t.Fatalf("MarketFactory = %q, want canonical factory address", response.MarketFactory)
+	}
+	if response.ConditionalTokens != "0x00000000000000000000000000000000000000F6" {
+		t.Fatalf("ConditionalTokens = %q, want canonical conditional tokens address", response.ConditionalTokens)
+	}
+}
+
+func TestUploadMarketMetadataUsesAppRootEndpoint(t *testing.T) {
+	t.Parallel()
+
+	var gotPath string
+	var gotRequest UploadMetadataRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.RequestURI()
+		if err := json.NewDecoder(r.Body).Decode(&gotRequest); err != nil {
+			t.Fatalf("Decode(upload body) error = %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(UploadMetadataResponse{
+			Success:       true,
+			Network:       "xrpl-mainnet",
+			SignerAddress: gotRequest.WalletAddress,
+			CID:           "bafytest",
+			IPFSURI:       "ipfs://bafytest",
+			GatewayURL:    "https://axiom.mypinata.cloud/ipfs/bafytest",
+		})
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL+"/api/cli", "device-123")
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	response, err := client.UploadMarketMetadata(context.Background(), UploadMetadataRequest{
+		Network:       "xrpl-mainnet",
+		WalletAddress: "0x00000000000000000000000000000000000000A1",
+		Metadata: MarketMetadata{
+			Name:               "Upload Test",
+			Description:        "Test payload",
+			Category:           "crypto",
+			Tags:               []string{},
+			Outcomes:           []OutcomeMetadata{{Index: 0, Label: "Yes"}, {Index: 1, Label: "No"}},
+			ResolutionCriteria: "Test only",
+			CreatedAt:          "2026-01-01T00:00:00Z",
+			EndsAt:             "2026-01-02T00:00:00Z",
+			OutcomeCount:       2,
+		},
+		Message:   "signed message",
+		Signature: "0xabc",
+	})
+	if err != nil {
+		t.Fatalf("UploadMarketMetadata() error = %v", err)
+	}
+	if gotPath != "/api/markets/upload-metadata" {
+		t.Fatalf("request path = %q, want %q", gotPath, "/api/markets/upload-metadata")
+	}
+	if gotRequest.Metadata.Name != "Upload Test" {
+		t.Fatalf("request metadata = %+v, want uploaded payload", gotRequest.Metadata)
+	}
+	if response.IPFSURI != "ipfs://bafytest" {
+		t.Fatalf("IPFSURI = %q, want %q", response.IPFSURI, "ipfs://bafytest")
 	}
 }
 

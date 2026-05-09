@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,6 +33,7 @@ const defaultClobEventstoreURL = "https://clob.axiomprotocol.io/api"
 
 var (
 	flagAPIURL               string
+	flagConsoleAPIURL        string
 	flagRPCURL               string
 	flagXRPLURL              string
 	flagJSON                 bool
@@ -55,11 +58,14 @@ var (
 	redeemCTFMarket          = evm.RedeemCTFMarket
 	splitPosition            = evm.SplitPosition
 	mergePositions           = evm.MergePositions
+	createAxiomCTFMarket     = evm.CreateAxiomCTFMarket
+	resolveCTFMarket         = evm.ResolveCTFMarket
 )
 
 type cliContext struct {
 	Config      *app.Config
 	API         *api.Client
+	ConsoleAPI  *api.Client
 	Profile     app.Profile
 	ProfileName string
 	JSON        bool
@@ -101,7 +107,8 @@ func newRootCommand() *cobra.Command {
 		return err
 	})
 
-	rootCmd.PersistentFlags().StringVar(&flagAPIURL, "api-url", "", "Override the Axiom CLI API base URL (for example https://axiomprotocol.io/api/cli)")
+	rootCmd.PersistentFlags().StringVar(&flagAPIURL, "api-url", "", "Override the Axiom CLI app API base URL (for example https://axiomprotocol.io/api/cli)")
+	rootCmd.PersistentFlags().StringVar(&flagConsoleAPIURL, "console-api-url", "", "Override the Axiom console API base URL used for canonical addresses and metadata uploads (for example https://console.axiomprotocol.io/api/cli)")
 	rootCmd.PersistentFlags().StringVar(&flagRPCURL, "rpc-url", "", "Override the XRPL EVM RPC URL")
 	rootCmd.PersistentFlags().StringVar(&flagXRPLURL, "xrpl-rpc-url", "", "Override the XRPL JSON-RPC URL")
 	rootCmd.PersistentFlags().BoolVar(&flagJSON, "json", false, "Emit JSON output")
@@ -145,10 +152,14 @@ func newConfigCommand() *cobra.Command {
 				return err
 			}
 			apiURL, _ := cmd.Flags().GetString("api-url")
+			consoleAPIURL, _ := cmd.Flags().GetString("console-api-url")
 			rpcURL, _ := cmd.Flags().GetString("rpc-url")
 			xrplURL, _ := cmd.Flags().GetString("xrpl-rpc-url")
 			if apiURL != "" {
 				cfg.APIBaseURL = apiURL
+			}
+			if consoleAPIURL != "" {
+				cfg.ConsoleAPIBaseURL = consoleAPIURL
 			}
 			if rpcURL != "" {
 				cfg.EVMRPCURL = rpcURL
@@ -170,6 +181,7 @@ func newConfigCommand() *cobra.Command {
 		},
 	}
 	setCmd.Flags().String("api-url", "", "Set the CLI API base URL")
+	setCmd.Flags().String("console-api-url", "", "Set the console API base URL used for canonical addresses and metadata uploads")
 	setCmd.Flags().String("rpc-url", "", "Set the XRPL EVM RPC URL")
 	setCmd.Flags().String("xrpl-rpc-url", "", "Set the XRPL RPC URL")
 	cmd.AddCommand(setCmd)
@@ -1476,8 +1488,171 @@ func newClobCommand() *cobra.Command {
 	}
 	cmd.PersistentFlags().String("projection-url", firstNonEmpty(os.Getenv("AXIOM_CLOB_PROJECTION_URL"), os.Getenv("CLOB_PROJECTION_URL"), defaultClobProjectionURL), "Override the hosted CLOB projection base URL")
 	cmd.PersistentFlags().String("eventstore-url", firstNonEmpty(os.Getenv("AXIOM_CLOB_EVENTSTORE_URL"), os.Getenv("CLOB_EVENTSTORE_URL"), defaultClobEventstoreURL), "Override the hosted CLOB eventstore base URL")
+	cmd.PersistentFlags().String("factory-address", "", "Override the MarketFactory address used for binary CTF market deployment; otherwise load the canonical xrpl-mainnet address from the console API")
 	cmd.PersistentFlags().String("exchange-address", evm.DefaultClobExchangeAddress, "Override the on-chain AxiomCTFExchange address used for signing and approvals")
 	cmd.PersistentFlags().String("outcome-token-address", evm.DefaultClobConditionalTokens, "Override the on-chain AxiomConditionalTokens address used for balances and approvals")
+
+	marketCmd := &cobra.Command{Use: "market", Short: "Deploy and manage on-chain binary AxiomCTFMarket contracts"}
+	marketCreateCmd := &cobra.Command{
+		Use:   "create",
+		Short: "Deploy a binary AxiomCTFMarket via the canonical MarketFactory contract",
+		Long: strings.Join([]string{
+			"Deploy a single binary AxiomCTFMarket via MarketFactory.createMarket(...).",
+			"",
+			"This is the low-level on-chain primitive for one binary YES/NO market contract.",
+			"It does not create or persist a full logical CLOB market in the Axiom backend.",
+		}, "\n"),
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+			wallet, privateKeyHex, err := requireEVMWalletWithKey(ctx)
+			if err != nil {
+				return err
+			}
+
+			questionIDValue := strings.TrimSpace(mustStringFlag(cmd, "question-id"))
+			if len(questionIDValue) != 66 || !strings.HasPrefix(questionIDValue, "0x") {
+				return errors.New("--question-id must be a 32-byte 0x-prefixed value")
+			}
+			questionID := common.HexToHash(questionIDValue)
+			if questionID == (common.Hash{}) {
+				return errors.New("--question-id must not be zero")
+			}
+
+			tradingOpen, err := resolveUnixTimestampFlag(cmd, "trading-open")
+			if err != nil {
+				return err
+			}
+			tradingClose, err := resolveUnixTimestampFlag(cmd, "trading-close")
+			if err != nil {
+				return err
+			}
+			now := uint64(time.Now().Unix())
+			if tradingClose <= now {
+				return errors.New("--trading-close must be in the future")
+			}
+			if tradingClose <= tradingOpen {
+				return errors.New("--trading-close must be greater than --trading-open")
+			}
+
+			metadataURI, metadata, err := resolveClobMarketMetadata(cmd.Context(), ctx, wallet, cmd, time.Unix(int64(tradingClose), 0).UTC())
+			if err != nil {
+				return err
+			}
+
+			factoryAddress, err := resolveClobMarketFactoryAddress(cmd.Context(), ctx, mustStringFlag(cmd, "factory-address"), cmd.Flags().Changed("factory-address"))
+			if err != nil {
+				return err
+			}
+			collateralToken := resolveHexAddressOrDefault(mustStringFlag(cmd, "collateral-token"), evm.DefaultClobCollateralToken)
+			conditionalTokens := resolveHexAddressOrDefault(mustStringFlag(cmd, "outcome-token-address"), evm.DefaultClobConditionalTokens)
+
+			result, err := createAxiomCTFMarket(cmd.Context(), ctx.Config.EVMRPCURL, big.NewInt(xrplEVMChainID), privateKeyHex, evm.CreateAxiomCTFMarketParams{
+				FactoryAddress:    factoryAddress,
+				Creator:           wallet.Address(),
+				CollateralToken:   collateralToken,
+				ConditionalTokens: conditionalTokens,
+				MetadataURI:       metadataURI,
+				TradingOpen:       tradingOpen,
+				TradingClose:      tradingClose,
+				QuestionID:        questionID,
+			})
+			if err != nil {
+				return err
+			}
+
+			return printOutput(ctx.JSON, map[string]any{
+				"implementation":    "AxiomCTFMarket",
+				"factoryAddress":    factoryAddress.Hex(),
+				"configAddress":     result.ConfigAddress.Hex(),
+				"creator":           wallet.Address().Hex(),
+				"marketAddress":     result.MarketAddress.Hex(),
+				"collateralToken":   collateralToken.Hex(),
+				"conditionalTokens": conditionalTokens.Hex(),
+				"metadataUri":       metadataURI,
+				"metadata":          metadata,
+				"questionId":        questionID.Hex(),
+				"tradingOpen":       tradingOpen,
+				"tradingClose":      tradingClose,
+				"txHash":            result.TxHash.Hex(),
+			})
+		},
+	}
+	marketCreateCmd.Flags().String("metadata-uri", "", "Metadata URI stored on the deployed AxiomCTFMarket")
+	marketCreateCmd.Flags().String("name", "", "Market title used to build and upload metadata when --metadata-uri is omitted")
+	marketCreateCmd.Flags().String("headline", "", "Short market headline used in uploaded metadata")
+	marketCreateCmd.Flags().String("description", "", "Full market description used in uploaded metadata")
+	marketCreateCmd.Flags().String("category", "", "Market category used in uploaded metadata")
+	marketCreateCmd.Flags().StringSlice("tag", nil, "Metadata tag to include; repeatable")
+	marketCreateCmd.Flags().StringSlice("evidence-source", nil, "Evidence source URL to include; repeatable")
+	marketCreateCmd.Flags().String("image", "", "Optional image URI for uploaded metadata")
+	marketCreateCmd.Flags().String("resolution-criteria", "", "Resolution criteria used in uploaded metadata")
+	marketCreateCmd.Flags().String("yes-label", "Yes", "YES outcome label used in uploaded metadata")
+	marketCreateCmd.Flags().String("yes-description", "", "YES outcome description used in uploaded metadata")
+	marketCreateCmd.Flags().String("no-label", "No", "NO outcome label used in uploaded metadata")
+	marketCreateCmd.Flags().String("no-description", "", "NO outcome description used in uploaded metadata")
+	marketCreateCmd.Flags().String("question-id", "", "CTF question ID as a 32-byte 0x-prefixed value")
+	marketCreateCmd.Flags().Uint64("trading-open", 0, "Trading open timestamp in Unix seconds")
+	marketCreateCmd.Flags().Uint64("trading-close", 0, "Trading close timestamp in Unix seconds")
+	marketCreateCmd.Flags().String("collateral-token", evm.DefaultClobCollateralToken, "Collateral ERC-20 token address for the binary market")
+	marketCmd.AddCommand(marketCreateCmd)
+
+	marketResolveCmd := &cobra.Command{
+		Use:   "resolve",
+		Short: "Resolve a deployed binary AxiomCTFMarket with an explicit payout vector",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+			wallet, privateKeyHex, err := requireEVMWalletWithKey(ctx)
+			if err != nil {
+				return err
+			}
+
+			marketRaw := strings.TrimSpace(mustStringFlag(cmd, "market"))
+			if !common.IsHexAddress(marketRaw) || isZeroAddress(marketRaw) {
+				return errors.New("--market must be a valid non-zero 0x-prefixed address")
+			}
+			marketAddress := common.HexToAddress(marketRaw)
+
+			payouts, err := parsePayoutNumerators(mustStringFlag(cmd, "payouts"))
+			if err != nil {
+				return err
+			}
+
+			txHash, err := resolveCTFMarket(cmd.Context(), ctx.Config.EVMRPCURL, big.NewInt(xrplEVMChainID), privateKeyHex, marketAddress, payouts)
+			if err != nil {
+				return err
+			}
+
+			result := map[string]any{
+				"implementation": "AxiomCTFMarket",
+				"marketAddress":  marketAddress.Hex(),
+				"operator":       wallet.Address().Hex(),
+				"payouts":        bigIntSliceToStrings(payouts),
+				"txHash":         txHash.Hex(),
+			}
+			if mustBoolFlag(cmd, "wait") {
+				receipt, err := waitForTxReceipt(cmd.Context(), ctx.Config.EVMRPCURL, txHash)
+				if err != nil {
+					return err
+				}
+				result["receiptStatus"] = receipt.Status
+				if receipt.Status != 1 {
+					return fmt.Errorf("resolve transaction reverted (tx %s)", txHash.Hex())
+				}
+			}
+			return printOutput(ctx.JSON, result)
+		},
+	}
+	marketResolveCmd.Flags().String("market", "", "Deployed binary AxiomCTFMarket address to resolve")
+	marketResolveCmd.Flags().String("payouts", "", "Comma-separated payout numerators, for example 1,0 or 0,1")
+	marketResolveCmd.Flags().Bool("wait", false, "Wait for the resolve transaction receipt")
+	marketCmd.AddCommand(marketResolveCmd)
+	cmd.AddCommand(marketCmd)
 
 	bookCmd := &cobra.Command{Use: "book", Short: "Inspect hosted CLOB books"}
 	depthCmd := &cobra.Command{
@@ -2425,6 +2600,25 @@ func newClobCommand() *cobra.Command {
 	return cmd
 }
 
+func resolveClobMarketFactoryAddress(cmdCtx context.Context, ctx *cliContext, override string, overrideChanged bool) (common.Address, error) {
+	trimmedOverride := strings.TrimSpace(override)
+	if overrideChanged {
+		if !common.IsHexAddress(trimmedOverride) {
+			return common.Address{}, errors.New("--factory-address must be a valid 0x-prefixed address")
+		}
+		return common.HexToAddress(trimmedOverride), nil
+	}
+
+	addresses, err := ctx.ConsoleAPI.GetMarketContractAddresses(cmdCtx, "xrpl-mainnet")
+	if err != nil {
+		return common.Address{}, fmt.Errorf("load canonical market factory address: %w", err)
+	}
+	if addresses == nil || !common.IsHexAddress(strings.TrimSpace(addresses.MarketFactory)) || isZeroAddress(addresses.MarketFactory) {
+		return common.Address{}, errors.New("canonical MarketFactory address is unavailable for xrpl-mainnet; pass --factory-address explicitly")
+	}
+	return common.HexToAddress(addresses.MarketFactory), nil
+}
+
 func buildCLIContext() (*cliContext, error) {
 	cfg, err := app.LoadConfig()
 	if err != nil {
@@ -2432,6 +2626,9 @@ func buildCLIContext() (*cliContext, error) {
 	}
 	if flagAPIURL != "" {
 		cfg.APIBaseURL = flagAPIURL
+	}
+	if flagConsoleAPIURL != "" {
+		cfg.ConsoleAPIBaseURL = flagConsoleAPIURL
 	}
 	if flagRPCURL != "" {
 		cfg.EVMRPCURL = flagRPCURL
@@ -2451,7 +2648,11 @@ func buildCLIContext() (*cliContext, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &cliContext{Config: cfg, API: client, Profile: profile, ProfileName: cfg.ActiveProfile, JSON: flagJSON || cfg.OutputFormat == "json"}, nil
+	consoleClient, err := api.NewClient(cfg.ConsoleAPIBaseURL, cfg.DeviceID)
+	if err != nil {
+		return nil, err
+	}
+	return &cliContext{Config: cfg, API: client, ConsoleAPI: consoleClient, Profile: profile, ProfileName: cfg.ActiveProfile, JSON: flagJSON || cfg.OutputFormat == "json"}, nil
 }
 
 func resolveWalletAccountProfile(cmd *cobra.Command, ctx *cliContext) (string, app.Profile) {
@@ -2781,6 +2982,269 @@ func parseOptionalWei(cmd *cobra.Command, flagName string) (*big.Int, error) {
 		return nil, fmt.Errorf("invalid --%s value", flagName)
 	}
 	return parsed, nil
+}
+
+func parsePayoutNumerators(value string) ([]*big.Int, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return nil, errors.New("--payouts is required")
+	}
+	parts := strings.Split(trimmed, ",")
+	payouts := make([]*big.Int, 0, len(parts))
+	hasPositive := false
+	for _, part := range parts {
+		numerator, err := evm.ParseBigInt(strings.TrimSpace(part))
+		if err != nil {
+			return nil, fmt.Errorf("invalid --payouts value %q: %w", strings.TrimSpace(part), err)
+		}
+		if numerator.Sign() < 0 {
+			return nil, errors.New("--payouts values must be non-negative integers")
+		}
+		if numerator.Sign() > 0 {
+			hasPositive = true
+		}
+		payouts = append(payouts, numerator)
+	}
+	if len(payouts) < 2 {
+		return nil, errors.New("--payouts must contain at least two values")
+	}
+	if !hasPositive {
+		return nil, errors.New("--payouts must contain at least one positive numerator")
+	}
+	return payouts, nil
+}
+
+func bigIntSliceToStrings(values []*big.Int) []string {
+	formatted := make([]string, 0, len(values))
+	for _, value := range values {
+		if value == nil {
+			formatted = append(formatted, "0")
+			continue
+		}
+		formatted = append(formatted, value.String())
+	}
+	return formatted
+}
+
+type clobOutcomeMetadata struct {
+	Index       int    `json:"index"`
+	Label       string `json:"label"`
+	Description string `json:"description,omitempty"`
+}
+
+type clobMarketMetadata struct {
+	Name               string                `json:"name"`
+	Headline           string                `json:"headline,omitempty"`
+	Description        string                `json:"description"`
+	Category           string                `json:"category"`
+	Tags               []string              `json:"tags"`
+	Outcomes           []clobOutcomeMetadata `json:"outcomes"`
+	ResolutionCriteria string                `json:"resolutionCriteria"`
+	EvidenceSources    []string              `json:"evidenceSources,omitempty"`
+	Image              string                `json:"image,omitempty"`
+	CreatedAt          string                `json:"createdAt"`
+	EndsAt             string                `json:"endsAt"`
+	OutcomeCount       int                   `json:"outcomeCount"`
+}
+
+type clobMarketMetadataInput struct {
+	Name               string
+	Headline           string
+	Description        string
+	Category           string
+	Tags               []string
+	YesLabel           string
+	YesDescription     string
+	NoLabel            string
+	NoDescription      string
+	ResolutionCriteria string
+	EvidenceSources    []string
+	Image              string
+	EndsAt             time.Time
+}
+
+func buildClobMarketMetadata(input clobMarketMetadataInput) clobMarketMetadata {
+	compactStrings := func(values []string) []string {
+		if len(values) == 0 {
+			return nil
+		}
+		result := make([]string, 0, len(values))
+		for _, value := range values {
+			trimmed := strings.TrimSpace(value)
+			if trimmed != "" {
+				result = append(result, trimmed)
+			}
+		}
+		if len(result) == 0 {
+			return nil
+		}
+		return result
+	}
+
+	compactedTags := compactStrings(input.Tags)
+	if compactedTags == nil {
+		compactedTags = []string{}
+	}
+
+	return clobMarketMetadata{
+		Name:        strings.TrimSpace(input.Name),
+		Headline:    strings.TrimSpace(input.Headline),
+		Description: strings.TrimSpace(input.Description),
+		Category:    strings.TrimSpace(input.Category),
+		Tags:        compactedTags,
+		Outcomes: []clobOutcomeMetadata{
+			{
+				Index:       0,
+				Label:       strings.TrimSpace(input.YesLabel),
+				Description: strings.TrimSpace(input.YesDescription),
+			},
+			{
+				Index:       1,
+				Label:       strings.TrimSpace(input.NoLabel),
+				Description: strings.TrimSpace(input.NoDescription),
+			},
+		},
+		ResolutionCriteria: strings.TrimSpace(input.ResolutionCriteria),
+		EvidenceSources:    compactStrings(input.EvidenceSources),
+		Image:              strings.TrimSpace(input.Image),
+		CreatedAt:          time.Now().UTC().Format(time.RFC3339),
+		EndsAt:             input.EndsAt.UTC().Format(time.RFC3339),
+		OutcomeCount:       2,
+	}
+}
+
+func getIPFSURI(cid string) string {
+	trimmed := strings.TrimSpace(cid)
+	if strings.HasPrefix(trimmed, "ipfs://") {
+		return trimmed
+	}
+	return "ipfs://" + trimmed
+}
+
+func marshalJSONForSignedMessage(value any) []byte {
+	var buffer bytes.Buffer
+	encoder := json.NewEncoder(&buffer)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(value); err != nil {
+		return []byte("null")
+	}
+	return bytes.TrimSuffix(buffer.Bytes(), []byte("\n"))
+}
+
+func buildClobMetadataUploadMessage(walletAddress string, network string, metadata api.MarketMetadata) string {
+	encoded := marshalJSONForSignedMessage(metadata)
+	hash := sha256.Sum256(encoded)
+	hashHex := fmt.Sprintf("%x", hash)
+
+	return strings.Join([]string{
+		"Axiom CLI CLOB metadata upload",
+		"",
+		"Version: 1",
+		fmt.Sprintf("Wallet: %s", walletAddress),
+		fmt.Sprintf("Network: %s", strings.TrimSpace(network)),
+		fmt.Sprintf("Metadata SHA-256: %s", hashHex),
+		fmt.Sprintf("Metadata Name: %s", metadata.Name),
+		fmt.Sprintf("Ends At: %s", metadata.EndsAt),
+		"Purpose: authorize server-side IPFS upload for AxiomCTFMarket metadata.",
+	}, "\n")
+}
+
+func uploadClobMarketMetadata(ctx context.Context, cliCtx *cliContext, wallet *evm.Wallet, network string, metadata clobMarketMetadata) (*api.UploadMetadataResponse, error) {
+	apiMetadata := api.MarketMetadata{
+		Name:               metadata.Name,
+		Headline:           metadata.Headline,
+		Description:        metadata.Description,
+		Category:           metadata.Category,
+		Tags:               metadata.Tags,
+		Outcomes:           make([]api.OutcomeMetadata, 0, len(metadata.Outcomes)),
+		ResolutionCriteria: metadata.ResolutionCriteria,
+		EvidenceSources:    metadata.EvidenceSources,
+		Image:              metadata.Image,
+		CreatedAt:          metadata.CreatedAt,
+		EndsAt:             metadata.EndsAt,
+		OutcomeCount:       metadata.OutcomeCount,
+	}
+	for _, outcome := range metadata.Outcomes {
+		apiMetadata.Outcomes = append(apiMetadata.Outcomes, api.OutcomeMetadata{
+			Index:       outcome.Index,
+			Label:       outcome.Label,
+			Description: outcome.Description,
+		})
+	}
+
+	message := buildClobMetadataUploadMessage(wallet.Address().Hex(), network, apiMetadata)
+	signature, err := wallet.SignMessage(message)
+	if err != nil {
+		return nil, err
+	}
+
+	return cliCtx.ConsoleAPI.UploadMarketMetadata(ctx, api.UploadMetadataRequest{
+		Network:       strings.TrimSpace(network),
+		WalletAddress: wallet.Address().Hex(),
+		Metadata:      apiMetadata,
+		Message:       message,
+		Signature:     signature,
+	})
+}
+
+func resolveClobMarketMetadata(cmdCtx context.Context, cliCtx *cliContext, wallet *evm.Wallet, cmd *cobra.Command, endsAt time.Time) (string, *clobMarketMetadata, error) {
+	metadataURI := strings.TrimSpace(mustStringFlag(cmd, "metadata-uri"))
+	if metadataURI != "" {
+		return metadataURI, nil, nil
+	}
+
+	name := strings.TrimSpace(mustStringFlag(cmd, "name"))
+	description := strings.TrimSpace(mustStringFlag(cmd, "description"))
+	category := strings.TrimSpace(mustStringFlag(cmd, "category"))
+	resolutionCriteria := strings.TrimSpace(mustStringFlag(cmd, "resolution-criteria"))
+	if name == "" {
+		return "", nil, errors.New("either --metadata-uri or --name is required")
+	}
+	if description == "" {
+		return "", nil, errors.New("--description is required when --metadata-uri is omitted")
+	}
+	if category == "" {
+		return "", nil, errors.New("--category is required when --metadata-uri is omitted")
+	}
+	if resolutionCriteria == "" {
+		return "", nil, errors.New("--resolution-criteria is required when --metadata-uri is omitted")
+	}
+
+	tags, _ := cmd.Flags().GetStringSlice("tag")
+	evidenceSources, _ := cmd.Flags().GetStringSlice("evidence-source")
+	metadata := buildClobMarketMetadata(clobMarketMetadataInput{
+		Name:               name,
+		Headline:           strings.TrimSpace(mustStringFlag(cmd, "headline")),
+		Description:        description,
+		Category:           category,
+		Tags:               tags,
+		YesLabel:           strings.TrimSpace(mustStringFlag(cmd, "yes-label")),
+		YesDescription:     strings.TrimSpace(mustStringFlag(cmd, "yes-description")),
+		NoLabel:            strings.TrimSpace(mustStringFlag(cmd, "no-label")),
+		NoDescription:      strings.TrimSpace(mustStringFlag(cmd, "no-description")),
+		ResolutionCriteria: resolutionCriteria,
+		EvidenceSources:    evidenceSources,
+		Image:              strings.TrimSpace(mustStringFlag(cmd, "image")),
+		EndsAt:             endsAt,
+	})
+
+	uploadResponse, err := uploadClobMarketMetadata(cmdCtx, cliCtx, wallet, "xrpl-mainnet", metadata)
+	if err != nil {
+		return "", nil, err
+	}
+	metadataURI = getIPFSURI(uploadResponse.IPFSURI)
+	return metadataURI, &metadata, nil
+}
+
+func resolveUnixTimestampFlag(cmd *cobra.Command, flagName string) (uint64, error) {
+	value, err := cmd.Flags().GetUint64(flagName)
+	if err != nil {
+		return 0, err
+	}
+	if value == 0 {
+		return 0, fmt.Errorf("--%s is required", flagName)
+	}
+	return value, nil
 }
 
 func resolveOutcomeIndex(market *api.MarketDetails, outcomeRaw string, label string) (int, error) {

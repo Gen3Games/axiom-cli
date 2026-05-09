@@ -68,6 +68,8 @@ func TestCommandHelpSmoke(t *testing.T) {
 		{args: []string{"predict", "quote", "--help"}, want: "Preview weighted shares"},
 		{args: []string{"predict", "buy", "--help"}, want: "Buy into an Axiom market outcome"},
 		{args: []string{"clob", "--help"}, want: "Inspect and manage hosted CLOB books, orders, fills, and cancellations"},
+		{args: []string{"clob", "market", "create", "--help"}, want: "Deploy a single binary AxiomCTFMarket via MarketFactory.createMarket(...)"},
+		{args: []string{"clob", "market", "resolve", "--help"}, want: "Resolve a deployed binary AxiomCTFMarket with an explicit payout vector"},
 		{args: []string{"clob", "book", "depth", "--help"}, want: "Fetch the hosted depth ladder and book summary for a logical CLOB proposition"},
 		{args: []string{"clob", "smoke", "--help"}, want: "Run a hosted CLOB smoke test using imported CLI accounts"},
 		{args: []string{"clob", "wallet", "status", "--help"}, want: "Show collateral balances, allowances, approvals, and per-outcome token balances for a CLOB market"},
@@ -115,6 +117,30 @@ func TestConfigSetHonorsJSONOutput(t *testing.T) {
 	}
 	if configMap["apiBaseUrl"] != "https://api.example" {
 		t.Fatalf("apiBaseUrl = %#v, want %q", configMap["apiBaseUrl"], "https://api.example")
+	}
+	if configMap["consoleApiBaseUrl"] != "https://console.axiomprotocol.io/api/cli" {
+		t.Fatalf("consoleApiBaseUrl = %#v, want console default", configMap["consoleApiBaseUrl"])
+	}
+}
+
+func TestConfigSetUpdatesConsoleAPIURL(t *testing.T) {
+	setCLIEnv(t)
+
+	stdout, stderr, err := executeCLI(t, "--json", "config", "set", "--console-api-url", "https://console.example/api/cli")
+	if err != nil {
+		t.Fatalf("config set console api error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+		t.Fatalf("json.Unmarshal(stdout) error = %v\nstdout:\n%s", err, stdout)
+	}
+	configMap, ok := payload["config"].(map[string]any)
+	if !ok {
+		t.Fatalf("config payload = %#v, want object", payload["config"])
+	}
+	if configMap["consoleApiBaseUrl"] != "https://console.example/api/cli" {
+		t.Fatalf("consoleApiBaseUrl = %#v, want %q", configMap["consoleApiBaseUrl"], "https://console.example/api/cli")
 	}
 }
 
@@ -558,6 +584,346 @@ func TestClobSmokeDryRunUsesImportedAccount(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "0x00000000000000000000000000000000000000C1") {
 		t.Fatalf("clob smoke dry-run stdout missing binding address\nstdout:\n%s", stdout)
+	}
+}
+
+func TestClobMarketCreateDeploysBinaryMarket(t *testing.T) {
+	setCLIEnv(t)
+	server, state := newMockAPIServer(t)
+	defer server.Close()
+
+	privateKey := "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+	if _, stderr, err := executeCLI(t, "--json", "wallet", "import", "--private-key", privateKey); err != nil {
+		t.Fatalf("wallet import error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	originalCreateAxiomCTFMarket := createAxiomCTFMarket
+	var receivedParams evm.CreateAxiomCTFMarketParams
+	createAxiomCTFMarket = func(_ context.Context, rpcURL string, chainID *big.Int, privateKeyHex string, params evm.CreateAxiomCTFMarketParams) (*evm.CreateAxiomCTFMarketResult, error) {
+		receivedParams = params
+		if rpcURL == "" {
+			t.Fatal("createAxiomCTFMarket() received empty rpcURL")
+		}
+		if chainID == nil || chainID.Int64() != xrplEVMChainID {
+			t.Fatalf("chainID = %v, want %d", chainID, xrplEVMChainID)
+		}
+		if privateKeyHex == "" {
+			t.Fatal("createAxiomCTFMarket() received empty private key")
+		}
+		return &evm.CreateAxiomCTFMarketResult{
+			TxHash:        common.HexToHash("0x1111111111111111111111111111111111111111111111111111111111111111"),
+			MarketAddress: common.HexToAddress("0x00000000000000000000000000000000000000C1"),
+			ConfigAddress: common.HexToAddress("0x00000000000000000000000000000000000000CF"),
+		}, nil
+	}
+	t.Cleanup(func() {
+		createAxiomCTFMarket = originalCreateAxiomCTFMarket
+	})
+
+	stdout, stderr, err := executeCLI(
+		t,
+		"--json",
+		"--api-url", server.URL+"/api/cli",
+		"--console-api-url", server.URL+"/api/cli",
+		"clob",
+		"market",
+		"create",
+		"--metadata-uri", "ipfs://market-metadata",
+		"--question-id", "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"--trading-open", "1710000000",
+		"--trading-close", "1910000000",
+	)
+	if err != nil {
+		t.Fatalf("clob market create error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	if receivedParams.MetadataURI != "ipfs://market-metadata" {
+		t.Fatalf("metadataURI = %q, want %q", receivedParams.MetadataURI, "ipfs://market-metadata")
+	}
+	if receivedParams.FactoryAddress.Hex() != common.HexToAddress(state.marketFactoryAddress).Hex() {
+		t.Fatalf("factoryAddress = %q, want fetched canonical factory %q", receivedParams.FactoryAddress.Hex(), state.marketFactoryAddress)
+	}
+	if state.lastAddressesNetwork != "xrpl-mainnet" {
+		t.Fatalf("addresses network = %q, want %q", state.lastAddressesNetwork, "xrpl-mainnet")
+	}
+	if receivedParams.QuestionID.Hex() != "0xaAaAaAaaAaAaAaaAaAAAAAAAAaaaAaAaAaaAaaAaAaAaAaAaAaAaAaAaAaAaAa" && strings.ToLower(receivedParams.QuestionID.Hex()) != "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
+		t.Fatalf("questionID = %q, want provided hash", receivedParams.QuestionID.Hex())
+	}
+	if receivedParams.TradingOpen != 1710000000 {
+		t.Fatalf("tradingOpen = %d, want %d", receivedParams.TradingOpen, uint64(1710000000))
+	}
+	if receivedParams.TradingClose != 1910000000 {
+		t.Fatalf("tradingClose = %d, want %d", receivedParams.TradingClose, uint64(1910000000))
+	}
+	if !strings.Contains(stdout, "\"marketAddress\": \"0x00000000000000000000000000000000000000c1\"") && !strings.Contains(strings.ToLower(stdout), "\"marketaddress\": \"0x00000000000000000000000000000000000000c1\"") {
+		t.Fatalf("clob market create stdout missing market address\nstdout:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "ipfs://market-metadata") || !strings.Contains(stdout, "AxiomCTFMarket") {
+		t.Fatalf("clob market create stdout missing deployment payload\nstdout:\n%s", stdout)
+	}
+}
+
+func TestClobMarketCreatePrefersExplicitFactoryAddressOverride(t *testing.T) {
+	setCLIEnv(t)
+	server, state := newMockAPIServer(t)
+	defer server.Close()
+
+	privateKey := "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+	if _, stderr, err := executeCLI(t, "--json", "wallet", "import", "--private-key", privateKey); err != nil {
+		t.Fatalf("wallet import error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	originalCreateAxiomCTFMarket := createAxiomCTFMarket
+	var receivedParams evm.CreateAxiomCTFMarketParams
+	createAxiomCTFMarket = func(_ context.Context, rpcURL string, chainID *big.Int, privateKeyHex string, params evm.CreateAxiomCTFMarketParams) (*evm.CreateAxiomCTFMarketResult, error) {
+		receivedParams = params
+		return &evm.CreateAxiomCTFMarketResult{
+			TxHash:        common.HexToHash("0x1111111111111111111111111111111111111111111111111111111111111111"),
+			MarketAddress: common.HexToAddress("0x00000000000000000000000000000000000000C1"),
+			ConfigAddress: common.HexToAddress("0x00000000000000000000000000000000000000CF"),
+		}, nil
+	}
+	t.Cleanup(func() {
+		createAxiomCTFMarket = originalCreateAxiomCTFMarket
+	})
+
+	overrideFactory := "0x0000000000000000000000000000000000000ABC"
+	if _, stderr, err := executeCLI(
+		t,
+		"--json",
+		"--api-url", server.URL+"/api/cli",
+		"--console-api-url", server.URL+"/api/cli",
+		"clob",
+		"--factory-address", overrideFactory,
+		"market",
+		"create",
+		"--metadata-uri", "ipfs://market-metadata",
+		"--question-id", "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"--trading-open", "1710000000",
+		"--trading-close", "1910000000",
+	); err != nil {
+		t.Fatalf("clob market create override error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	if receivedParams.FactoryAddress.Hex() != common.HexToAddress(overrideFactory).Hex() {
+		t.Fatalf("factoryAddress = %q, want explicit override %q", receivedParams.FactoryAddress.Hex(), overrideFactory)
+	}
+	if state.lastAddressesNetwork != "" {
+		t.Fatalf("addresses network = %q, want no canonical lookup when override is provided", state.lastAddressesNetwork)
+	}
+}
+
+func TestClobMarketCreateUsesConsoleAPIURLForCanonicalLookup(t *testing.T) {
+	setCLIEnv(t)
+	appServer, _ := newMockAPIServer(t)
+	defer appServer.Close()
+
+	consoleServer, consoleState := newMockAPIServer(t)
+	defer consoleServer.Close()
+	consoleState.marketFactoryAddress = "0x00000000000000000000000000000000000000F9"
+
+	privateKey := "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+	if _, stderr, err := executeCLI(t, "--json", "wallet", "import", "--private-key", privateKey); err != nil {
+		t.Fatalf("wallet import error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	originalCreateAxiomCTFMarket := createAxiomCTFMarket
+	var receivedParams evm.CreateAxiomCTFMarketParams
+	createAxiomCTFMarket = func(_ context.Context, rpcURL string, chainID *big.Int, privateKeyHex string, params evm.CreateAxiomCTFMarketParams) (*evm.CreateAxiomCTFMarketResult, error) {
+		receivedParams = params
+		return &evm.CreateAxiomCTFMarketResult{
+			TxHash:        common.HexToHash("0x1111111111111111111111111111111111111111111111111111111111111111"),
+			MarketAddress: common.HexToAddress("0x00000000000000000000000000000000000000C1"),
+			ConfigAddress: common.HexToAddress("0x00000000000000000000000000000000000000CF"),
+		}, nil
+	}
+	t.Cleanup(func() {
+		createAxiomCTFMarket = originalCreateAxiomCTFMarket
+	})
+
+	if _, stderr, err := executeCLI(
+		t,
+		"--json",
+		"--api-url", appServer.URL+"/api/cli",
+		"--console-api-url", consoleServer.URL+"/api/cli",
+		"clob",
+		"market",
+		"create",
+		"--metadata-uri", "ipfs://market-metadata",
+		"--question-id", "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"--trading-open", "1710000000",
+		"--trading-close", "1910000000",
+	); err != nil {
+		t.Fatalf("clob market create console api error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	if receivedParams.FactoryAddress.Hex() != common.HexToAddress(consoleState.marketFactoryAddress).Hex() {
+		t.Fatalf("factoryAddress = %q, want console canonical factory %q", receivedParams.FactoryAddress.Hex(), consoleState.marketFactoryAddress)
+	}
+	if consoleState.lastAddressesNetwork != "xrpl-mainnet" {
+		t.Fatalf("console addresses network = %q, want %q", consoleState.lastAddressesNetwork, "xrpl-mainnet")
+	}
+}
+
+func TestClobMarketCreateBuildsAndUploadsMetadataWhenURIIsOmitted(t *testing.T) {
+	setCLIEnv(t)
+	server, state := newMockAPIServer(t)
+	defer server.Close()
+
+	privateKey := "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+	if _, stderr, err := executeCLI(t, "--json", "wallet", "import", "--private-key", privateKey); err != nil {
+		t.Fatalf("wallet import error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	originalCreateAxiomCTFMarket := createAxiomCTFMarket
+	var receivedParams evm.CreateAxiomCTFMarketParams
+	createAxiomCTFMarket = func(_ context.Context, rpcURL string, chainID *big.Int, privateKeyHex string, params evm.CreateAxiomCTFMarketParams) (*evm.CreateAxiomCTFMarketResult, error) {
+		receivedParams = params
+		return &evm.CreateAxiomCTFMarketResult{
+			TxHash:        common.HexToHash("0x1111111111111111111111111111111111111111111111111111111111111111"),
+			MarketAddress: common.HexToAddress("0x00000000000000000000000000000000000000C1"),
+			ConfigAddress: common.HexToAddress("0x00000000000000000000000000000000000000CF"),
+		}, nil
+	}
+	t.Cleanup(func() {
+		createAxiomCTFMarket = originalCreateAxiomCTFMarket
+	})
+
+	stdout, stderr, err := executeCLI(
+		t,
+		"--json",
+		"--api-url", server.URL+"/api/cli",
+		"--console-api-url", server.URL+"/api/cli",
+		"clob",
+		"market",
+		"create",
+		"--name", "CLI Uploaded Binary CTF",
+		"--headline", "CLI smoke headline",
+		"--description", "CLI-built metadata payload",
+		"--category", "crypto",
+		"--tag", "cli",
+		"--tag", "ctf",
+		"--resolution-criteria", "Resolves to YES if the referenced condition occurs.",
+		"--yes-label", "Bullish",
+		"--yes-description", "Condition occurs",
+		"--no-label", "Bearish",
+		"--no-description", "Condition does not occur",
+		"--question-id", "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		"--trading-open", "1710000000",
+		"--trading-close", "1910000000",
+	)
+	if err != nil {
+		t.Fatalf("clob market create upload error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	if receivedParams.MetadataURI != "ipfs://bafkreiuploadtest" {
+		t.Fatalf("metadataURI = %q, want uploaded ipfs uri", receivedParams.MetadataURI)
+	}
+	if state.lastMetadataUpload.Network != "xrpl-mainnet" {
+		t.Fatalf("metadata upload network = %q, want %q", state.lastMetadataUpload.Network, "xrpl-mainnet")
+	}
+	if state.lastMetadataUpload.WalletAddress == "" || state.lastDeviceHeader == "" {
+		t.Fatalf("metadata upload wallet/header should be non-empty, got wallet=%q header=%q", state.lastMetadataUpload.WalletAddress, state.lastDeviceHeader)
+	}
+	if state.lastMetadataUpload.Metadata.Name != "CLI Uploaded Binary CTF" {
+		t.Fatalf("uploaded metadata name = %q, want built metadata", state.lastMetadataUpload.Metadata.Name)
+	}
+	if state.lastMetadataUpload.Metadata.OutcomeCount != 2 || len(state.lastMetadataUpload.Metadata.Outcomes) != 2 {
+		t.Fatalf("uploaded metadata outcomes = %+v, want binary metadata", state.lastMetadataUpload.Metadata.Outcomes)
+	}
+	if state.lastMetadataUpload.Metadata.Outcomes[0].Label != "Bullish" || state.lastMetadataUpload.Metadata.Outcomes[1].Label != "Bearish" {
+		t.Fatalf("uploaded metadata labels = %+v, want custom labels", state.lastMetadataUpload.Metadata.Outcomes)
+	}
+	if !strings.Contains(state.lastMetadataUpload.Message, "Axiom CLI CLOB metadata upload") {
+		t.Fatalf("upload message = %q, want signed metadata upload message", state.lastMetadataUpload.Message)
+	}
+	if !strings.HasPrefix(state.lastMetadataUpload.Signature, "0x") {
+		t.Fatalf("upload signature = %q, want 0x-prefixed signature", state.lastMetadataUpload.Signature)
+	}
+	if receivedParams.FactoryAddress.Hex() != common.HexToAddress(state.marketFactoryAddress).Hex() {
+		t.Fatalf("factoryAddress = %q, want fetched canonical factory %q", receivedParams.FactoryAddress.Hex(), state.marketFactoryAddress)
+	}
+	if !strings.Contains(stdout, "ipfs://bafkreiuploadtest") {
+		t.Fatalf("clob market create stdout missing uploaded metadata uri\nstdout:\n%s", stdout)
+	}
+}
+
+func TestClobMarketResolveValidatesPayouts(t *testing.T) {
+	setCLIEnv(t)
+
+	privateKey := "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+	if _, stderr, err := executeCLI(t, "--json", "wallet", "import", "--private-key", privateKey); err != nil {
+		t.Fatalf("wallet import error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	_, _, err := executeCLI(t, "clob", "market", "resolve", "--market", "0xDA747fd4f80deb97E3F940Bd6036B724D1FDA53F", "--payouts", "0,0")
+	if err == nil {
+		t.Fatal("clob market resolve error = nil, want validation failure")
+	}
+	if !strings.Contains(err.Error(), "--payouts must contain at least one positive numerator") {
+		t.Fatalf("clob market resolve error = %q, want payout validation", err)
+	}
+}
+
+func TestClobMarketResolveSendsTransaction(t *testing.T) {
+	setCLIEnv(t)
+
+	privateKey := "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+	if _, stderr, err := executeCLI(t, "--json", "wallet", "import", "--private-key", privateKey); err != nil {
+		t.Fatalf("wallet import error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	originalResolveCTFMarket := resolveCTFMarket
+	originalWaitForReceipt := waitForTxReceipt
+	var receivedMarket common.Address
+	var receivedPayouts []*big.Int
+	resolveCTFMarket = func(_ context.Context, rpcURL string, chainID *big.Int, privateKeyHex string, marketAddress common.Address, payoutNumerators []*big.Int) (common.Hash, error) {
+		receivedMarket = marketAddress
+		receivedPayouts = payoutNumerators
+		if rpcURL == "" {
+			t.Fatal("resolveCTFMarket() received empty rpcURL")
+		}
+		if chainID == nil || chainID.Int64() != xrplEVMChainID {
+			t.Fatalf("chainID = %v, want %d", chainID, xrplEVMChainID)
+		}
+		if privateKeyHex == "" {
+			t.Fatal("resolveCTFMarket() received empty private key")
+		}
+		return common.HexToHash("0x2222222222222222222222222222222222222222222222222222222222222222"), nil
+	}
+	waitForTxReceipt = func(_ context.Context, _ string, txHash common.Hash) (*types.Receipt, error) {
+		return &types.Receipt{TxHash: txHash, Status: 1}, nil
+	}
+	t.Cleanup(func() {
+		resolveCTFMarket = originalResolveCTFMarket
+		waitForTxReceipt = originalWaitForReceipt
+	})
+
+	stdout, stderr, err := executeCLI(
+		t,
+		"--json",
+		"clob",
+		"market",
+		"resolve",
+		"--market", "0xDA747fd4f80deb97E3F940Bd6036B724D1FDA53F",
+		"--payouts", "1,0",
+		"--wait",
+	)
+	if err != nil {
+		t.Fatalf("clob market resolve error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	if receivedMarket.Hex() != common.HexToAddress("0xDA747fd4f80deb97E3F940Bd6036B724D1FDA53F").Hex() {
+		t.Fatalf("marketAddress = %q, want provided market", receivedMarket.Hex())
+	}
+	if len(receivedPayouts) != 2 || receivedPayouts[0].Cmp(big.NewInt(1)) != 0 || receivedPayouts[1].Cmp(big.NewInt(0)) != 0 {
+		t.Fatalf("payouts = %v, want [1 0]", receivedPayouts)
+	}
+	if !strings.Contains(stdout, "0x2222222222222222222222222222222222222222222222222222222222222222") {
+		t.Fatalf("clob market resolve stdout missing tx hash\nstdout:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "receiptStatus") {
+		t.Fatalf("clob market resolve stdout missing receipt status\nstdout:\n%s", stdout)
 	}
 }
 
@@ -1103,27 +1469,34 @@ func resetCLIFlags() {
 }
 
 type mockAPIState struct {
-	lastRegister      api.RegisterRequest
-	lastProfileUpdate api.UpdateProfileRequest
-	lastRewardsAction api.RewardsActionRequest
-	lastRewardsPath   string
-	lastDeviceHeader  string
-	lastClobOrder     api.ClobSignedOrderPayload
-	clobSubmitCalls   int
-	clobConflictsLeft int
-	rewardsSyncError  string
-	rewardsSyncStatus int
-	rewardsAddress    string
-	clobOrders        map[string]api.ClobOrder
-	clobFills         []api.ClobFill
-	mu                sync.Mutex
+	lastRegister         api.RegisterRequest
+	lastProfileUpdate    api.UpdateProfileRequest
+	lastRewardsAction    api.RewardsActionRequest
+	lastRewardsPath      string
+	lastDeviceHeader     string
+	lastAddressesNetwork string
+	lastMetadataUpload   api.UploadMetadataRequest
+	lastClobOrder        api.ClobSignedOrderPayload
+	clobSubmitCalls      int
+	clobConflictsLeft    int
+	rewardsSyncError     string
+	rewardsSyncStatus    int
+	rewardsAddress       string
+	marketFactoryAddress string
+	clobOrders           map[string]api.ClobOrder
+	clobFills            []api.ClobFill
+	mu                   sync.Mutex
 }
 
 func newMockAPIServer(t *testing.T) (*httptest.Server, *mockAPIState) {
 	t.Helper()
 
 	now := time.Date(2026, time.March, 10, 12, 0, 0, 0, time.UTC)
-	state := &mockAPIState{rewardsAddress: "0x00000000000000000000000000000000000000AA", clobOrders: make(map[string]api.ClobOrder)}
+	state := &mockAPIState{
+		rewardsAddress:       "0x00000000000000000000000000000000000000AA",
+		marketFactoryAddress: "0x00000000000000000000000000000000000000F1",
+		clobOrders:           make(map[string]api.ClobOrder),
+	}
 	markets := []api.MarketListItem{
 		{
 			ID:              "market-0",
@@ -1164,6 +1537,40 @@ func newMockAPIServer(t *testing.T) (*httptest.Server, *mockAPIState) {
 		w.Header().Set("Content-Type", "application/json")
 
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/markets/contract-addresses":
+			state.mu.Lock()
+			state.lastAddressesNetwork = r.URL.Query().Get("network")
+			marketFactoryAddress := state.marketFactoryAddress
+			state.mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success": true,
+				"network": firstNonEmpty(strings.TrimSpace(r.URL.Query().Get("network")), "xrpl-testnet"),
+				"addresses": map[string]any{
+					"marketFactory":     marketFactoryAddress,
+					"protocolConfig":    "0x00000000000000000000000000000000000000F2",
+					"vaultRegistry":     "0x00000000000000000000000000000000000000F3",
+					"ctfExchange":       "0x00000000000000000000000000000000000000F4",
+					"ctfLauncher":       "0x00000000000000000000000000000000000000F5",
+					"conditionalTokens": "0x00000000000000000000000000000000000000F6",
+				},
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/markets/upload-metadata":
+			var request api.UploadMetadataRequest
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatalf("Decode(upload metadata body) error = %v", err)
+			}
+			state.mu.Lock()
+			state.lastMetadataUpload = request
+			state.lastDeviceHeader = r.Header.Get("X-Axiom-CLI-Device")
+			state.mu.Unlock()
+			_ = json.NewEncoder(w).Encode(api.UploadMetadataResponse{
+				Success:       true,
+				Network:       request.Network,
+				SignerAddress: request.WalletAddress,
+				CID:           "bafkreiuploadtest",
+				IPFSURI:       "ipfs://bafkreiuploadtest",
+				GatewayURL:    "https://axiom.mypinata.cloud/ipfs/bafkreiuploadtest",
+			})
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/books/") && strings.HasSuffix(r.URL.Path, "/depth"):
 			_ = json.NewEncoder(w).Encode(api.ClobDepth{
 				Bids: []api.ClobDepthLevel{{ClobID: "clob-1-0", Side: "buy", Price: 45, TotalQty: 12, OrderCount: 2}},

@@ -26,16 +26,17 @@ func TestRenderKnownTypes(t *testing.T) {
 		{
 			name: "config",
 			value: app.Config{
-				APIBaseURL:    "https://api.example",
-				EVMRPCURL:     "https://rpc.example",
-				XRPLRPCURL:    "https://xrpl.example",
-				ActiveProfile: "default",
-				OutputFormat:  "text",
+				APIBaseURL:        "https://api.example",
+				ConsoleAPIBaseURL: "https://console.example/api/cli",
+				EVMRPCURL:         "https://rpc.example",
+				XRPLRPCURL:        "https://xrpl.example",
+				ActiveProfile:     "default",
+				OutputFormat:      "text",
 				Profiles: map[string]app.Profile{
 					"default": {Name: "default", EVMAddress: "0xabc", XRPLAddress: "rABC", DepositDestinationTag: 4242},
 				},
 			},
-			want: []string{"CLI Configuration", "API Base URL", "Profiles", "default", "0xabc", "rABC", "4242"},
+			want: []string{"CLI Configuration", "API Base URL", "Console API Base URL", "https://console.example/api/cli", "Profiles", "default", "0xabc", "rABC", "4242"},
 		},
 		{
 			name:  "register",

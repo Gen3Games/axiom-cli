@@ -17,7 +17,23 @@ import (
 )
 
 const (
+	factoryABIJSON = `[
+		{"name":"createMarket","type":"function","stateMutability":"nonpayable","inputs":[{"name":"implName","type":"string"},{"name":"initData","type":"bytes"}],"outputs":[{"name":"market","type":"address"}]},
+		{"name":"config","type":"function","stateMutability":"view","inputs":[],"outputs":[{"type":"address"}]},
+		{"name":"MarketCreated","type":"event","inputs":[{"name":"market","type":"address","indexed":true},{"name":"implName","type":"string","indexed":false},{"name":"creator","type":"address","indexed":true}],"anonymous":false}
+	]`
 	marketABIJSON = `[
+		{"name":"metadataUri","type":"function","stateMutability":"view","inputs":[],"outputs":[{"type":"string"}]},
+		{"name":"creator","type":"function","stateMutability":"view","inputs":[],"outputs":[{"type":"address"}]},
+		{"name":"collateralToken","type":"function","stateMutability":"view","inputs":[],"outputs":[{"type":"address"}]},
+		{"name":"conditionalTokens","type":"function","stateMutability":"view","inputs":[],"outputs":[{"type":"address"}]},
+		{"name":"outcomeSlotCount","type":"function","stateMutability":"view","inputs":[],"outputs":[{"type":"uint8"}]},
+		{"name":"questionId","type":"function","stateMutability":"view","inputs":[],"outputs":[{"type":"bytes32"}]},
+		{"name":"conditionId","type":"function","stateMutability":"view","inputs":[],"outputs":[{"type":"bytes32"}]},
+		{"name":"tradingOpen","type":"function","stateMutability":"view","inputs":[],"outputs":[{"type":"uint256"}]},
+		{"name":"tradingClose","type":"function","stateMutability":"view","inputs":[],"outputs":[{"type":"uint256"}]},
+		{"name":"resolved","type":"function","stateMutability":"view","inputs":[],"outputs":[{"type":"bool"}]},
+		{"name":"resolve","type":"function","stateMutability":"nonpayable","inputs":[{"name":"payoutNumerators","type":"uint256[]"}],"outputs":[]},
 		{"name":"settlementToken","type":"function","stateMutability":"view","inputs":[],"outputs":[{"type":"address"}]},
 		{"name":"status","type":"function","stateMutability":"view","inputs":[],"outputs":[{"type":"uint8"}]},
 		{"name":"outcomeCount","type":"function","stateMutability":"view","inputs":[],"outputs":[{"type":"uint8"}]},
@@ -57,10 +73,19 @@ const (
 )
 
 var (
+	factoryABI = mustParseABI(factoryABIJSON)
 	marketABI  = mustParseABI(marketABIJSON)
 	erc20ABI   = mustParseABI(erc20ABIJSON)
 	utilityABI = mustParseABI(utilityABIJSON)
 	rewardsABI = mustParseABI(rewardsABIJSON)
+)
+
+var (
+	abiTypeString  = mustNewABIType("string")
+	abiTypeUint8   = mustNewABIType("uint8")
+	abiTypeUint256 = mustNewABIType("uint256")
+	abiTypeAddress = mustNewABIType("address")
+	abiTypeBytes32 = mustNewABIType("bytes32")
 )
 
 type MarketState struct {
@@ -87,6 +112,23 @@ type CTFMarketMetadata struct {
 	ConditionID       common.Hash
 }
 
+type CreateAxiomCTFMarketParams struct {
+	FactoryAddress    common.Address
+	Creator           common.Address
+	CollateralToken   common.Address
+	ConditionalTokens common.Address
+	MetadataURI       string
+	TradingOpen       uint64
+	TradingClose      uint64
+	QuestionID        common.Hash
+}
+
+type CreateAxiomCTFMarketResult struct {
+	TxHash        common.Hash
+	MarketAddress common.Address
+	ConfigAddress common.Address
+}
+
 type BuyQuote struct {
 	MarketTitle            string `json:"marketTitle"`
 	OutcomeIndex           int    `json:"outcomeIndex"`
@@ -109,6 +151,136 @@ func mustParseABI(raw string) abi.ABI {
 		panic(err)
 	}
 	return parsed
+}
+
+func mustNewABIType(kind string) abi.Type {
+	typeValue, err := abi.NewType(kind, "", nil)
+	if err != nil {
+		panic(err)
+	}
+	return typeValue
+}
+
+func GetFactoryConfigAddress(ctx context.Context, rpcURL string, factoryAddress common.Address) (common.Address, error) {
+	client, err := ethclient.DialContext(ctx, rpcURL)
+	if err != nil {
+		return common.Address{}, fmt.Errorf("connect rpc: %w", err)
+	}
+	defer client.Close()
+
+	configAddress, err := callAddress(ctx, client, factoryAddress, factoryABI, "config")
+	if err != nil {
+		return common.Address{}, err
+	}
+	if configAddress == (common.Address{}) {
+		return common.Address{}, fmt.Errorf("factory config address is zero")
+	}
+	return configAddress, nil
+}
+
+func CreateAxiomCTFMarket(ctx context.Context, rpcURL string, chainID *big.Int, privateKeyHex string, params CreateAxiomCTFMarketParams) (*CreateAxiomCTFMarketResult, error) {
+	configAddress, err := GetFactoryConfigAddress(ctx, rpcURL, params.FactoryAddress)
+	if err != nil {
+		return nil, fmt.Errorf("load factory config: %w", err)
+	}
+
+	initData, err := encodeAxiomCTFMarketInitData(
+		params.MetadataURI,
+		params.TradingOpen,
+		params.TradingClose,
+		configAddress,
+		params.Creator,
+		params.CollateralToken,
+		params.ConditionalTokens,
+		params.QuestionID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("encode CTF market init data: %w", err)
+	}
+
+	txHash, err := sendContractTransaction(ctx, rpcURL, chainID, privateKeyHex, params.FactoryAddress, factoryABI, "createMarket", big.NewInt(0), "AxiomCTFMarket", initData)
+	if err != nil {
+		return nil, err
+	}
+
+	waitCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+
+	receipt, err := WaitForReceipt(waitCtx, rpcURL, txHash)
+	if err != nil {
+		return nil, fmt.Errorf("wait for market creation receipt: %w", err)
+	}
+	if receipt.Status != 1 {
+		return nil, fmt.Errorf("market creation transaction failed: %s", txHash.Hex())
+	}
+
+	marketAddress, err := ExtractCreatedMarketAddress(receipt, params.FactoryAddress)
+	if err != nil {
+		return nil, err
+	}
+
+	return &CreateAxiomCTFMarketResult{
+		TxHash:        txHash,
+		MarketAddress: marketAddress,
+		ConfigAddress: configAddress,
+	}, nil
+}
+
+func ExtractCreatedMarketAddress(receipt *types.Receipt, factoryAddress common.Address) (common.Address, error) {
+	if receipt == nil {
+		return common.Address{}, fmt.Errorf("receipt is required")
+	}
+	event, ok := factoryABI.Events["MarketCreated"]
+	if !ok {
+		return common.Address{}, fmt.Errorf("MarketCreated event is not available in factory ABI")
+	}
+
+	for _, log := range receipt.Logs {
+		if log == nil || log.Address != factoryAddress {
+			continue
+		}
+		if len(log.Topics) < 2 || log.Topics[0] != event.ID {
+			continue
+		}
+		return common.BytesToAddress(log.Topics[1].Bytes()[12:]), nil
+	}
+
+	return common.Address{}, fmt.Errorf("MarketCreated event not found in transaction receipt")
+}
+
+func encodeAxiomCTFMarketInitData(
+	metadataURI string,
+	tradingOpen uint64,
+	tradingClose uint64,
+	configAddress common.Address,
+	creator common.Address,
+	collateralToken common.Address,
+	conditionalTokens common.Address,
+	questionID common.Hash,
+) ([]byte, error) {
+	args := abi.Arguments{
+		{Type: abiTypeString},
+		{Type: abiTypeUint8},
+		{Type: abiTypeUint256},
+		{Type: abiTypeUint256},
+		{Type: abiTypeAddress},
+		{Type: abiTypeAddress},
+		{Type: abiTypeAddress},
+		{Type: abiTypeAddress},
+		{Type: abiTypeBytes32},
+	}
+
+	return args.Pack(
+		metadataURI,
+		uint8(2),
+		new(big.Int).SetUint64(tradingOpen),
+		new(big.Int).SetUint64(tradingClose),
+		configAddress,
+		creator,
+		collateralToken,
+		conditionalTokens,
+		questionID,
+	)
 }
 
 func LoadMarketState(ctx context.Context, rpcURL string, marketAddress common.Address) (*MarketState, error) {
@@ -317,6 +489,10 @@ func QuoteBuy(state *MarketState, amountWei *big.Int, outcome uint8, marketTitle
 
 func ClaimMarket(ctx context.Context, rpcURL string, chainID *big.Int, privateKeyHex string, marketAddress common.Address) (common.Hash, error) {
 	return sendContractTransaction(ctx, rpcURL, chainID, privateKeyHex, marketAddress, marketABI, "claim", big.NewInt(0))
+}
+
+func ResolveCTFMarket(ctx context.Context, rpcURL string, chainID *big.Int, privateKeyHex string, marketAddress common.Address, payoutNumerators []*big.Int) (common.Hash, error) {
+	return sendContractTransaction(ctx, rpcURL, chainID, privateKeyHex, marketAddress, marketABI, "resolve", big.NewInt(0), payoutNumerators)
 }
 
 func BatchClaim(ctx context.Context, rpcURL string, chainID *big.Int, privateKeyHex string, utilityAddress common.Address, markets []common.Address) (common.Hash, error) {
