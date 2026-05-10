@@ -637,7 +637,11 @@ func TestCancelClobOrderUsesHostedEventstoreBase(t *testing.T) {
 	response, err := client.CancelClobOrder(context.Background(), server.URL+"/api", "order-1", ClobCancelOrderRequest{
 		Market:    "market-123",
 		Outcome:   0,
+		TokenSide: "yes",
 		Requester: "0xabc",
+		Nonce:     "123",
+		Deadline:  "456",
+		Signature: "0xsig",
 		Reason:    "user-requested",
 	})
 	if err != nil {
@@ -654,6 +658,9 @@ func TestCancelClobOrderUsesHostedEventstoreBase(t *testing.T) {
 	}
 	if gotRequest.Requester != "0xabc" || gotRequest.Market != "market-123" || gotRequest.Outcome != 0 {
 		t.Fatalf("request = %+v, want requester/market/outcome preserved", gotRequest)
+	}
+	if gotRequest.TokenSide != "yes" || gotRequest.Nonce != "123" || gotRequest.Deadline != "456" || gotRequest.Signature != "0xsig" {
+		t.Fatalf("request = %+v, want signed cancel payload preserved", gotRequest)
 	}
 	if response.OrderID != "order-1" || response.RemainingQuantity != 0 {
 		t.Fatalf("response = %+v, want cancelled order response payload", response)

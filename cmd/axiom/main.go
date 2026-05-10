@@ -2493,9 +2493,13 @@ func newClobCommand() *cobra.Command {
 
 	cancelCmd := &cobra.Command{
 		Use:   "cancel --order-id <id> --market <id> --outcome <index>",
-		Short: "Cancel a hosted resting CLOB order using the requester wallet address",
+		Short: "Cancel a hosted resting CLOB order using the requester wallet signature",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+			wallet, _, err := requireEVMWalletWithKey(ctx)
 			if err != nil {
 				return err
 			}
@@ -2514,18 +2518,28 @@ func newClobCommand() *cobra.Command {
 			if requester == "" {
 				return errors.New("--requester is required when the active profile does not have an EVM wallet configured")
 			}
+			order, err := ctx.API.GetClobOrder(cmd.Context(), strings.TrimSpace(mustStringFlag(cmd, "projection-url")), orderID)
+			if err != nil {
+				return err
+			}
+			if requester != "" && !strings.EqualFold(strings.TrimSpace(order.Maker), requester) {
+				return errors.New("requester must match the order maker")
+			}
 			outcome, err := cmd.Flags().GetInt("outcome")
 			if err != nil {
 				return err
 			}
 			reason := strings.TrimSpace(mustStringFlag(cmd, "reason"))
 			eventstoreURL := strings.TrimSpace(mustStringFlag(cmd, "eventstore-url"))
-			response, err := ctx.API.CancelClobOrder(cmd.Context(), eventstoreURL, orderID, api.ClobCancelOrderRequest{
-				Market:    market,
-				Outcome:   outcome,
-				Requester: requester,
-				Reason:    reason,
-			})
+			signingDomain, err := resolveClobSigningDomain(cmd)
+			if err != nil {
+				return err
+			}
+			cancelRequest, err := buildSignedClobCancel(wallet, signingDomain, orderID, market, outcome, order.TokenSide, requester, reason)
+			if err != nil {
+				return err
+			}
+			response, err := ctx.API.CancelClobOrder(cmd.Context(), eventstoreURL, orderID, cancelRequest)
 			if err != nil {
 				return err
 			}

@@ -81,7 +81,7 @@ func TestCommandHelpSmoke(t *testing.T) {
 		{args: []string{"clob", "fills", "list", "--help"}, want: "List hosted CLOB fills for a logical proposition or wallet"},
 		{args: []string{"clob", "order", "place", "--help"}, want: "Sign and submit a hosted CLOB order for a logical CTF market"},
 		{args: []string{"clob", "order", "get", "--help"}, want: "Fetch a single hosted CLOB order by ID"},
-		{args: []string{"clob", "order", "cancel", "--help"}, want: "Cancel a hosted resting CLOB order using the requester wallet address"},
+		{args: []string{"clob", "order", "cancel", "--help"}, want: "Cancel a hosted resting CLOB order using the requester wallet signature"},
 		{args: []string{"clob", "fills", "get", "--help"}, want: "Fetch a single hosted CLOB fill by ID"},
 		{args: []string{"claim", "--help"}, want: "Claim winnings"},
 		{args: []string{"claim", "market", "--help"}, want: "Claim winnings or refunds"},
@@ -2080,13 +2080,44 @@ func newMockAPIServer(t *testing.T) (*httptest.Server, *mockAPIState) {
 			}
 			orderID := fmt.Sprintf("order-%d", len(state.clobOrders)+1)
 			price := 1
-			state.clobOrders[orderID] = api.ClobOrder{OrderID: orderID, ClobID: fmt.Sprintf("%s-%d", body.SignedOrder.Market, body.SignedOrder.Outcome), Maker: body.SignedOrder.Maker, Side: "buy", OrderType: "limit", Price: &price, Quantity: 1, Remaining: 1, TotalFilled: 0, Status: "open", EventSequence: len(state.clobOrders) + 1, CreatedAt: ptrTime(now), UpdatedAt: ptrTime(now)}
+			tokenSide := "yes"
+			if strings.Contains(strings.ToLower(body.SignedOrder.OutcomeTokenID), "02") {
+				tokenSide = "no"
+			}
+			state.clobOrders[orderID] = api.ClobOrder{OrderID: orderID, ClobID: fmt.Sprintf("%s-%d", body.SignedOrder.Market, body.SignedOrder.Outcome), Maker: body.SignedOrder.Maker, TokenSide: tokenSide, Side: "buy", OrderType: "limit", Price: &price, Quantity: 1, Remaining: 1, TotalFilled: 0, Status: "open", EventSequence: len(state.clobOrders) + 1, CreatedAt: ptrTime(now), UpdatedAt: ptrTime(now)}
 			state.mu.Unlock()
 			_ = json.NewEncoder(w).Encode(api.ClobOrderResponse{OrderID: orderID, RemainingQuantity: 1, TradeCount: 0, WasAddedToBook: true})
 		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/api/orders/"):
+			var request api.ClobCancelOrderRequest
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid request body"})
+				break
+			}
+			if strings.TrimSpace(request.Signature) == "" {
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": "signature is required"})
+				break
+			}
+			if strings.TrimSpace(request.Nonce) == "" {
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": "nonce is required"})
+				break
+			}
+			if strings.TrimSpace(request.Deadline) == "" {
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": "deadline is required"})
+				break
+			}
 			orderID := filepath.Base(r.URL.Path)
 			state.mu.Lock()
 			order := state.clobOrders[orderID]
+			if !strings.EqualFold(strings.TrimSpace(order.TokenSide), strings.TrimSpace(request.TokenSide)) {
+				state.mu.Unlock()
+				w.WriteHeader(http.StatusUnprocessableEntity)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": "token_side must match the resting order"})
+				break
+			}
 			order.Status = "cancelled"
 			order.Remaining = 0
 			order.UpdatedAt = ptrTime(now)

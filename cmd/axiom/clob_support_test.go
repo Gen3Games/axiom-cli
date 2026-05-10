@@ -2,6 +2,7 @@ package main
 
 import (
 	"math/big"
+	"strings"
 	"testing"
 	"time"
 
@@ -128,6 +129,39 @@ func TestResolveClobSigningDomainUsesHostedDefaults(t *testing.T) {
 	}
 	if domain.VerifyingContract != common.HexToAddress(evm.DefaultClobDomainContract) {
 		t.Fatalf("verifying contract = %s, want %s", domain.VerifyingContract.Hex(), evm.DefaultClobDomainContract)
+	}
+}
+
+func TestBuildSignedClobCancelIncludesSignedFields(t *testing.T) {
+	wallet, err := evm.WalletFromPrivateKeyHex("ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80")
+	if err != nil {
+		t.Fatalf("WalletFromPrivateKeyHex() error = %v", err)
+	}
+	domain := clobSigningDomain{
+		ChainID:           big.NewInt(evm.DefaultClobChainID),
+		VerifyingContract: common.HexToAddress(evm.DefaultClobDomainContract),
+	}
+	request, err := buildSignedClobCancel(wallet, domain, "order-123", "market-123", 2, "no", wallet.Address().Hex(), "cleanup")
+	if err != nil {
+		t.Fatalf("buildSignedClobCancel() error = %v", err)
+	}
+	if request.Market != "market-123" || request.Outcome != 2 || request.TokenSide != "no" {
+		t.Fatalf("request = %+v, want market/outcome/token_side preserved", request)
+	}
+	if request.Requester != wallet.Address().Hex() {
+		t.Fatalf("requester = %q, want %q", request.Requester, wallet.Address().Hex())
+	}
+	if request.Nonce == "" || request.Deadline == "" || request.Signature == "" {
+		t.Fatalf("request = %+v, want nonce/deadline/signature populated", request)
+	}
+	if request.Reason != "cleanup" {
+		t.Fatalf("reason = %q, want cleanup", request.Reason)
+	}
+	if !strings.HasPrefix(request.Signature, "0x") {
+		t.Fatalf("signature = %q, want 0x-prefixed hex", request.Signature)
+	}
+	if len(request.Signature) != 132 {
+		t.Fatalf("signature length = %d, want 132", len(request.Signature))
 	}
 }
 

@@ -235,12 +235,15 @@ func newClobSmokeCommand() *cobra.Command {
 			result["fills"] = map[string]any{"items": fills, "total": len(fills)}
 
 			if response.WasAddedToBook && response.RemainingQuantity > 0 && !mustBoolFlag(cmd, "keep-order") {
-				cancelResponse, err := ctx.API.CancelClobOrder(cmd.Context(), strings.TrimSpace(mustStringFlag(cmd, "eventstore-url")), response.OrderID, api.ClobCancelOrderRequest{
-					Market:    market.ID,
-					Outcome:   selection.Binding.OutcomeIndex,
-					Requester: primaryWallet.Address().Hex(),
-					Reason:    "clob-smoke-cleanup",
-				})
+				order, err := ctx.API.GetClobOrder(cmd.Context(), projectionURL, response.OrderID)
+				if err != nil {
+					return err
+				}
+				cancelRequest, err := buildSignedClobCancel(primaryWallet, signingDomain, response.OrderID, market.ID, selection.Binding.OutcomeIndex, order.TokenSide, primaryWallet.Address().Hex(), "clob-smoke-cleanup")
+				if err != nil {
+					return err
+				}
+				cancelResponse, err := ctx.API.CancelClobOrder(cmd.Context(), strings.TrimSpace(mustStringFlag(cmd, "eventstore-url")), response.OrderID, cancelRequest)
 				if err != nil {
 					return err
 				}

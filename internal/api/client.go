@@ -366,6 +366,7 @@ type ClobOrder struct {
 	OrderID        string     `json:"order_id"`
 	ClobID         string     `json:"clob_id"`
 	Maker          string     `json:"maker"`
+	TokenSide      string     `json:"token_side,omitempty"`
 	Side           string     `json:"side"`
 	OrderType      string     `json:"order_type"`
 	Price          *int       `json:"price"`
@@ -426,7 +427,11 @@ type ClobSignedOrderPayload struct {
 type ClobCancelOrderRequest struct {
 	Market    string `json:"market"`
 	Outcome   int    `json:"outcome"`
+	TokenSide string `json:"token_side"`
 	Requester string `json:"requester"`
+	Nonce     string `json:"nonce"`
+	Deadline  string `json:"deadline"`
+	Signature string `json:"signature"`
 	Reason    string `json:"reason,omitempty"`
 }
 

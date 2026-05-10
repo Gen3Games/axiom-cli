@@ -26,6 +26,10 @@ var (
 		"buy":  0,
 		"sell": 1,
 	}
+	clobTokenSideValue = map[string]string{
+		"yes": "yes",
+		"no":  "no",
+	}
 	clobOrderTypeValue = map[string]uint8{
 		"limit":  0,
 		"market": 1,
@@ -506,6 +510,93 @@ func buildCreateBookSignature(wallet *evm.Wallet, domain clobSigningDomain, mark
 		Message: message,
 	}
 	return wallet.SignTypedData(typedData)
+}
+
+func buildCancelNonce() string {
+	now := time.Now()
+	nonce := now.UnixMilli()*1_000_000 + int64(now.UnixNano()%1_000_000)
+	return strconv.FormatInt(nonce, 10)
+}
+
+func buildCancelDeadline(validFor time.Duration) string {
+	if validFor <= 0 {
+		validFor = 5 * time.Minute
+	}
+	return strconv.FormatInt(time.Now().Add(validFor).Unix(), 10)
+}
+
+func buildSignedClobCancel(wallet *evm.Wallet, domain clobSigningDomain, orderID string, marketID string, outcome int, tokenSide string, requester string, reason string) (api.ClobCancelOrderRequest, error) {
+	trimmedOrderID := strings.TrimSpace(orderID)
+	if trimmedOrderID == "" {
+		return api.ClobCancelOrderRequest{}, errors.New("order id is required")
+	}
+	trimmedMarketID := strings.TrimSpace(marketID)
+	if trimmedMarketID == "" {
+		return api.ClobCancelOrderRequest{}, errors.New("market id is required")
+	}
+	normalizedTokenSide, ok := clobTokenSideValue[strings.ToLower(strings.TrimSpace(tokenSide))]
+	if !ok {
+		return api.ClobCancelOrderRequest{}, errors.New("token side must be yes or no")
+	}
+	trimmedRequester := strings.TrimSpace(requester)
+	if !common.IsHexAddress(trimmedRequester) || isZeroAddress(trimmedRequester) {
+		return api.ClobCancelOrderRequest{}, errors.New("requester must be a valid non-zero 0x-prefixed address")
+	}
+	nonce := buildCancelNonce()
+	deadline := buildCancelDeadline(5 * time.Minute)
+	message := apitypes.TypedDataMessage{
+		"orderID":   trimmedOrderID,
+		"market":    trimmedMarketID,
+		"outcome":   strconv.Itoa(outcome),
+		"tokenSide": normalizedTokenSide,
+		"requester": common.HexToAddress(trimmedRequester).Hex(),
+		"nonce":     nonce,
+		"deadline":  deadline,
+	}
+	typedData := apitypes.TypedData{
+		Types: apitypes.Types{
+			"EIP712Domain": []apitypes.Type{
+				{Name: "name", Type: "string"},
+				{Name: "version", Type: "string"},
+				{Name: "chainId", Type: "uint256"},
+				{Name: "verifyingContract", Type: "address"},
+			},
+			"CancelOrder": []apitypes.Type{
+				{Name: "orderID", Type: "string"},
+				{Name: "market", Type: "string"},
+				{Name: "outcome", Type: "uint8"},
+				{Name: "tokenSide", Type: "string"},
+				{Name: "requester", Type: "address"},
+				{Name: "nonce", Type: "uint256"},
+				{Name: "deadline", Type: "uint256"},
+			},
+		},
+		PrimaryType: "CancelOrder",
+		Domain: apitypes.TypedDataDomain{
+			Name:              evm.ClobDomainName,
+			Version:           evm.ClobDomainVersion,
+			ChainId:           (*ethmath.HexOrDecimal256)(domain.ChainID),
+			VerifyingContract: domain.VerifyingContract.Hex(),
+		},
+		Message: message,
+	}
+	signature, err := wallet.SignTypedData(typedData)
+	if err != nil {
+		return api.ClobCancelOrderRequest{}, err
+	}
+	request := api.ClobCancelOrderRequest{
+		Market:    trimmedMarketID,
+		Outcome:   outcome,
+		TokenSide: normalizedTokenSide,
+		Requester: common.HexToAddress(trimmedRequester).Hex(),
+		Nonce:     nonce,
+		Deadline:  deadline,
+		Signature: signature,
+	}
+	if trimmedReason := strings.TrimSpace(reason); trimmedReason != "" {
+		request.Reason = trimmedReason
+	}
+	return request, nil
 }
 
 func normalizeLogicalKey(label string, fallback string) string {
