@@ -103,6 +103,96 @@ type UploadMetadataResponse struct {
 	Error         string `json:"error"`
 }
 
+type RegisterClobMarketDisplayOutcome struct {
+	Key         string `json:"key"`
+	Label       string `json:"label"`
+	Description string `json:"description,omitempty"`
+}
+
+type RegisterClobMarketMetadata struct {
+	Name               string                             `json:"name"`
+	Headline           string                             `json:"headline,omitempty"`
+	Description        string                             `json:"description,omitempty"`
+	Category           string                             `json:"category"`
+	Tags               []string                           `json:"tags,omitempty"`
+	MarketType         string                             `json:"marketType"`
+	ResolutionCriteria string                             `json:"resolutionCriteria,omitempty"`
+	StartsAt           string                             `json:"startsAt"`
+	EndsAt             string                             `json:"endsAt"`
+	ResolveBy          string                             `json:"resolveBy,omitempty"`
+	DisplayOutcomes    []RegisterClobMarketDisplayOutcome `json:"displayOutcomes,omitempty"`
+}
+
+type RegisterClobBookSignature struct {
+	Address      string `json:"address,omitempty"`
+	OutcomeIndex int    `json:"outcomeIndex"`
+	TokenSide    string `json:"tokenSide,omitempty"`
+	Signature    string `json:"signature"`
+}
+
+type RegisterClobMarketRequest struct {
+	MarketID       string                      `json:"marketId"`
+	Network        string                      `json:"network"`
+	ChainID        int                         `json:"chainId"`
+	RPCURL         string                      `json:"rpcUrl"`
+	Addresses      []string                    `json:"addresses"`
+	IsVisible      bool                        `json:"isVisible,omitempty"`
+	AllowUnindexed bool                        `json:"allowUnindexed,omitempty"`
+	Metadata       RegisterClobMarketMetadata  `json:"metadata"`
+	Message        string                      `json:"message"`
+	Signature      string                      `json:"signature"`
+	BookSignatures []RegisterClobBookSignature `json:"bookSignatures,omitempty"`
+}
+
+type RegisteredClobContract struct {
+	ContractAddress string   `json:"contractAddress"`
+	OutcomeIndex    int      `json:"outcomeIndex"`
+	OutcomeLabel    string   `json:"outcomeLabel"`
+	OutcomeTokenIDs []string `json:"outcomeTokenIds"`
+	ConditionID     string   `json:"conditionId"`
+	QuestionID      string   `json:"questionId"`
+	MetadataURI     string   `json:"metadataUri"`
+	DeploymentID    string   `json:"deploymentId"`
+	Creator         string   `json:"creator"`
+}
+
+type RegisterClobMarketResponse struct {
+	Success             bool                     `json:"success"`
+	MarketID            string                   `json:"marketId"`
+	SignerAddress       string                   `json:"signerAddress"`
+	RegisteredContracts []RegisteredClobContract `json:"registeredContracts"`
+	BooksCreated        int                      `json:"booksCreated"`
+	BooksTotal          int                      `json:"booksTotal"`
+	Warnings            []string                 `json:"warnings"`
+	Error               string                   `json:"error"`
+}
+
+type ResolveClobMarketRequest struct {
+	MarketID            string   `json:"marketId"`
+	Network             string   `json:"network"`
+	RPCURL              string   `json:"rpcUrl"`
+	WalletAddress       string   `json:"walletAddress"`
+	WinningOutcomeIndex int      `json:"winningOutcomeIndex"`
+	ResolutionTxHashes  []string `json:"resolutionTxHashes,omitempty"`
+	Reason              string   `json:"reason,omitempty"`
+	Message             string   `json:"message"`
+	Signature           string   `json:"signature"`
+}
+
+type ResolveClobMarketResponse struct {
+	Success             bool     `json:"success"`
+	MarketID            string   `json:"marketId"`
+	SignerAddress       string   `json:"signerAddress"`
+	ResolvedOutcomeID   string   `json:"resolvedOutcomeId"`
+	ResolvedOutcomeLabel string  `json:"resolvedOutcomeLabel"`
+	WinningOutcomeIndex int      `json:"winningOutcomeIndex"`
+	BooksClosed         int      `json:"booksClosed"`
+	BooksTotal          int      `json:"booksTotal"`
+	AlreadyResolved     bool     `json:"alreadyResolved,omitempty"`
+	Warnings            []string `json:"warnings,omitempty"`
+	Error               string   `json:"error"`
+}
+
 type RegisterRequest struct {
 	WalletAddress string `json:"walletAddress"`
 	Signature     string `json:"signature"`
@@ -338,6 +428,17 @@ type ClobCancelOrderRequest struct {
 	Outcome   int    `json:"outcome"`
 	Requester string `json:"requester"`
 	Reason    string `json:"reason,omitempty"`
+}
+
+type ClobCloseBookRequest struct {
+	Requester string `json:"requester,omitempty"`
+	Reason    string `json:"reason,omitempty"`
+	TokenSide string `json:"token_side,omitempty"`
+}
+
+type ClobBookLifecycleResponse struct {
+	Status  string `json:"status"`
+	Message string `json:"message"`
 }
 
 func (p *ProfileSummary) UnmarshalJSON(data []byte) error {
@@ -797,6 +898,34 @@ func (c *Client) UploadMarketMetadata(ctx context.Context, request UploadMetadat
 	return &out, nil
 }
 
+func (c *Client) RegisterClobMarket(ctx context.Context, request RegisterClobMarketRequest) (*RegisterClobMarketResponse, error) {
+	var out RegisterClobMarketResponse
+	if err := c.doJSONFromAppRoot(ctx, http.MethodPost, "api/markets/register-clob-market", request, &out); err != nil {
+		return nil, err
+	}
+	if !out.Success {
+		if strings.TrimSpace(out.Error) != "" {
+			return nil, fmt.Errorf("api error: %s", out.Error)
+		}
+		return nil, fmt.Errorf("api error: failed to register logical CLOB market")
+	}
+	return &out, nil
+}
+
+func (c *Client) ResolveClobMarket(ctx context.Context, request ResolveClobMarketRequest) (*ResolveClobMarketResponse, error) {
+	var out ResolveClobMarketResponse
+	if err := c.doJSONFromAppRoot(ctx, http.MethodPost, "api/markets/resolve-clob-market", request, &out); err != nil {
+		return nil, err
+	}
+	if !out.Success {
+		if strings.TrimSpace(out.Error) != "" {
+			return nil, fmt.Errorf("api error: %s", out.Error)
+		}
+		return nil, fmt.Errorf("api error: failed to resolve logical CLOB market")
+	}
+	return &out, nil
+}
+
 func (c *Client) RegisterWallet(ctx context.Context, request RegisterRequest) (*RegisterResponse, error) {
 	var out RegisterResponse
 	if err := c.doJSON(ctx, http.MethodPost, "register", request, &out); err != nil {
@@ -1005,6 +1134,19 @@ func (c *Client) CancelClobOrder(ctx context.Context, eventstoreBaseURL string, 
 	return &out, nil
 }
 
+func (c *Client) CloseClobBook(ctx context.Context, eventstoreBaseURL string, marketID string, outcome int, tokenSide string, adminToken string, request ClobCloseBookRequest) (*ClobBookLifecycleResponse, error) {
+	requestPath := fmt.Sprintf("books/%s/%d/close?token_side=%s", url.PathEscape(marketID), outcome, url.QueryEscape(tokenSide))
+	endpoint, host, err := buildURLAgainstBase(eventstoreBaseURL, requestPath)
+	if err != nil {
+		return nil, fmt.Errorf("build request url: %w", err)
+	}
+	var out ClobBookLifecycleResponse
+	if err := c.doJSONEndpointWithHeaders(ctx, http.MethodPost, endpoint, request, &out, host, map[string]string{"X-Admin-Token": strings.TrimSpace(adminToken)}); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 func (c *Client) GetRewards(ctx context.Context, address string) (*RewardsResponse, error) {
 	var out RewardsResponse
 	if err := c.doJSON(ctx, http.MethodGet, path.Join("profile", address, "rewards"), nil, &out); err != nil {
@@ -1062,6 +1204,10 @@ func (c *Client) doJSONAgainstBase(ctx context.Context, method string, baseURL s
 }
 
 func (c *Client) doJSONEndpoint(ctx context.Context, method string, endpoint *url.URL, body any, out any, host string) error {
+	return c.doJSONEndpointWithHeaders(ctx, method, endpoint, body, out, host, nil)
+}
+
+func (c *Client) doJSONEndpointWithHeaders(ctx context.Context, method string, endpoint *url.URL, body any, out any, host string, extraHeaders map[string]string) error {
 
 	var reader io.Reader
 	if body != nil {
@@ -1080,6 +1226,12 @@ func (c *Client) doJSONEndpoint(ctx context.Context, method string, endpoint *ur
 	req.Header.Set("User-Agent", "axiom-cli/1.0")
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	for key, value := range extraHeaders {
+		if strings.TrimSpace(value) == "" {
+			continue
+		}
+		req.Header.Set(key, value)
 	}
 	if c.deviceID != "" {
 		req.Header.Set("X-Axiom-CLI-Device", c.deviceID)

@@ -17,6 +17,7 @@ const (
 	ClobDomainName                     = "Axiom CLOB"
 	ClobDomainVersion                  = "1"
 	DefaultClobChainID           int64 = 1440000
+	DefaultClobDomainContract          = "0xa232ACB932b4E745f6ee2aaC1E2707ae0E1055c5"
 	DefaultClobExchangeAddress         = "0xCd9522eeB541ef44722b73a9bf104CED3A2347B2"
 	DefaultClobConditionalTokens       = "0x43e3fa6De5D87dd7265053FA55601d1972984edA"
 	DefaultClobCollateralToken         = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"

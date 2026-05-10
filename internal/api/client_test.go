@@ -316,6 +316,81 @@ func TestUploadMarketMetadataUsesAppRootEndpoint(t *testing.T) {
 	}
 }
 
+func TestRegisterClobMarketUsesAppRootEndpoint(t *testing.T) {
+	t.Parallel()
+
+	var gotPath string
+	var gotRequest RegisterClobMarketRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.RequestURI()
+		if err := json.NewDecoder(r.Body).Decode(&gotRequest); err != nil {
+			t.Fatalf("Decode(register-clob body) error = %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(RegisterClobMarketResponse{
+			Success:       true,
+			MarketID:      gotRequest.MarketID,
+			SignerAddress: "0x00000000000000000000000000000000000000A1",
+			RegisteredContracts: []RegisteredClobContract{{
+				ContractAddress: "0x00000000000000000000000000000000000000C1",
+				OutcomeIndex:    0,
+				OutcomeLabel:    "Yes",
+				OutcomeTokenIDs: []string{"101", "102"},
+			}},
+			BooksCreated: 2,
+			BooksTotal:   2,
+		})
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL+"/api/cli", "device-123")
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	response, err := client.RegisterClobMarket(context.Background(), RegisterClobMarketRequest{
+		MarketID:       "logical-market-1",
+		Network:        "xrpl-mainnet",
+		ChainID:        1440000,
+		RPCURL:         "https://rpc.xrplevm.org",
+		Addresses:      []string{"0x00000000000000000000000000000000000000C1"},
+		IsVisible:      true,
+		AllowUnindexed: true,
+		Metadata: RegisterClobMarketMetadata{
+			Name:       "Logical Market",
+			Category:   "crypto",
+			MarketType: "yes_no",
+			StartsAt:   "2026-01-01T00:00:00Z",
+			EndsAt:     "2026-01-02T00:00:00Z",
+			DisplayOutcomes: []RegisterClobMarketDisplayOutcome{
+				{Key: "yes", Label: "Yes"},
+				{Key: "no", Label: "No"},
+			},
+		},
+		Message:   "signed register-clob-market message",
+		Signature: "0xabc",
+		BookSignatures: []RegisterClobBookSignature{{
+			OutcomeIndex: 0,
+			Signature:    "0xdef",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("RegisterClobMarket() error = %v", err)
+	}
+	if gotPath != "/api/markets/register-clob-market" {
+		t.Fatalf("request path = %q, want %q", gotPath, "/api/markets/register-clob-market")
+	}
+	if gotRequest.MarketID != "logical-market-1" {
+		t.Fatalf("request marketId = %q, want logical payload", gotRequest.MarketID)
+	}
+	if len(gotRequest.BookSignatures) != 1 || gotRequest.BookSignatures[0].Signature != "0xdef" {
+		t.Fatalf("request bookSignatures = %+v, want preserved signatures", gotRequest.BookSignatures)
+	}
+	if response.MarketID != "logical-market-1" || response.BooksCreated != 2 {
+		t.Fatalf("response = %+v, want logical registration payload", response)
+	}
+}
+
 func TestGetClobDepthUsesHostedProjectionBase(t *testing.T) {
 	t.Parallel()
 
@@ -582,6 +657,107 @@ func TestCancelClobOrderUsesHostedEventstoreBase(t *testing.T) {
 	}
 	if response.OrderID != "order-1" || response.RemainingQuantity != 0 {
 		t.Fatalf("response = %+v, want cancelled order response payload", response)
+	}
+}
+
+func TestCloseClobBookUsesHostedEventstoreBase(t *testing.T) {
+	t.Parallel()
+
+	var gotMethod string
+	var gotPath string
+	var gotAdminToken string
+	var gotRequest ClobCloseBookRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.RequestURI()
+		gotAdminToken = r.Header.Get("X-Admin-Token")
+		if err := json.NewDecoder(r.Body).Decode(&gotRequest); err != nil {
+			t.Fatalf("Decode(request body) error = %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(ClobBookLifecycleResponse{Status: "closed", Message: "book closed"})
+	}))
+	defer server.Close()
+
+	client, err := NewClient("https://example.com/api/cli", "device-123")
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	response, err := client.CloseClobBook(context.Background(), server.URL+"/api", "market-123", 2, "no", "admin-token", ClobCloseBookRequest{Requester: "0xabc", Reason: "resolved", TokenSide: "no"})
+	if err != nil {
+		t.Fatalf("CloseClobBook() error = %v", err)
+	}
+	if gotMethod != http.MethodPost {
+		t.Fatalf("method = %q, want %q", gotMethod, http.MethodPost)
+	}
+	if gotPath != "/api/books/market-123/2/close?token_side=no" {
+		t.Fatalf("request path = %q, want %q", gotPath, "/api/books/market-123/2/close?token_side=no")
+	}
+	if gotAdminToken != "admin-token" {
+		t.Fatalf("X-Admin-Token = %q, want %q", gotAdminToken, "admin-token")
+	}
+	if gotRequest.Reason != "resolved" || gotRequest.TokenSide != "no" {
+		t.Fatalf("request = %+v, want close-book payload preserved", gotRequest)
+	}
+	if response.Status != "closed" {
+		t.Fatalf("response = %+v, want closed status", response)
+	}
+}
+
+func TestResolveClobMarketUsesAppRootRoute(t *testing.T) {
+	t.Parallel()
+
+	var gotMethod string
+	var gotPath string
+	var gotRequest ResolveClobMarketRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		if err := json.NewDecoder(r.Body).Decode(&gotRequest); err != nil {
+			t.Fatalf("Decode(request body) error = %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(ResolveClobMarketResponse{
+			Success:              true,
+			MarketID:             "market-123",
+			SignerAddress:        "0xabc",
+			ResolvedOutcomeID:    "market-123-yes",
+			ResolvedOutcomeLabel: "Yes",
+			WinningOutcomeIndex:  0,
+		})
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL+"/api/cli", "device-123")
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	response, err := client.ResolveClobMarket(context.Background(), ResolveClobMarketRequest{
+		MarketID:            "market-123",
+		Network:             "xrpl-mainnet",
+		RPCURL:              "https://rpc.xrplevm.org",
+		WalletAddress:       "0xabc",
+		WinningOutcomeIndex: 0,
+		ResolutionTxHashes:  []string{"0x1"},
+		Message:             "signed resolve message",
+		Signature:           "0xsig",
+	})
+	if err != nil {
+		t.Fatalf("ResolveClobMarket() error = %v", err)
+	}
+	if gotMethod != http.MethodPost {
+		t.Fatalf("method = %q, want %q", gotMethod, http.MethodPost)
+	}
+	if gotPath != "/api/markets/resolve-clob-market" {
+		t.Fatalf("request path = %q, want %q", gotPath, "/api/markets/resolve-clob-market")
+	}
+	if gotRequest.WinningOutcomeIndex != 0 || gotRequest.MarketID != "market-123" {
+		t.Fatalf("request = %+v, want resolve payload preserved", gotRequest)
+	}
+	if response.ResolvedOutcomeID != "market-123-yes" {
+		t.Fatalf("response = %+v, want resolved outcome id", response)
 	}
 }
 

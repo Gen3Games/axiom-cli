@@ -98,6 +98,10 @@ func newClobSmokeCommand() *cobra.Command {
 					return err
 				}
 			}
+			signingDomain, err := resolveClobSigningDomain(cmd)
+			if err != nil {
+				return err
+			}
 
 			payload, err := buildClobSignedOrder(
 				primaryWallet,
@@ -108,7 +112,7 @@ func newClobSmokeCommand() *cobra.Command {
 				priceBps,
 				quantity,
 				mustStringFlag(cmd, "expiry"),
-				big.NewInt(xrplEVMChainID),
+				signingDomain,
 			)
 			if err != nil {
 				return err

@@ -32,34 +32,35 @@ const defaultClobProjectionURL = "https://clob.axiomprotocol.io"
 const defaultClobEventstoreURL = "https://clob.axiomprotocol.io/api"
 
 var (
-	flagAPIURL               string
-	flagConsoleAPIURL        string
-	flagRPCURL               string
-	flagXRPLURL              string
-	flagJSON                 bool
-	flagProfile              string
-	getEVMBalance            = evm.GetBalance
-	getXRPLBalance           = axrpl.GetBalance
-	loadMarketState          = evm.LoadMarketState
-	quoteBuy                 = evm.QuoteBuy
-	buyPosition              = evm.BuyPosition
-	claimEpochRewards        = evm.ClaimRewards
-	claimSingleMarket        = evm.ClaimMarket
-	batchClaimMarkets        = evm.BatchClaim
-	waitForTxReceipt         = waitForReceipt
-	submitBridgePayment      = axrpl.SubmitBridgePayment
-	getERC20Balance          = evm.GetERC20Balance
-	getERC20Allowance        = evm.GetERC20Allowance
-	approveERC20             = evm.ApproveERC20
-	getERC1155Balance        = evm.GetERC1155Balance
-	isERC1155ApprovedForAll  = evm.IsERC1155ApprovedForAll
-	setERC1155ApprovalForAll = evm.SetERC1155ApprovalForAll
-	loadCTFMarketMetadata    = evm.LoadCTFMarketMetadata
-	redeemCTFMarket          = evm.RedeemCTFMarket
-	splitPosition            = evm.SplitPosition
-	mergePositions           = evm.MergePositions
-	createAxiomCTFMarket     = evm.CreateAxiomCTFMarket
-	resolveCTFMarket         = evm.ResolveCTFMarket
+	flagAPIURL                  string
+	flagConsoleAPIURL           string
+	flagRPCURL                  string
+	flagXRPLURL                 string
+	flagJSON                    bool
+	flagProfile                 string
+	getEVMBalance               = evm.GetBalance
+	getXRPLBalance              = axrpl.GetBalance
+	loadMarketState             = evm.LoadMarketState
+	quoteBuy                    = evm.QuoteBuy
+	buyPosition                 = evm.BuyPosition
+	claimEpochRewards           = evm.ClaimRewards
+	claimSingleMarket           = evm.ClaimMarket
+	batchClaimMarkets           = evm.BatchClaim
+	waitForTxReceipt            = waitForReceipt
+	submitBridgePayment         = axrpl.SubmitBridgePayment
+	getERC20Balance             = evm.GetERC20Balance
+	getERC20Allowance           = evm.GetERC20Allowance
+	approveERC20                = evm.ApproveERC20
+	getERC1155Balance           = evm.GetERC1155Balance
+	isERC1155ApprovedForAll     = evm.IsERC1155ApprovedForAll
+	setERC1155ApprovalForAll    = evm.SetERC1155ApprovalForAll
+	loadCTFMarketMetadata       = evm.LoadCTFMarketMetadata
+	redeemCTFMarket             = evm.RedeemCTFMarket
+	splitPosition               = evm.SplitPosition
+	mergePositions              = evm.MergePositions
+	createAxiomCTFMarket        = evm.CreateAxiomCTFMarket
+	launchAxiomCTFLogicalMarket = evm.LaunchAxiomCTFLogicalMarket
+	resolveCTFMarket            = evm.ResolveCTFMarket
 )
 
 type cliContext struct {
@@ -687,6 +688,9 @@ func newProfileCommand() *cobra.Command {
 			ctx, err := buildCLIContext()
 			if err != nil {
 				return err
+			}
+			if mustBoolFlag(cmd, "visible") && mustBoolFlag(cmd, "hidden") {
+				return errors.New("--visible and --hidden are mutually exclusive")
 			}
 			wallet, _, err := requireEVMWalletWithKey(ctx)
 			if err != nil {
@@ -1489,7 +1493,9 @@ func newClobCommand() *cobra.Command {
 	cmd.PersistentFlags().String("projection-url", firstNonEmpty(os.Getenv("AXIOM_CLOB_PROJECTION_URL"), os.Getenv("CLOB_PROJECTION_URL"), defaultClobProjectionURL), "Override the hosted CLOB projection base URL")
 	cmd.PersistentFlags().String("eventstore-url", firstNonEmpty(os.Getenv("AXIOM_CLOB_EVENTSTORE_URL"), os.Getenv("CLOB_EVENTSTORE_URL"), defaultClobEventstoreURL), "Override the hosted CLOB eventstore base URL")
 	cmd.PersistentFlags().String("factory-address", "", "Override the MarketFactory address used for binary CTF market deployment; otherwise load the canonical xrpl-mainnet address from the console API")
-	cmd.PersistentFlags().String("exchange-address", evm.DefaultClobExchangeAddress, "Override the on-chain AxiomCTFExchange address used for signing and approvals")
+	cmd.PersistentFlags().String("exchange-address", evm.DefaultClobExchangeAddress, "Override the on-chain AxiomCTFExchange address used for approvals and settlement prep")
+	cmd.PersistentFlags().String("clob-domain-contract", firstNonEmpty(os.Getenv("AXIOM_CLOB_DOMAIN_CONTRACT"), evm.DefaultClobDomainContract), "Override the hosted CLOB EIP-712 verifying contract used for order/CreateBook signing")
+	cmd.PersistentFlags().String("clob-chain-id", firstNonEmpty(os.Getenv("AXIOM_CLOB_CHAIN_ID"), strconv.FormatInt(evm.DefaultClobChainID, 10)), "Override the hosted CLOB EIP-712 chain ID used for order/CreateBook signing")
 	cmd.PersistentFlags().String("outcome-token-address", evm.DefaultClobConditionalTokens, "Override the on-chain AxiomConditionalTokens address used for balances and approvals")
 
 	marketCmd := &cobra.Command{Use: "market", Short: "Deploy and manage on-chain binary AxiomCTFMarket contracts"}
@@ -1653,6 +1659,378 @@ func newClobCommand() *cobra.Command {
 	marketResolveCmd.Flags().Bool("wait", false, "Wait for the resolve transaction receipt")
 	marketCmd.AddCommand(marketResolveCmd)
 	cmd.AddCommand(marketCmd)
+
+	logicalCmd := &cobra.Command{Use: "logical", Short: "Register or atomically create logical hosted CLOB markets"}
+	logicalRegisterCmd := &cobra.Command{
+		Use:   "register",
+		Short: "Register existing binary AxiomCTFMarket contracts as one logical hosted CLOB market",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+			wallet, _, err := requireEVMWalletWithKey(ctx)
+			if err != nil {
+				return err
+			}
+			plan, err := buildLogicalMarketPlan(cmd)
+			if err != nil {
+				return err
+			}
+			addresses, err := collectLogicalMarketAddresses(cmd)
+			if err != nil {
+				return err
+			}
+			if err := validateLogicalRegisterAddresses(plan, addresses); err != nil {
+				return err
+			}
+			signingDomain, err := resolveClobSigningDomain(cmd)
+			if err != nil {
+				return err
+			}
+			bookSignatures, err := buildLogicalBookSignatures(wallet, signingDomain, plan.MarketID, addresses)
+			if err != nil {
+				return err
+			}
+			request, err := buildLogicalRegisterRequest(
+				wallet,
+				strings.TrimSpace(mustStringFlag(cmd, "network")),
+				xrplEVMChainID,
+				ctx.Config.EVMRPCURL,
+				plan,
+				addresses,
+				mustBoolFlag(cmd, "visible") && !mustBoolFlag(cmd, "hidden"),
+				mustBoolFlag(cmd, "allow-unindexed"),
+				bookSignatures,
+			)
+			if err != nil {
+				return err
+			}
+			if mustBoolFlag(cmd, "dry-run") {
+				return printOutput(ctx.JSON, map[string]any{
+					"dryRun":           true,
+					"marketId":         request.MarketID,
+					"network":          request.Network,
+					"addresses":        request.Addresses,
+					"metadata":         request.Metadata,
+					"bookSignatures":   request.BookSignatures,
+					"message":          request.Message,
+					"signaturePresent": request.Signature != "",
+				})
+			}
+			response, err := ctx.ConsoleAPI.RegisterClobMarket(cmd.Context(), request)
+			if err != nil {
+				return err
+			}
+			return printOutput(ctx.JSON, map[string]any{
+				"mode":                "register",
+				"marketId":            response.MarketID,
+				"signerAddress":       response.SignerAddress,
+				"registeredContracts": response.RegisteredContracts,
+				"booksCreated":        response.BooksCreated,
+				"booksTotal":          response.BooksTotal,
+				"warnings":            response.Warnings,
+			})
+		},
+	}
+	logicalRegisterCmd.Flags().String("market-id", "", "Logical market ID to persist; autogenerated when omitted")
+	logicalRegisterCmd.Flags().String("network", "xrpl-mainnet", "Network identifier used for canonical contracts and registration")
+	logicalRegisterCmd.Flags().String("market-type", "yes_no", "Logical market type: yes_no or multiple_choice")
+	logicalRegisterCmd.Flags().String("name", "", "Logical market title")
+	logicalRegisterCmd.Flags().String("headline", "", "Optional logical market headline")
+	logicalRegisterCmd.Flags().String("description", "", "Logical market description")
+	logicalRegisterCmd.Flags().String("category", "", "Logical market category")
+	logicalRegisterCmd.Flags().StringSlice("tag", nil, "Metadata tag to include; repeatable")
+	logicalRegisterCmd.Flags().String("resolution-criteria", "", "Logical market resolution criteria")
+	logicalRegisterCmd.Flags().String("starts-at", "", "Logical market start time in RFC3339")
+	logicalRegisterCmd.Flags().String("ends-at", "", "Logical market end time in RFC3339")
+	logicalRegisterCmd.Flags().String("resolve-by", "", "Optional resolve-by time in RFC3339; defaults to ends-at")
+	logicalRegisterCmd.Flags().String("yes-label", "Yes", "Displayed YES label for yes_no logical markets")
+	logicalRegisterCmd.Flags().String("yes-description", "", "Displayed YES description for yes_no logical markets")
+	logicalRegisterCmd.Flags().String("no-label", "No", "Displayed NO label for yes_no logical markets")
+	logicalRegisterCmd.Flags().String("no-description", "", "Displayed NO description for yes_no logical markets")
+	logicalRegisterCmd.Flags().StringSlice("outcome-label", nil, "Displayed outcome label for multiple_choice markets; repeatable")
+	logicalRegisterCmd.Flags().StringSlice("address", nil, "Binary AxiomCTFMarket address to bind; repeatable")
+	logicalRegisterCmd.Flags().Bool("visible", false, "Persist the logical market as visible to the webapp feed")
+	logicalRegisterCmd.Flags().Bool("hidden", false, "Persist the logical market as hidden from the webapp feed")
+	logicalRegisterCmd.Flags().Bool("allow-unindexed", false, "Allow registration before the indexer discovers all binary contracts")
+	logicalRegisterCmd.Flags().Bool("dry-run", false, "Build the registration payload locally without submitting it")
+	logicalCmd.AddCommand(logicalRegisterCmd)
+
+	logicalCreateCmd := &cobra.Command{
+		Use:   "create",
+		Short: "Upload per-outcome metadata, launch grouped binary markets, and register them as one logical hosted CLOB market",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+			if mustBoolFlag(cmd, "visible") && mustBoolFlag(cmd, "hidden") {
+				return errors.New("--visible and --hidden are mutually exclusive")
+			}
+			wallet, privateKeyHex, err := requireEVMWalletWithKey(ctx)
+			if err != nil {
+				return err
+			}
+			plan, err := buildLogicalMarketPlan(cmd)
+			if err != nil {
+				return err
+			}
+			network := strings.TrimSpace(mustStringFlag(cmd, "network"))
+			if network == "" {
+				network = "xrpl-mainnet"
+			}
+			if err := uploadLogicalLaunchMetadata(cmd.Context(), ctx, wallet, network, mustBoolFlag(cmd, "dry-run"), plan); err != nil {
+				return err
+			}
+			addresses, err := ctx.ConsoleAPI.GetMarketContractAddresses(cmd.Context(), network)
+			if err != nil {
+				return fmt.Errorf("load canonical launcher addresses: %w", err)
+			}
+			if addresses == nil || !common.IsHexAddress(strings.TrimSpace(addresses.CTFLauncher)) || isZeroAddress(addresses.CTFLauncher) {
+				return errors.New("canonical AxiomCTFMarketLauncher address is unavailable; pass a console API with launcher support")
+			}
+			conditionalTokens := strings.TrimSpace(addresses.ConditionalTokens)
+			if !common.IsHexAddress(conditionalTokens) || isZeroAddress(conditionalTokens) {
+				conditionalTokens = evm.DefaultClobConditionalTokens
+			}
+			launchParams := evm.LaunchAxiomCTFLogicalMarketParams{
+				LauncherAddress:   common.HexToAddress(addresses.CTFLauncher),
+				Creator:           wallet.Address(),
+				CollateralToken:   resolveHexAddressOrDefault(mustStringFlag(cmd, "collateral-token"), evm.DefaultClobCollateralToken),
+				ConditionalTokens: common.HexToAddress(conditionalTokens),
+				TradingOpen:       uint64(plan.StartsAt.Unix()),
+				TradingClose:      uint64(plan.EndsAt.Unix()),
+				LogicalMarketID:   plan.LogicalMarketIDHash,
+				Outcomes:          make([]evm.LaunchAxiomCTFMarketOutcome, 0, len(plan.LaunchOutcomes)),
+			}
+			for _, outcome := range plan.LaunchOutcomes {
+				launchParams.Outcomes = append(launchParams.Outcomes, evm.LaunchAxiomCTFMarketOutcome{
+					Label:       outcome.Label,
+					MetadataURI: outcome.MetadataURI,
+					QuestionID:  outcome.QuestionID,
+				})
+			}
+			if mustBoolFlag(cmd, "dry-run") {
+				return printOutput(ctx.JSON, map[string]any{
+					"dryRun":          true,
+					"mode":            "create",
+					"network":         network,
+					"marketId":        plan.MarketID,
+					"logicalMarketId": plan.LogicalMarketIDHash.Hex(),
+					"launchParams": map[string]any{
+						"launcherAddress":   launchParams.LauncherAddress.Hex(),
+						"creator":           launchParams.Creator.Hex(),
+						"collateralToken":   launchParams.CollateralToken.Hex(),
+						"conditionalTokens": launchParams.ConditionalTokens.Hex(),
+						"tradingOpen":       launchParams.TradingOpen,
+						"tradingClose":      launchParams.TradingClose,
+						"outcomes":          plan.LaunchOutcomes,
+					},
+				})
+			}
+			launchResult, err := launchAxiomCTFLogicalMarket(cmd.Context(), ctx.Config.EVMRPCURL, big.NewInt(xrplEVMChainID), privateKeyHex, launchParams)
+			if err != nil {
+				return err
+			}
+			launchedAddresses := make([]common.Address, 0, len(launchResult.LaunchedMarkets))
+			for _, market := range launchResult.LaunchedMarkets {
+				launchedAddresses = append(launchedAddresses, market.MarketAddress)
+			}
+			signingDomain, err := resolveClobSigningDomain(cmd)
+			if err != nil {
+				return err
+			}
+			bookSignatures, err := buildLogicalBookSignatures(wallet, signingDomain, plan.MarketID, launchedAddresses)
+			if err != nil {
+				return err
+			}
+			registerRequest, err := buildLogicalRegisterRequest(
+				wallet,
+				network,
+				xrplEVMChainID,
+				ctx.Config.EVMRPCURL,
+				plan,
+				launchedAddresses,
+				mustBoolFlag(cmd, "visible") && !mustBoolFlag(cmd, "hidden"),
+				true,
+				bookSignatures,
+			)
+			if err != nil {
+				return err
+			}
+			registerRequest.AllowUnindexed = true
+			response, err := ctx.ConsoleAPI.RegisterClobMarket(cmd.Context(), registerRequest)
+			if err != nil {
+				return err
+			}
+			return printOutput(ctx.JSON, map[string]any{
+				"mode":              "create",
+				"marketId":          response.MarketID,
+				"logicalMarketId":   plan.LogicalMarketIDHash.Hex(),
+				"launcherAddress":   launchParams.LauncherAddress.Hex(),
+				"launchTxHash":      launchResult.TxHash.Hex(),
+				"blockNumber":       launchResult.BlockNumber,
+				"launchedContracts": response.RegisteredContracts,
+				"booksCreated":      response.BooksCreated,
+				"booksTotal":        response.BooksTotal,
+				"warnings":          response.Warnings,
+			})
+		},
+	}
+	logicalCreateCmd.Flags().String("market-id", "", "Logical market ID to persist; autogenerated when omitted")
+	logicalCreateCmd.Flags().String("network", "xrpl-mainnet", "Network identifier used for canonical contracts and registration")
+	logicalCreateCmd.Flags().String("market-type", "yes_no", "Logical market type: yes_no or multiple_choice")
+	logicalCreateCmd.Flags().String("name", "", "Logical market title")
+	logicalCreateCmd.Flags().String("headline", "", "Optional logical market headline")
+	logicalCreateCmd.Flags().String("description", "", "Logical market description")
+	logicalCreateCmd.Flags().String("category", "", "Logical market category")
+	logicalCreateCmd.Flags().StringSlice("tag", nil, "Metadata tag to include; repeatable")
+	logicalCreateCmd.Flags().String("resolution-criteria", "", "Logical market resolution criteria")
+	logicalCreateCmd.Flags().String("starts-at", "", "Logical market start time in RFC3339")
+	logicalCreateCmd.Flags().String("ends-at", "", "Logical market end time in RFC3339")
+	logicalCreateCmd.Flags().String("resolve-by", "", "Optional resolve-by time in RFC3339; defaults to ends-at")
+	logicalCreateCmd.Flags().String("yes-label", "Yes", "Displayed YES label for yes_no logical markets")
+	logicalCreateCmd.Flags().String("yes-description", "", "Displayed YES description for yes_no logical markets")
+	logicalCreateCmd.Flags().String("no-label", "No", "Displayed NO label for yes_no logical markets")
+	logicalCreateCmd.Flags().String("no-description", "", "Displayed NO description for yes_no logical markets")
+	logicalCreateCmd.Flags().StringSlice("outcome-label", nil, "Displayed outcome label for multiple_choice markets; repeatable")
+	logicalCreateCmd.Flags().String("collateral-token", evm.DefaultClobCollateralToken, "Collateral ERC-20 token address for the launched binary markets")
+	logicalCreateCmd.Flags().Bool("visible", false, "Persist the logical market as visible to the webapp feed")
+	logicalCreateCmd.Flags().Bool("hidden", false, "Persist the logical market as hidden from the webapp feed")
+	logicalCreateCmd.Flags().Bool("allow-unindexed", true, "Ignored for now; logical create always registers with allowUnindexed=true to tolerate indexer lag")
+	logicalCreateCmd.Flags().Bool("dry-run", false, "Build metadata and launch/register payloads locally without submitting them")
+	logicalCmd.AddCommand(logicalCreateCmd)
+
+	logicalResolveCmd := &cobra.Command{
+		Use:   "resolve",
+		Short: "Resolve a logical hosted CLOB market, close its offchain books, and mark the logical market resolved",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+			wallet, privateKeyHex, err := requireEVMWalletWithKey(ctx)
+			if err != nil {
+				return err
+			}
+
+			marketRef := strings.TrimSpace(mustStringFlag(cmd, "market"))
+			if marketRef == "" {
+				return errors.New("--market is required")
+			}
+			market, err := loadMarketWithClobFallback(cmd.Context(), ctx, marketRef, mustStringFlag(cmd, "instance-date"))
+			if err != nil {
+				return err
+			}
+			if !isClobMarketImplementation(market.MarketImplementation) {
+				return errors.New("logical resolve requires an AxiomCTFMarket logical market")
+			}
+			if market.IsResolved {
+				return errors.New("logical market is already resolved")
+			}
+
+			winningOutcomeIndex, err := resolveOutcomeIndex(market, mustStringFlag(cmd, "outcome"), mustStringFlag(cmd, "label"))
+			if err != nil {
+				return err
+			}
+
+			resolutionPlan, err := buildLogicalResolutionPlan(market, winningOutcomeIndex)
+			if err != nil {
+				return err
+			}
+
+			network := strings.TrimSpace(mustStringFlag(cmd, "network"))
+			if network == "" {
+				network = "xrpl-mainnet"
+			}
+
+			result := map[string]any{
+				"mode":               "logical-resolve",
+				"marketId":           market.ID,
+				"winningOutcomeIndex": winningOutcomeIndex,
+				"resolutions":        make([]map[string]any, 0, len(resolutionPlan)),
+			}
+			reason := firstNonEmpty(strings.TrimSpace(mustStringFlag(cmd, "reason")), "logical-market-resolved")
+
+			if mustBoolFlag(cmd, "dry-run") {
+				preview := make([]map[string]any, 0, len(resolutionPlan))
+				for _, item := range resolutionPlan {
+					preview = append(preview, map[string]any{
+						"outcomeIndex":   item.Binding.OutcomeIndex,
+						"outcomeLabel":   item.Binding.Label,
+						"contractAddress": item.Binding.ContractAddress,
+						"won":            item.Won,
+						"payouts":        bigIntSliceToStrings(item.Payouts),
+					})
+				}
+				result["dryRun"] = true
+				result["resolutions"] = preview
+				result["bookClosures"] = len(resolutionPlan) * 2
+				return printOutput(ctx.JSON, result)
+			}
+
+			resolutionTxHashes := make([]common.Hash, 0, len(resolutionPlan))
+			resolutions := make([]map[string]any, 0, len(resolutionPlan))
+			for _, item := range resolutionPlan {
+				marketAddress := strings.TrimSpace(item.Binding.ContractAddress)
+				if !common.IsHexAddress(marketAddress) || isZeroAddress(marketAddress) {
+					return fmt.Errorf("binding %q has no usable contract address", item.Binding.Label)
+				}
+				txHash, err := resolveCTFMarket(cmd.Context(), ctx.Config.EVMRPCURL, big.NewInt(xrplEVMChainID), privateKeyHex, common.HexToAddress(marketAddress), item.Payouts)
+				if err != nil {
+					return err
+				}
+				entry := map[string]any{
+					"outcomeIndex":    item.Binding.OutcomeIndex,
+					"outcomeLabel":    item.Binding.Label,
+					"contractAddress": common.HexToAddress(marketAddress).Hex(),
+					"won":             item.Won,
+					"payouts":         bigIntSliceToStrings(item.Payouts),
+					"txHash":          txHash.Hex(),
+				}
+				if mustBoolFlag(cmd, "wait") {
+					receipt, err := waitForTxReceipt(cmd.Context(), ctx.Config.EVMRPCURL, txHash)
+					if err != nil {
+						return err
+					}
+					entry["receiptStatus"] = receipt.Status
+					if receipt.Status != 1 {
+						return fmt.Errorf("resolve transaction reverted (tx %s)", txHash.Hex())
+					}
+				}
+				resolutionTxHashes = append(resolutionTxHashes, txHash)
+				resolutions = append(resolutions, entry)
+			}
+			result["resolutions"] = resolutions
+
+			resolveRequest, err := buildLogicalResolveRequest(wallet, network, ctx.Config.EVMRPCURL, market.ID, winningOutcomeIndex, resolutionTxHashes, reason)
+			if err != nil {
+				return err
+			}
+			resolveResponse, err := ctx.ConsoleAPI.ResolveClobMarket(cmd.Context(), resolveRequest)
+			if err != nil {
+				return err
+			}
+			result["logicalResolution"] = resolveResponse
+			result["bookClosures"] = resolveResponse.BooksClosed
+			warnings := append([]string(nil), resolveResponse.Warnings...)
+			if len(warnings) > 0 {
+				result["warnings"] = warnings
+			}
+			return printOutput(ctx.JSON, result)
+		},
+	}
+	logicalResolveCmd.Flags().String("market", "", "Logical market ID or primary contract address to resolve")
+	logicalResolveCmd.Flags().String("outcome", "", "Winning displayed outcome index")
+	logicalResolveCmd.Flags().String("label", "", "Winning displayed outcome label")
+	logicalResolveCmd.Flags().String("network", "xrpl-mainnet", "Network identifier used for logical market resolution")
+	logicalResolveCmd.Flags().String("instance-date", "", "Instance date for recurring markets in YYYY-MM-DD format")
+	logicalResolveCmd.Flags().String("reason", "logical-market-resolved", "Reason to use when closing hosted offchain books")
+	logicalResolveCmd.Flags().Bool("wait", false, "Wait for each on-chain resolve transaction receipt")
+	logicalResolveCmd.Flags().Bool("dry-run", false, "Build the logical resolve plan locally without submitting transactions")
+	logicalCmd.AddCommand(logicalResolveCmd)
+	cmd.AddCommand(logicalCmd)
 
 	bookCmd := &cobra.Command{Use: "book", Short: "Inspect hosted CLOB books"}
 	depthCmd := &cobra.Command{
@@ -2014,6 +2392,10 @@ func newClobCommand() *cobra.Command {
 					return err
 				}
 			}
+			signingDomain, err := resolveClobSigningDomain(cmd)
+			if err != nil {
+				return err
+			}
 
 			payload, err := buildClobSignedOrder(
 				wallet,
@@ -2024,7 +2406,7 @@ func newClobCommand() *cobra.Command {
 				priceBps,
 				quantity,
 				mustStringFlag(cmd, "expiry"),
-				big.NewInt(xrplEVMChainID),
+				signingDomain,
 			)
 			if err != nil {
 				return err
@@ -2639,9 +3021,10 @@ func buildCLIContext() (*cliContext, error) {
 	if flagProfile != "" {
 		cfg.ActiveProfile = flagProfile
 	}
-	profile, ok := cfg.Profiles[cfg.ActiveProfile]
+	profileName := cfg.ActiveProfile
+	profile, ok := cfg.Profiles[profileName]
 	if !ok {
-		profile = app.Profile{Name: cfg.ActiveProfile}
+		profile = app.Profile{Name: profileName}
 		cfg.SetCurrentProfile(profile)
 	}
 	client, err := api.NewClient(cfg.APIBaseURL, cfg.DeviceID)
@@ -2652,7 +3035,50 @@ func buildCLIContext() (*cliContext, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &cliContext{Config: cfg, API: client, ConsoleAPI: consoleClient, Profile: profile, ProfileName: cfg.ActiveProfile, JSON: flagJSON || cfg.OutputFormat == "json"}, nil
+	repaired, err := hydrateProfileState(context.Background(), cfg, client, profileName, profile)
+	if err != nil {
+		return nil, err
+	}
+	if repaired.Name == "" {
+		repaired.Name = profileName
+	}
+	if repaired != profile {
+		profile = repaired
+		cfg.SetCurrentProfile(profile)
+		if err := app.SaveConfig(cfg); err != nil {
+			return nil, err
+		}
+	}
+	return &cliContext{Config: cfg, API: client, ConsoleAPI: consoleClient, Profile: profile, ProfileName: profileName, JSON: flagJSON || cfg.OutputFormat == "json"}, nil
+}
+
+func hydrateProfileState(ctx context.Context, cfg *app.Config, client *api.Client, profileName string, profile app.Profile) (app.Profile, error) {
+	if profile.Name == "" {
+		profile.Name = profileName
+	}
+	if profile.EVMAddress == "" {
+		wallet, _, err := requireEVMWalletWithKeyForProfile(cfg, profileName)
+		if err == nil {
+			profile.EVMAddress = wallet.Address().Hex()
+		}
+	}
+	if profile.XRPLAddress == "" {
+		seed, err := app.LoadSecret(app.XRPLSecretKey(profileName))
+		if err == nil {
+			wallet, walletErr := axrpl.WalletFromSeed(seed)
+			if walletErr != nil {
+				return app.Profile{}, walletErr
+			}
+			profile.XRPLAddress = wallet.Address()
+		}
+	}
+	if profile.DepositDestinationTag == 0 && profile.EVMAddress != "" {
+		funding, err := client.GetFunding(ctx, profile.EVMAddress, 1)
+		if err == nil && funding.DepositDestinationTag != nil && *funding.DepositDestinationTag > 0 {
+			profile.DepositDestinationTag = *funding.DepositDestinationTag
+		}
+	}
+	return profile, nil
 }
 
 func resolveWalletAccountProfile(cmd *cobra.Command, ctx *cliContext) (string, app.Profile) {

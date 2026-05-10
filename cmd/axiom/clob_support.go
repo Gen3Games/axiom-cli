@@ -13,7 +13,10 @@ import (
 	"github.com/Gen3Games/axiom-cli/internal/api"
 	"github.com/Gen3Games/axiom-cli/internal/evm"
 	"github.com/ethereum/go-ethereum/common"
+	ethmath "github.com/ethereum/go-ethereum/common/math"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/signer/core/apitypes"
+	"github.com/spf13/cobra"
 )
 
 const clobMaxUint256 = "115792089237316195423570985008687907853269984665640564039457584007913129639935"
@@ -45,6 +48,57 @@ type clobSelection struct {
 	CollateralToken     common.Address
 	OutcomeToken        common.Address
 	ExchangeAddress     common.Address
+}
+
+type clobSigningDomain struct {
+	ChainID           *big.Int
+	VerifyingContract common.Address
+}
+
+type logicalRegisterOutcome struct {
+	Key         string
+	Label       string
+	Description string
+}
+
+type logicalLaunchOutcome struct {
+	Key                 string
+	Label               string
+	Description         string
+	MetadataName        string
+	MetadataDescription string
+	QuestionID          common.Hash
+	MetadataURI         string
+}
+
+type logicalCreateMarketPlan struct {
+	MarketID            string
+	Name                string
+	Headline            string
+	Description         string
+	Category            string
+	Tags                []string
+	MarketType          string
+	ResolutionCriteria  string
+	StartsAt            time.Time
+	EndsAt              time.Time
+	ResolveBy           time.Time
+	DisplayOutcomes     []logicalRegisterOutcome
+	LaunchOutcomes      []logicalLaunchOutcome
+	LogicalMarketIDHash common.Hash
+}
+
+type logicalBindingResolution struct {
+	Binding api.CtfOutcomeMarketBinding
+	Payouts []*big.Int
+	Won     bool
+}
+
+type logicalBookClosure struct {
+	OutcomeIndex int    `json:"outcomeIndex"`
+	TokenSide    string `json:"tokenSide"`
+	Status       string `json:"status,omitempty"`
+	Message      string `json:"message,omitempty"`
 }
 
 type clobWalletSideStatus struct {
@@ -348,7 +402,7 @@ func resolveDisplayedTokenID(binding api.CtfOutcomeMarketBinding, displayedSide 
 	return nil, "", fmt.Errorf("missing usable %s token id for outcome %q", strings.ToUpper(displayedSide), binding.Label)
 }
 
-func buildClobSignedOrder(wallet *evm.Wallet, marketID string, selection *clobSelection, side string, orderType string, priceBps int, quantity int, expiryPreset string, chainID *big.Int) (api.ClobSignedOrderPayload, error) {
+func buildClobSignedOrder(wallet *evm.Wallet, marketID string, selection *clobSelection, side string, orderType string, priceBps int, quantity int, expiryPreset string, domain clobSigningDomain) (api.ClobSignedOrderPayload, error) {
 	sideValue, ok := clobOrderSideValue[side]
 	if !ok {
 		return api.ClobSignedOrderPayload{}, errors.New("--side must be buy or sell")
@@ -376,7 +430,7 @@ func buildClobSignedOrder(wallet *evm.Wallet, marketID string, selection *clobSe
 		"nonce":           strconv.FormatInt(nonce, 10),
 		"feeRateBps":      "0",
 	}
-	typedData := evm.BuildClobTypedData(chainID, selection.ExchangeAddress, message)
+	typedData := evm.BuildClobTypedData(domain.ChainID, domain.VerifyingContract, message)
 	signature, err := wallet.SignTypedData(typedData)
 	if err != nil {
 		return api.ClobSignedOrderPayload{}, err
@@ -401,27 +455,491 @@ func buildClobSignedOrder(wallet *evm.Wallet, marketID string, selection *clobSe
 	}, nil
 }
 
+func resolveClobSigningDomain(cmd *cobra.Command) (clobSigningDomain, error) {
+	chainIDValue := strings.TrimSpace(mustStringFlag(cmd, "clob-chain-id"))
+	if chainIDValue == "" {
+		chainIDValue = strconv.FormatInt(evm.DefaultClobChainID, 10)
+	}
+	chainID, ok := new(big.Int).SetString(chainIDValue, 10)
+	if !ok || chainID.Sign() <= 0 {
+		return clobSigningDomain{}, errors.New("--clob-chain-id must be a positive integer")
+	}
+
+	verifyingContractRaw := strings.TrimSpace(mustStringFlag(cmd, "clob-domain-contract"))
+	if !common.IsHexAddress(verifyingContractRaw) || isZeroAddress(verifyingContractRaw) {
+		return clobSigningDomain{}, errors.New("--clob-domain-contract must be a valid non-zero 0x-prefixed address")
+	}
+
+	return clobSigningDomain{
+		ChainID:           chainID,
+		VerifyingContract: common.HexToAddress(verifyingContractRaw),
+	}, nil
+}
+
+func buildCreateBookSignature(wallet *evm.Wallet, domain clobSigningDomain, marketID string, outcome int) (string, error) {
+	message := apitypes.TypedDataMessage{
+		"creator": wallet.Address().Hex(),
+		"market":  marketID,
+		"outcome": strconv.Itoa(outcome),
+	}
+	typedData := apitypes.TypedData{
+		Types: apitypes.Types{
+			"EIP712Domain": []apitypes.Type{
+				{Name: "name", Type: "string"},
+				{Name: "version", Type: "string"},
+				{Name: "chainId", Type: "uint256"},
+				{Name: "verifyingContract", Type: "address"},
+			},
+			"CreateBook": []apitypes.Type{
+				{Name: "creator", Type: "address"},
+				{Name: "market", Type: "string"},
+				{Name: "outcome", Type: "uint8"},
+			},
+		},
+		PrimaryType: "CreateBook",
+		Domain: apitypes.TypedDataDomain{
+			Name:              evm.ClobDomainName,
+			Version:           evm.ClobDomainVersion,
+			ChainId:           (*ethmath.HexOrDecimal256)(domain.ChainID),
+			VerifyingContract: domain.VerifyingContract.Hex(),
+		},
+		Message: message,
+	}
+	return wallet.SignTypedData(typedData)
+}
+
+func normalizeLogicalKey(label string, fallback string) string {
+	trimmed := strings.TrimSpace(strings.ToLower(label))
+	if trimmed == "" {
+		trimmed = fallback
+	}
+	var builder strings.Builder
+	lastDash := false
+	for _, r := range trimmed {
+		switch {
+		case (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'):
+			builder.WriteRune(r)
+			lastDash = false
+		case !lastDash:
+			builder.WriteByte('-')
+			lastDash = true
+		}
+	}
+	result := strings.Trim(builder.String(), "-")
+	if result == "" {
+		return fallback
+	}
+	return result
+}
+
+func parseLogicalOutcomeLabels(values []string) []string {
+	labels := make([]string, 0, len(values))
+	for _, value := range values {
+		for _, part := range strings.Split(value, ",") {
+			trimmed := strings.TrimSpace(part)
+			if trimmed != "" {
+				labels = append(labels, trimmed)
+			}
+		}
+	}
+	return labels
+}
+
+func collectLogicalDisplayOutcomes(cmd *cobra.Command, marketType string) ([]logicalRegisterOutcome, error) {
+	if marketType == "yes_no" {
+		yesLabel := strings.TrimSpace(mustStringFlag(cmd, "yes-label"))
+		if yesLabel == "" {
+			yesLabel = "Yes"
+		}
+		noLabel := strings.TrimSpace(mustStringFlag(cmd, "no-label"))
+		if noLabel == "" {
+			noLabel = "No"
+		}
+		return []logicalRegisterOutcome{
+			{Key: "yes", Label: yesLabel, Description: strings.TrimSpace(mustStringFlag(cmd, "yes-description"))},
+			{Key: "no", Label: noLabel, Description: strings.TrimSpace(mustStringFlag(cmd, "no-description"))},
+		}, nil
+	}
+
+	labels := parseLogicalOutcomeLabels(mustStringSliceFlag(cmd, "outcome-label"))
+	if len(labels) < 2 {
+		return nil, errors.New("multiple_choice logical markets require at least two --outcome-label values")
+	}
+	results := make([]logicalRegisterOutcome, 0, len(labels))
+	for index, label := range labels {
+		results = append(results, logicalRegisterOutcome{
+			Key:         normalizeLogicalKey(label, fmt.Sprintf("outcome-%d", index)),
+			Label:       label,
+			Description: fmt.Sprintf("%s is the winning displayed outcome.", label),
+		})
+	}
+	return results, nil
+}
+
+func buildLogicalMarketPlan(cmd *cobra.Command) (*logicalCreateMarketPlan, error) {
+	marketType := strings.ToLower(strings.TrimSpace(mustStringFlag(cmd, "market-type")))
+	if marketType == "" {
+		marketType = "yes_no"
+	}
+	if marketType != "yes_no" && marketType != "multiple_choice" {
+		return nil, errors.New("--market-type must be yes_no or multiple_choice")
+	}
+
+	name := strings.TrimSpace(mustStringFlag(cmd, "name"))
+	if name == "" {
+		return nil, errors.New("--name is required")
+	}
+	description := strings.TrimSpace(mustStringFlag(cmd, "description"))
+	if description == "" {
+		return nil, errors.New("--description is required")
+	}
+	category := strings.TrimSpace(mustStringFlag(cmd, "category"))
+	if category == "" {
+		return nil, errors.New("--category is required")
+	}
+	resolutionCriteria := strings.TrimSpace(mustStringFlag(cmd, "resolution-criteria"))
+	if resolutionCriteria == "" {
+		return nil, errors.New("--resolution-criteria is required")
+	}
+
+	startsAtRaw := strings.TrimSpace(mustStringFlag(cmd, "starts-at"))
+	if startsAtRaw == "" {
+		return nil, errors.New("--starts-at is required")
+	}
+	startsAt, err := time.Parse(time.RFC3339, startsAtRaw)
+	if err != nil {
+		return nil, fmt.Errorf("parse --starts-at: %w", err)
+	}
+	endsAtRaw := strings.TrimSpace(mustStringFlag(cmd, "ends-at"))
+	if endsAtRaw == "" {
+		return nil, errors.New("--ends-at is required")
+	}
+	endsAt, err := time.Parse(time.RFC3339, endsAtRaw)
+	if err != nil {
+		return nil, fmt.Errorf("parse --ends-at: %w", err)
+	}
+	if !endsAt.After(startsAt) {
+		return nil, errors.New("--ends-at must be later than --starts-at")
+	}
+	resolveBy := endsAt
+	if resolveByRaw := strings.TrimSpace(mustStringFlag(cmd, "resolve-by")); resolveByRaw != "" {
+		resolveBy, err = time.Parse(time.RFC3339, resolveByRaw)
+		if err != nil {
+			return nil, fmt.Errorf("parse --resolve-by: %w", err)
+		}
+		if resolveBy.Before(endsAt) {
+			return nil, errors.New("--resolve-by must be later than or equal to --ends-at")
+		}
+	}
+
+	displayOutcomes, err := collectLogicalDisplayOutcomes(cmd, marketType)
+	if err != nil {
+		return nil, err
+	}
+
+	marketID := strings.TrimSpace(mustStringFlag(cmd, "market-id"))
+	if marketID == "" {
+		marketID = fmt.Sprintf("%s-%d", normalizeLogicalKey(name, "logical-market"), time.Now().UTC().UnixMilli())
+	}
+
+	tags, _ := cmd.Flags().GetStringSlice("tag")
+	trimmedTags := make([]string, 0, len(tags))
+	for _, tag := range tags {
+		trimmed := strings.TrimSpace(tag)
+		if trimmed != "" {
+			trimmedTags = append(trimmedTags, trimmed)
+		}
+	}
+
+	launchOutcomes := make([]logicalLaunchOutcome, 0, len(displayOutcomes))
+	bindingOutcomes := displayOutcomes
+	if marketType == "yes_no" {
+		bindingOutcomes = displayOutcomes[:1]
+	}
+	for _, outcome := range bindingOutcomes {
+		launchOutcomes = append(launchOutcomes, logicalLaunchOutcome{
+			Key:                 outcome.Key,
+			Label:               outcome.Label,
+			Description:         outcome.Description,
+			MetadataName:        fmt.Sprintf("%s - %s", name, outcome.Label),
+			MetadataDescription: fmt.Sprintf("Binary CTF market where YES resolves if the displayed winning outcome is %s.", outcome.Label),
+			QuestionID:          common.Hash{},
+		})
+	}
+
+	logicalMarketHashInput := []byte("ctf:" + marketID)
+	logicalMarketHash := common.BytesToHash(crypto.Keccak256(logicalMarketHashInput))
+	for index := range launchOutcomes {
+		questionHashInput := []byte(fmt.Sprintf("%s:%s", marketID, launchOutcomes[index].Key))
+		launchOutcomes[index].QuestionID = common.BytesToHash(crypto.Keccak256(questionHashInput))
+	}
+
+	return &logicalCreateMarketPlan{
+		MarketID:            marketID,
+		Name:                name,
+		Headline:            strings.TrimSpace(mustStringFlag(cmd, "headline")),
+		Description:         description,
+		Category:            category,
+		Tags:                trimmedTags,
+		MarketType:          marketType,
+		ResolutionCriteria:  resolutionCriteria,
+		StartsAt:            startsAt.UTC(),
+		EndsAt:              endsAt.UTC(),
+		ResolveBy:           resolveBy.UTC(),
+		DisplayOutcomes:     displayOutcomes,
+		LaunchOutcomes:      launchOutcomes,
+		LogicalMarketIDHash: logicalMarketHash,
+	}, nil
+}
+
+func uploadLogicalLaunchMetadata(ctx context.Context, cliCtx *cliContext, wallet *evm.Wallet, network string, dryRun bool, plan *logicalCreateMarketPlan) error {
+	for index := range plan.LaunchOutcomes {
+		if dryRun {
+			plan.LaunchOutcomes[index].MetadataURI = fmt.Sprintf("ipfs://dry-run/%s/%s", plan.MarketID, plan.LaunchOutcomes[index].Key)
+			continue
+		}
+		metadata := clobMarketMetadata{
+			Name:        plan.LaunchOutcomes[index].MetadataName,
+			Headline:    plan.Headline,
+			Description: plan.LaunchOutcomes[index].MetadataDescription,
+			Category:    plan.Category,
+			Tags:        plan.Tags,
+			Outcomes: []clobOutcomeMetadata{
+				{Index: 0, Label: "Yes", Description: fmt.Sprintf("%s is the winning displayed outcome", plan.LaunchOutcomes[index].Label)},
+				{Index: 1, Label: "No", Description: fmt.Sprintf("%s is not the winning displayed outcome", plan.LaunchOutcomes[index].Label)},
+			},
+			ResolutionCriteria: plan.ResolutionCriteria,
+			CreatedAt:          time.Now().UTC().Format(time.RFC3339),
+			EndsAt:             plan.EndsAt.Format(time.RFC3339),
+			OutcomeCount:       2,
+		}
+		response, err := uploadClobMarketMetadata(ctx, cliCtx, wallet, network, metadata)
+		if err != nil {
+			return err
+		}
+		plan.LaunchOutcomes[index].MetadataURI = getIPFSURI(response.IPFSURI)
+	}
+	return nil
+}
+
+func collectLogicalMarketAddresses(cmd *cobra.Command) ([]common.Address, error) {
+	values := mustStringSliceFlag(cmd, "address")
+	addresses := make([]common.Address, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		for _, part := range strings.Split(value, ",") {
+			trimmed := strings.TrimSpace(part)
+			if trimmed == "" {
+				continue
+			}
+			if !common.IsHexAddress(trimmed) || isZeroAddress(trimmed) {
+				return nil, fmt.Errorf("invalid --address value: %s", trimmed)
+			}
+			address := common.HexToAddress(trimmed)
+			key := strings.ToLower(address.Hex())
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			addresses = append(addresses, address)
+		}
+	}
+	if len(addresses) == 0 {
+		return nil, errors.New("at least one --address is required")
+	}
+	return addresses, nil
+}
+
+func validateLogicalRegisterAddresses(plan *logicalCreateMarketPlan, addresses []common.Address) error {
+	if plan.MarketType == "yes_no" {
+		if len(addresses) != 1 {
+			return errors.New("yes_no logical markets require exactly one --address value")
+		}
+		return nil
+	}
+	if len(addresses) != len(plan.DisplayOutcomes) {
+		return fmt.Errorf("multiple_choice logical markets require %d --address values to match the displayed outcomes", len(plan.DisplayOutcomes))
+	}
+	return nil
+}
+
+func buildLogicalRegisterMessage(marketID string, network string, chainID int64, addresses []common.Address) string {
+	addressLines := make([]string, 0, len(addresses))
+	for _, address := range addresses {
+		addressLines = append(addressLines, address.Hex())
+	}
+	return strings.Join([]string{
+		"axiom.register-clob-market:",
+		fmt.Sprintf("marketId=%s", marketID),
+		fmt.Sprintf("network=%s", network),
+		fmt.Sprintf("chainId=%d", chainID),
+		"addresses=",
+		strings.Join(addressLines, "\n"),
+		fmt.Sprintf("timestamp=%s", time.Now().UTC().Format(time.RFC3339)),
+	}, "\n")
+}
+
+func buildLogicalResolveMessage(marketID string, network string, winningOutcomeIndex int, resolutionTxHashes []string) string {
+	lines := []string{
+		"axiom.resolve-clob-market:",
+		fmt.Sprintf("marketId=%s", marketID),
+		fmt.Sprintf("network=%s", network),
+		fmt.Sprintf("winningOutcomeIndex=%d", winningOutcomeIndex),
+		"resolutionTxHashes=",
+	}
+	lines = append(lines, resolutionTxHashes...)
+	lines = append(lines, fmt.Sprintf("timestamp=%s", time.Now().UTC().Format(time.RFC3339)))
+	return strings.Join(lines, "\n")
+}
+
+func buildLogicalResolveRequest(wallet *evm.Wallet, network string, rpcURL string, marketID string, winningOutcomeIndex int, resolutionTxHashes []common.Hash, reason string) (api.ResolveClobMarketRequest, error) {
+	resolutionHashValues := make([]string, 0, len(resolutionTxHashes))
+	for _, txHash := range resolutionTxHashes {
+		resolutionHashValues = append(resolutionHashValues, txHash.Hex())
+	}
+	message := buildLogicalResolveMessage(marketID, network, winningOutcomeIndex, resolutionHashValues)
+	signature, err := wallet.SignMessage(message)
+	if err != nil {
+		return api.ResolveClobMarketRequest{}, err
+	}
+	return api.ResolveClobMarketRequest{
+		MarketID:            marketID,
+		Network:             network,
+		RPCURL:              rpcURL,
+		WalletAddress:       wallet.Address().Hex(),
+		WinningOutcomeIndex: winningOutcomeIndex,
+		ResolutionTxHashes:  resolutionHashValues,
+		Reason:              reason,
+		Message:             message,
+		Signature:           signature,
+	}, nil
+}
+
+func buildLogicalResolutionPlan(market *api.MarketDetails, winningOutcomeIndex int) ([]logicalBindingResolution, error) {
+	if market == nil {
+		return nil, errors.New("market details are required")
+	}
+	bindings := sortedClobBindings(market.CTFOutcomeMarkets)
+	if len(bindings) == 0 {
+		return nil, errors.New("logical market has no CTF outcome bindings")
+	}
+	winningOutcome, err := resolveClobLogicalOutcome(market, strconv.Itoa(winningOutcomeIndex), "")
+	if err != nil {
+		return nil, err
+	}
+	results := make([]logicalBindingResolution, 0, len(bindings))
+	for _, binding := range bindings {
+		won := binding.OutcomeIndex == winningOutcome.Index
+		payouts := []*big.Int{big.NewInt(0), big.NewInt(1)}
+		if won {
+			payouts = []*big.Int{big.NewInt(1), big.NewInt(0)}
+		}
+		results = append(results, logicalBindingResolution{
+			Binding: binding,
+			Payouts: payouts,
+			Won:     won,
+		})
+	}
+	return results, nil
+}
+
+func buildLogicalRegisterRequest(wallet *evm.Wallet, network string, chainID int64, rpcURL string, plan *logicalCreateMarketPlan, addresses []common.Address, isVisible bool, allowUnindexed bool, bookSignatures []api.RegisterClobBookSignature) (api.RegisterClobMarketRequest, error) {
+	message := buildLogicalRegisterMessage(plan.MarketID, network, chainID, addresses)
+	signature, err := wallet.SignMessage(message)
+	if err != nil {
+		return api.RegisterClobMarketRequest{}, err
+	}
+	addressValues := make([]string, 0, len(addresses))
+	for _, address := range addresses {
+		addressValues = append(addressValues, address.Hex())
+	}
+	metadata := api.RegisterClobMarketMetadata{
+		Name:               plan.Name,
+		Headline:           plan.Headline,
+		Description:        plan.Description,
+		Category:           plan.Category,
+		Tags:               plan.Tags,
+		MarketType:         plan.MarketType,
+		ResolutionCriteria: plan.ResolutionCriteria,
+		StartsAt:           plan.StartsAt.Format(time.RFC3339),
+		EndsAt:             plan.EndsAt.Format(time.RFC3339),
+		ResolveBy:          plan.ResolveBy.Format(time.RFC3339),
+		DisplayOutcomes:    make([]api.RegisterClobMarketDisplayOutcome, 0, len(plan.DisplayOutcomes)),
+	}
+	for _, outcome := range plan.DisplayOutcomes {
+		metadata.DisplayOutcomes = append(metadata.DisplayOutcomes, api.RegisterClobMarketDisplayOutcome{
+			Key:         outcome.Key,
+			Label:       outcome.Label,
+			Description: outcome.Description,
+		})
+	}
+	return api.RegisterClobMarketRequest{
+		MarketID:       plan.MarketID,
+		Network:        network,
+		ChainID:        int(chainID),
+		RPCURL:         rpcURL,
+		Addresses:      addressValues,
+		IsVisible:      isVisible,
+		AllowUnindexed: allowUnindexed,
+		Metadata:       metadata,
+		Message:        message,
+		Signature:      signature,
+		BookSignatures: bookSignatures,
+	}, nil
+}
+
+func buildLogicalBookSignatures(wallet *evm.Wallet, domain clobSigningDomain, marketID string, addresses []common.Address) ([]api.RegisterClobBookSignature, error) {
+	results := make([]api.RegisterClobBookSignature, 0, len(addresses))
+	for outcomeIndex, address := range addresses {
+		signature, err := buildCreateBookSignature(wallet, domain, marketID, outcomeIndex)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, api.RegisterClobBookSignature{
+			Address:      address.Hex(),
+			OutcomeIndex: outcomeIndex,
+			Signature:    signature,
+		})
+	}
+	return results, nil
+}
+
+func mustStringSliceFlag(cmd *cobra.Command, name string) []string {
+	values, _ := cmd.Flags().GetStringSlice(name)
+	return values
+}
+
 func buildClobOrderAmounts(side string, priceBps int, quantity int) (*big.Int, *big.Int) {
 	q := big.NewInt(int64(quantity))
 	p := big.NewInt(int64(priceBps))
-	scale := big.NewInt(10000) // BpsScale — must match the server's AmountsFromPriceQty
+	bpsScale := big.NewInt(10000)
+	tokenScale := big.NewInt(1_000_000_000_000_000_000)
+	sharesRaw := new(big.Int).Mul(q, tokenScale)
 
 	// Market orders (price=0): use BpsScale so amounts are non-zero.
 	if priceBps <= 0 {
-		p = new(big.Int).Set(scale)
+		p = new(big.Int).Set(bpsScale)
 	}
 
-	// Amounts are kept scaled by BpsScale to avoid integer-division precision
-	// loss. DerivePrice and DeriveQuantity on the server reverse this losslessly:
-	//   BUY:  makerAmount = qty * price,    takerAmount = qty * BpsScale
-	//   SELL: makerAmount = qty * BpsScale, takerAmount = qty * price
+	// Amounts must be encoded in raw token units (18 decimals) so the hosted
+	// validator derives quantity and price consistently with the exchange.
+	//   BUY:  makerAmount = (qty * TokenScale) * price / BpsScale
+	//         takerAmount = qty * TokenScale
+	//   SELL: makerAmount = qty * TokenScale
+	//         takerAmount = (qty * TokenScale) * price / BpsScale
 	if side == "buy" {
-		makerAmount := new(big.Int).Mul(q, p)
-		takerAmount := new(big.Int).Mul(q, scale)
+		makerAmount := new(big.Int).Div(
+			new(big.Int).Mul(sharesRaw, p),
+			bpsScale,
+		)
+		takerAmount := new(big.Int).Set(sharesRaw)
 		return makerAmount, takerAmount
 	}
-	makerAmount := new(big.Int).Mul(q, scale)
-	takerAmount := new(big.Int).Mul(q, p)
+	makerAmount := new(big.Int).Set(sharesRaw)
+	takerAmount := new(big.Int).Div(
+		new(big.Int).Mul(sharesRaw, p),
+		bpsScale,
+	)
 	return makerAmount, takerAmount
 }
 

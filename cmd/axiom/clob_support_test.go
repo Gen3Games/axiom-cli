@@ -3,6 +3,11 @@ package main
 import (
 	"math/big"
 	"testing"
+	"time"
+
+	"github.com/Gen3Games/axiom-cli/internal/evm"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/spf13/cobra"
 )
 
 func TestSummarizeClobSplitStatusUsesAllowanceAndOwnedMergeBalance(t *testing.T) {
@@ -36,33 +41,33 @@ func TestSummarizeClobSplitStatusUsesAllowanceAndOwnedMergeBalance(t *testing.T)
 func TestBuildClobOrderAmountsSellMatchesServer(t *testing.T) {
 	// Must match axiom/clob AmountsFromPriceQty(SideSell, 5000, 100_000_000_000)
 	maker, taker := buildClobOrderAmounts("sell", 5000, 100_000_000_000)
-	if maker.String() != "1000000000000000" {
-		t.Fatalf("sell makerAmount = %s, want 1000000000000000", maker.String())
+	if maker.String() != "100000000000000000000000000000" {
+		t.Fatalf("sell makerAmount = %s, want 100000000000000000000000000000", maker.String())
 	}
-	if taker.String() != "500000000000000" {
-		t.Fatalf("sell takerAmount = %s, want 500000000000000", taker.String())
+	if taker.String() != "50000000000000000000000000000" {
+		t.Fatalf("sell takerAmount = %s, want 50000000000000000000000000000", taker.String())
 	}
 }
 
 func TestBuildClobOrderAmountsBuyMatchesServer(t *testing.T) {
 	// Must match axiom/clob AmountsFromPriceQty(SideBuy, 5000, 100_000_000_000)
 	maker, taker := buildClobOrderAmounts("buy", 5000, 100_000_000_000)
-	if maker.String() != "500000000000000" {
-		t.Fatalf("buy makerAmount = %s, want 500000000000000", maker.String())
+	if maker.String() != "50000000000000000000000000000" {
+		t.Fatalf("buy makerAmount = %s, want 50000000000000000000000000000", maker.String())
 	}
-	if taker.String() != "1000000000000000" {
-		t.Fatalf("buy takerAmount = %s, want 1000000000000000", taker.String())
+	if taker.String() != "100000000000000000000000000000" {
+		t.Fatalf("buy takerAmount = %s, want 100000000000000000000000000000", taker.String())
 	}
 }
 
 func TestBuildClobOrderAmountsMarketOrder(t *testing.T) {
 	// price=0 → use BpsScale (10000) so amounts are non-zero
 	maker, taker := buildClobOrderAmounts("buy", 0, 100)
-	if maker.String() != "1000000" {
-		t.Fatalf("market buy makerAmount = %s, want 1000000", maker.String())
+	if maker.String() != "100000000000000000000" {
+		t.Fatalf("market buy makerAmount = %s, want 100000000000000000000", maker.String())
 	}
-	if taker.String() != "1000000" {
-		t.Fatalf("market buy takerAmount = %s, want 1000000", taker.String())
+	if taker.String() != "100000000000000000000" {
+		t.Fatalf("market buy takerAmount = %s, want 100000000000000000000", taker.String())
 	}
 }
 
@@ -104,6 +109,107 @@ func TestParseClobAmountRejectsNegative(t *testing.T) {
 func TestParseClobAmountRejectsTooManyDecimals(t *testing.T) {
 	_, err := parseClobAmount("0.1234567890123456789")
 	if err == nil {
-		t.Fatal("parseClobAmount with >18 decimals should return an error")
+		 t.Fatal("parseClobAmount with >18 decimals should return an error")
+	}
+}
+
+func TestResolveClobSigningDomainUsesHostedDefaults(t *testing.T) {
+	cmd := newClobCommand()
+	if err := cmd.ParseFlags(nil); err != nil {
+		t.Fatalf("ParseFlags() error = %v", err)
+	}
+
+	domain, err := resolveClobSigningDomain(cmd)
+	if err != nil {
+		t.Fatalf("resolveClobSigningDomain() error = %v", err)
+	}
+	if domain.ChainID == nil || domain.ChainID.Int64() != evm.DefaultClobChainID {
+		t.Fatalf("domain chainID = %v, want %d", domain.ChainID, evm.DefaultClobChainID)
+	}
+	if domain.VerifyingContract != common.HexToAddress(evm.DefaultClobDomainContract) {
+		t.Fatalf("verifying contract = %s, want %s", domain.VerifyingContract.Hex(), evm.DefaultClobDomainContract)
+	}
+}
+
+func mustFindCommand(t *testing.T, root *cobra.Command, args ...string) *cobra.Command {
+	t.Helper()
+	cmd, _, err := root.Find(args)
+	if err != nil {
+		t.Fatalf("Find(%v) error = %v", args, err)
+	}
+	return cmd
+}
+
+func TestBuildLogicalMarketPlanYesNoUsesSingleLaunchOutcome(t *testing.T) {
+	cmd := mustFindCommand(t, newClobCommand(), "logical", "create")
+	args := []string{
+		"--market-id", "logical-plan-yes-no",
+		"--name", "Will XRP close above $3?",
+		"--description", "Binary logical market",
+		"--category", "crypto",
+		"--resolution-criteria", "Close above $3.",
+		"--starts-at", "2026-01-01T00:00:00Z",
+		"--ends-at", "2026-01-02T00:00:00Z",
+	}
+	if err := cmd.ParseFlags(args); err != nil {
+		t.Fatalf("ParseFlags() error = %v", err)
+	}
+	plan, err := buildLogicalMarketPlan(cmd)
+	if err != nil {
+		t.Fatalf("buildLogicalMarketPlan() error = %v", err)
+	}
+	if plan.MarketType != "yes_no" {
+		t.Fatalf("marketType = %q, want yes_no", plan.MarketType)
+	}
+	if len(plan.DisplayOutcomes) != 2 {
+		t.Fatalf("displayOutcomes = %+v, want two display outcomes", plan.DisplayOutcomes)
+	}
+	if len(plan.LaunchOutcomes) != 1 {
+		t.Fatalf("launchOutcomes = %+v, want one binary launch outcome for yes_no", plan.LaunchOutcomes)
+	}
+	if plan.LaunchOutcomes[0].Key != "yes" {
+		t.Fatalf("launch outcome key = %q, want yes", plan.LaunchOutcomes[0].Key)
+	}
+	if plan.LogicalMarketIDHash == (common.Hash{}) {
+		t.Fatal("logicalMarketIdHash = zero, want derived grouping hash")
+	}
+	if !plan.ResolveBy.Equal(time.Date(2026, time.January, 2, 0, 0, 0, 0, time.UTC)) {
+		t.Fatalf("resolveBy = %s, want endsAt default", plan.ResolveBy)
+	}
+}
+
+func TestBuildLogicalMarketPlanMultipleChoiceUsesAllLaunchOutcomes(t *testing.T) {
+	cmd := mustFindCommand(t, newClobCommand(), "logical", "create")
+	args := []string{
+		"--market-id", "logical-plan-multi",
+		"--market-type", "multiple_choice",
+		"--name", "Who wins?",
+		"--description", "Multiple-choice logical market",
+		"--category", "sports",
+		"--resolution-criteria", "Winner is official final result.",
+		"--starts-at", "2026-01-01T00:00:00Z",
+		"--ends-at", "2026-01-02T00:00:00Z",
+		"--outcome-label", "Warriors",
+		"--outcome-label", "Lakers",
+		"--outcome-label", "Draw",
+	}
+	if err := cmd.ParseFlags(args); err != nil {
+		t.Fatalf("ParseFlags() error = %v", err)
+	}
+	plan, err := buildLogicalMarketPlan(cmd)
+	if err != nil {
+		t.Fatalf("buildLogicalMarketPlan() error = %v", err)
+	}
+	if plan.MarketType != "multiple_choice" {
+		t.Fatalf("marketType = %q, want multiple_choice", plan.MarketType)
+	}
+	if len(plan.DisplayOutcomes) != 3 || len(plan.LaunchOutcomes) != 3 {
+		t.Fatalf("display/launch outcomes = %d/%d, want 3/3", len(plan.DisplayOutcomes), len(plan.LaunchOutcomes))
+	}
+	if plan.LaunchOutcomes[0].QuestionID == (common.Hash{}) || plan.LaunchOutcomes[1].QuestionID == plan.LaunchOutcomes[0].QuestionID {
+		t.Fatalf("question IDs = %+v, want unique non-zero hashes", plan.LaunchOutcomes)
+	}
+	if plan.DisplayOutcomes[2].Key != "draw" {
+		t.Fatalf("display outcome key = %q, want draw", plan.DisplayOutcomes[2].Key)
 	}
 }

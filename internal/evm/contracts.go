@@ -129,6 +129,39 @@ type CreateAxiomCTFMarketResult struct {
 	ConfigAddress common.Address
 }
 
+type LaunchAxiomCTFMarketOutcome struct {
+	Label       string
+	MetadataURI string
+	QuestionID  common.Hash
+}
+
+type LaunchAxiomCTFLogicalMarketParams struct {
+	LauncherAddress   common.Address
+	Creator           common.Address
+	CollateralToken   common.Address
+	ConditionalTokens common.Address
+	TradingOpen       uint64
+	TradingClose      uint64
+	LogicalMarketID   common.Hash
+	Outcomes          []LaunchAxiomCTFMarketOutcome
+}
+
+type LaunchedAxiomCTFMarket struct {
+	OutcomeIndex    int
+	Label           string
+	MarketAddress   common.Address
+	OutcomeTokenIDs [2]string
+	MetadataURI     string
+	QuestionID      common.Hash
+	ConditionID     common.Hash
+}
+
+type LaunchAxiomCTFLogicalMarketResult struct {
+	TxHash          common.Hash
+	BlockNumber     uint64
+	LaunchedMarkets []LaunchedAxiomCTFMarket
+}
+
 type BuyQuote struct {
 	MarketTitle            string `json:"marketTitle"`
 	OutcomeIndex           int    `json:"outcomeIndex"`
@@ -223,6 +256,147 @@ func CreateAxiomCTFMarket(ctx context.Context, rpcURL string, chainID *big.Int, 
 		TxHash:        txHash,
 		MarketAddress: marketAddress,
 		ConfigAddress: configAddress,
+	}, nil
+}
+
+func LaunchAxiomCTFLogicalMarket(ctx context.Context, rpcURL string, chainID *big.Int, privateKeyHex string, params LaunchAxiomCTFLogicalMarketParams) (*LaunchAxiomCTFLogicalMarketResult, error) {
+	if params.LauncherAddress == (common.Address{}) {
+		return nil, fmt.Errorf("launcher address is required")
+	}
+	if params.Creator == (common.Address{}) {
+		return nil, fmt.Errorf("creator address is required")
+	}
+	if params.CollateralToken == (common.Address{}) {
+		return nil, fmt.Errorf("collateral token address is required")
+	}
+	if params.ConditionalTokens == (common.Address{}) {
+		return nil, fmt.Errorf("conditional tokens address is required")
+	}
+	if params.TradingClose <= params.TradingOpen {
+		return nil, fmt.Errorf("trading close must be greater than trading open")
+	}
+	if len(params.Outcomes) == 0 {
+		return nil, fmt.Errorf("at least one outcome is required")
+	}
+
+	type outcomeLaunchConfig struct {
+		Label       string   `abi:"label"`
+		MetadataURI string   `abi:"metadataUri"`
+		QuestionID  [32]byte `abi:"questionId"`
+	}
+	launchOutcomes := make([]outcomeLaunchConfig, 0, len(params.Outcomes))
+	for _, outcome := range params.Outcomes {
+		if strings.TrimSpace(outcome.Label) == "" {
+			return nil, fmt.Errorf("outcome label is required")
+		}
+		if outcome.QuestionID == (common.Hash{}) {
+			return nil, fmt.Errorf("question id is required for outcome %q", outcome.Label)
+		}
+		questionIDBytes := outcome.QuestionID
+		launchOutcomes = append(launchOutcomes, outcomeLaunchConfig{
+			Label:       outcome.Label,
+			MetadataURI: outcome.MetadataURI,
+			QuestionID:  [32]byte(questionIDBytes),
+		})
+	}
+
+	type logicalMarketLaunchConfig struct {
+		LogicalMarketID   [32]byte              `abi:"logicalMarketId"`
+		Creator           common.Address        `abi:"creator"`
+		CollateralToken   common.Address        `abi:"collateralToken"`
+		ConditionalTokens common.Address        `abi:"conditionalTokens"`
+		TradingOpen       *big.Int              `abi:"tradingOpen"`
+		TradingClose      *big.Int              `abi:"tradingClose"`
+		Outcomes          []outcomeLaunchConfig `abi:"outcomes"`
+	}
+
+	logicalMarketIDBytes := params.LogicalMarketID
+	launchConfig := logicalMarketLaunchConfig{
+		LogicalMarketID:   [32]byte(logicalMarketIDBytes),
+		Creator:           params.Creator,
+		CollateralToken:   params.CollateralToken,
+		ConditionalTokens: params.ConditionalTokens,
+		TradingOpen:       new(big.Int).SetUint64(params.TradingOpen),
+		TradingClose:      new(big.Int).SetUint64(params.TradingClose),
+		Outcomes:          launchOutcomes,
+	}
+
+	launcherABI := mustParseABI(`[
+		{"name":"launchLogicalMarket","type":"function","stateMutability":"nonpayable","inputs":[{"name":"launchConfig","type":"tuple","components":[{"name":"logicalMarketId","type":"bytes32"},{"name":"creator","type":"address"},{"name":"collateralToken","type":"address"},{"name":"conditionalTokens","type":"address"},{"name":"tradingOpen","type":"uint256"},{"name":"tradingClose","type":"uint256"},{"name":"outcomes","type":"tuple[]","components":[{"name":"label","type":"string"},{"name":"metadataUri","type":"string"},{"name":"questionId","type":"bytes32"}]}]}],"outputs":[{"name":"markets","type":"address[]"}]},
+		{"name":"LogicalMarketLaunched","type":"event","inputs":[{"name":"logicalMarketId","type":"bytes32","indexed":true},{"name":"caller","type":"address","indexed":true},{"name":"creator","type":"address","indexed":true},{"name":"outcomeCount","type":"uint256","indexed":false},{"name":"markets","type":"address[]","indexed":false}],"anonymous":false}
+	]`)
+
+	txHash, err := sendContractTransaction(ctx, rpcURL, chainID, privateKeyHex, params.LauncherAddress, launcherABI, "launchLogicalMarket", big.NewInt(0), launchConfig)
+	if err != nil {
+		return nil, err
+	}
+
+	waitCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+
+	receipt, err := WaitForReceipt(waitCtx, rpcURL, txHash)
+	if err != nil {
+		return nil, fmt.Errorf("wait for logical market launch receipt: %w", err)
+	}
+	if receipt.Status != 1 {
+		return nil, fmt.Errorf("logical market launch transaction failed: %s", txHash.Hex())
+	}
+
+	launchEvent, ok := launcherABI.Events["LogicalMarketLaunched"]
+	if !ok {
+		return nil, fmt.Errorf("LogicalMarketLaunched event is not available in launcher ABI")
+	}
+
+	launchedAddresses := make([]common.Address, 0, len(params.Outcomes))
+	for _, log := range receipt.Logs {
+		if log == nil || log.Address != params.LauncherAddress {
+			continue
+		}
+		if len(log.Topics) == 0 || log.Topics[0] != launchEvent.ID {
+			continue
+		}
+		unpacked, unpackErr := launchEvent.Inputs.NonIndexed().Unpack(log.Data)
+		if unpackErr != nil {
+			return nil, fmt.Errorf("decode LogicalMarketLaunched event: %w", unpackErr)
+		}
+		if len(unpacked) < 2 {
+			return nil, fmt.Errorf("LogicalMarketLaunched event missing address array")
+		}
+		addresses, ok := unpacked[1].([]common.Address)
+		if !ok {
+			return nil, fmt.Errorf("unexpected LogicalMarketLaunched address payload")
+		}
+		launchedAddresses = addresses
+		break
+	}
+
+	if len(launchedAddresses) != len(params.Outcomes) {
+		return nil, fmt.Errorf("expected %d launched markets, decoded %d", len(params.Outcomes), len(launchedAddresses))
+	}
+
+	launchedMarkets := make([]LaunchedAxiomCTFMarket, 0, len(launchedAddresses))
+	for index, marketAddress := range launchedAddresses {
+		metadata, metadataErr := LoadCTFMarketMetadata(ctx, rpcURL, marketAddress)
+		if metadataErr != nil {
+			return nil, fmt.Errorf("read launched market metadata for %s: %w", marketAddress.Hex(), metadataErr)
+		}
+		yesTokenID := ComputeCTFPositionID(metadata.CollateralToken, metadata.ConditionID, 0)
+		noTokenID := ComputeCTFPositionID(metadata.CollateralToken, metadata.ConditionID, 1)
+		launchedMarkets = append(launchedMarkets, LaunchedAxiomCTFMarket{
+			OutcomeIndex:    index,
+			Label:           params.Outcomes[index].Label,
+			MarketAddress:   marketAddress,
+			OutcomeTokenIDs: [2]string{yesTokenID.String(), noTokenID.String()},
+			MetadataURI:     metadata.MetadataURI,
+			QuestionID:      metadata.QuestionID,
+			ConditionID:     metadata.ConditionID,
+		})
+	}
+
+	return &LaunchAxiomCTFLogicalMarketResult{
+		TxHash:          txHash,
+		BlockNumber:     receipt.BlockNumber.Uint64(),
+		LaunchedMarkets: launchedMarkets,
 	}, nil
 }
 

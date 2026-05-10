@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Gen3Games/axiom-cli/internal/app"
 	"github.com/Gen3Games/axiom-cli/internal/api"
 	"github.com/Gen3Games/axiom-cli/internal/evm"
 	axrpl "github.com/Gen3Games/axiom-cli/internal/xrpl"
@@ -70,6 +71,8 @@ func TestCommandHelpSmoke(t *testing.T) {
 		{args: []string{"clob", "--help"}, want: "Inspect and manage hosted CLOB books, orders, fills, and cancellations"},
 		{args: []string{"clob", "market", "create", "--help"}, want: "Deploy a single binary AxiomCTFMarket via MarketFactory.createMarket(...)"},
 		{args: []string{"clob", "market", "resolve", "--help"}, want: "Resolve a deployed binary AxiomCTFMarket with an explicit payout vector"},
+		{args: []string{"clob", "logical", "register", "--help"}, want: "Register existing binary AxiomCTFMarket contracts as one logical hosted CLOB market"},
+		{args: []string{"clob", "logical", "create", "--help"}, want: "Upload per-outcome metadata, launch grouped binary markets, and register them as one logical hosted CLOB market"},
 		{args: []string{"clob", "book", "depth", "--help"}, want: "Fetch the hosted depth ladder and book summary for a logical CLOB proposition"},
 		{args: []string{"clob", "smoke", "--help"}, want: "Run a hosted CLOB smoke test using imported CLI accounts"},
 		{args: []string{"clob", "wallet", "status", "--help"}, want: "Show collateral balances, allowances, approvals, and per-outcome token balances for a CLOB market"},
@@ -345,6 +348,90 @@ func TestWalletAuthAndReadCommandsWithMockAPI(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "XRPLTX123") || !strings.Contains(stdout, xrplWallet.Address()) {
 		t.Fatalf("funding bridge-submit stdout missing tx hash or xrpl wallet\nstdout:\n%s", stdout)
+	}
+}
+
+func TestWalletShowRepairsMissingConfigAddressFromStoredSecret(t *testing.T) {
+	setCLIEnv(t)
+
+	privateKey := "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+	wallet, err := evm.WalletFromPrivateKeyHex(privateKey)
+	if err != nil {
+		t.Fatalf("WalletFromPrivateKeyHex() error = %v", err)
+	}
+
+	if _, stderr, err := executeCLI(t, "--json", "wallet", "import", "--private-key", privateKey); err != nil {
+		t.Fatalf("wallet import error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	cfg, err := app.LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	profile := cfg.Profiles[cfg.ActiveProfile]
+	profile.EVMAddress = ""
+	cfg.SetCurrentProfile(profile)
+	if err := app.SaveConfig(cfg); err != nil {
+		t.Fatalf("SaveConfig() error = %v", err)
+	}
+
+	stdout, stderr, err := executeCLI(t, "--json", "wallet", "show")
+	if err != nil {
+		t.Fatalf("wallet show error = %v\nstderr:\n%s", err, stderr)
+	}
+	if !strings.Contains(stdout, wallet.Address().Hex()) {
+		t.Fatalf("wallet show stdout missing repaired address %q\nstdout:\n%s", wallet.Address().Hex(), stdout)
+	}
+
+	repairedCfg, err := app.LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig() after repair error = %v", err)
+	}
+	if repairedCfg.Profiles[repairedCfg.ActiveProfile].EVMAddress != wallet.Address().Hex() {
+		t.Fatalf("repaired config evmAddress = %q, want %q", repairedCfg.Profiles[repairedCfg.ActiveProfile].EVMAddress, wallet.Address().Hex())
+	}
+}
+
+func TestWalletShowRepairsMissingDestinationTagFromBackend(t *testing.T) {
+	setCLIEnv(t)
+	server, _ := newMockAPIServer(t)
+	defer server.Close()
+
+	privateKey := "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+	wallet, err := evm.WalletFromPrivateKeyHex(privateKey)
+	if err != nil {
+		t.Fatalf("WalletFromPrivateKeyHex() error = %v", err)
+	}
+
+	if _, stderr, err := executeCLI(t, "--json", "wallet", "import", "--private-key", privateKey); err != nil {
+		t.Fatalf("wallet import error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	cfg, err := app.LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	profile := cfg.Profiles[cfg.ActiveProfile]
+	profile.DepositDestinationTag = 0
+	cfg.SetCurrentProfile(profile)
+	if err := app.SaveConfig(cfg); err != nil {
+		t.Fatalf("SaveConfig() error = %v", err)
+	}
+
+	stdout, stderr, err := executeCLI(t, "--json", "--api-url", server.URL+"/api/cli", "wallet", "show")
+	if err != nil {
+		t.Fatalf("wallet show error = %v\nstderr:\n%s", err, stderr)
+	}
+	if !strings.Contains(stdout, wallet.Address().Hex()) || !strings.Contains(stdout, "4242") {
+		t.Fatalf("wallet show stdout missing repaired address/tag\nstdout:\n%s", stdout)
+	}
+
+	repairedCfg, err := app.LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig() after repair error = %v", err)
+	}
+	if repairedCfg.Profiles[repairedCfg.ActiveProfile].DepositDestinationTag != 4242 {
+		t.Fatalf("repaired config depositDestinationTag = %d, want %d", repairedCfg.Profiles[repairedCfg.ActiveProfile].DepositDestinationTag, 4242)
 	}
 }
 
@@ -927,6 +1014,337 @@ func TestClobMarketResolveSendsTransaction(t *testing.T) {
 	}
 }
 
+func TestClobLogicalRegisterBuildsAndSubmitsLogicalPayload(t *testing.T) {
+	setCLIEnv(t)
+	server, state := newMockAPIServer(t)
+	defer server.Close()
+
+	privateKey := "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+	if _, stderr, err := executeCLI(t, "--json", "wallet", "import", "--private-key", privateKey); err != nil {
+		t.Fatalf("wallet import error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	stdout, stderr, err := executeCLI(
+		t,
+		"--json",
+		"--console-api-url", server.URL+"/api/cli",
+		"clob",
+		"logical",
+		"register",
+		"--market-id", "logical-yes-no-1",
+		"--name", "Logical XRP Above $3",
+		"--description", "Grouped logical market",
+		"--category", "crypto",
+		"--resolution-criteria", "Resolved off-chain for test coverage.",
+		"--starts-at", "2026-01-01T00:00:00Z",
+		"--ends-at", "2026-01-02T00:00:00Z",
+		"--address", "0x00000000000000000000000000000000000000C1",
+		"--visible",
+		"--allow-unindexed",
+	)
+	if err != nil {
+		t.Fatalf("clob logical register error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	state.mu.Lock()
+	request := state.lastClobRegistration
+	state.mu.Unlock()
+	if request.MarketID != "logical-yes-no-1" {
+		t.Fatalf("marketId = %q, want logical-yes-no-1", request.MarketID)
+	}
+	if request.Metadata.MarketType != "yes_no" {
+		t.Fatalf("marketType = %q, want yes_no", request.Metadata.MarketType)
+	}
+	if len(request.Addresses) != 1 || !strings.EqualFold(request.Addresses[0], "0x00000000000000000000000000000000000000C1") {
+		t.Fatalf("addresses = %+v, want one binary binding address", request.Addresses)
+	}
+	if len(request.Metadata.DisplayOutcomes) != 2 || request.Metadata.DisplayOutcomes[0].Label != "Yes" || request.Metadata.DisplayOutcomes[1].Label != "No" {
+		t.Fatalf("display outcomes = %+v, want yes/no display rows", request.Metadata.DisplayOutcomes)
+	}
+	if len(request.BookSignatures) != 1 || request.BookSignatures[0].OutcomeIndex != 0 || request.BookSignatures[0].Signature == "" {
+		t.Fatalf("book signatures = %+v, want one signature for the yes_no binding", request.BookSignatures)
+	}
+	if !request.IsVisible || !request.AllowUnindexed {
+		t.Fatalf("visibility/indexer flags = visible:%v allowUnindexed:%v, want true/true", request.IsVisible, request.AllowUnindexed)
+	}
+	if !strings.Contains(request.Message, "axiom.register-clob-market") || !strings.Contains(request.Message, "logical-yes-no-1") {
+		t.Fatalf("message = %q, want register-clob-market payload", request.Message)
+	}
+	if !strings.Contains(stdout, "logical-yes-no-1") || !strings.Contains(stdout, "registeredContracts") {
+		t.Fatalf("clob logical register stdout missing logical registration payload\nstdout:\n%s", stdout)
+	}
+}
+
+func TestClobLogicalCreateUploadsLaunchMetadataAndRegistersLaunchedMarkets(t *testing.T) {
+	setCLIEnv(t)
+	server, state := newMockAPIServer(t)
+	defer server.Close()
+
+	privateKey := "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+	if _, stderr, err := executeCLI(t, "--json", "wallet", "import", "--private-key", privateKey); err != nil {
+		t.Fatalf("wallet import error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	originalLaunchLogicalMarket := launchAxiomCTFLogicalMarket
+	var receivedLaunchParams evm.LaunchAxiomCTFLogicalMarketParams
+	launchAxiomCTFLogicalMarket = func(_ context.Context, rpcURL string, chainID *big.Int, privateKeyHex string, params evm.LaunchAxiomCTFLogicalMarketParams) (*evm.LaunchAxiomCTFLogicalMarketResult, error) {
+		receivedLaunchParams = params
+		if rpcURL == "" {
+			t.Fatal("launchAxiomCTFLogicalMarket() received empty rpcURL")
+		}
+		if chainID == nil || chainID.Int64() != xrplEVMChainID {
+			t.Fatalf("chainID = %v, want %d", chainID, xrplEVMChainID)
+		}
+		if privateKeyHex == "" {
+			t.Fatal("launchAxiomCTFLogicalMarket() received empty private key")
+		}
+		return &evm.LaunchAxiomCTFLogicalMarketResult{
+			TxHash:      common.HexToHash("0x3333333333333333333333333333333333333333333333333333333333333333"),
+			BlockNumber: 12345,
+			LaunchedMarkets: []evm.LaunchedAxiomCTFMarket{{
+				OutcomeIndex:    0,
+				Label:           "Yes",
+				MarketAddress:   common.HexToAddress("0x00000000000000000000000000000000000000D1"),
+				OutcomeTokenIDs: [2]string{"101", "102"},
+				MetadataURI:     "ipfs://bafkreiuploadtest",
+				QuestionID:      common.HexToHash("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+				ConditionID:     common.HexToHash("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+			}},
+		}, nil
+	}
+	t.Cleanup(func() {
+		launchAxiomCTFLogicalMarket = originalLaunchLogicalMarket
+	})
+
+	stdout, stderr, err := executeCLI(
+		t,
+		"--json",
+		"--console-api-url", server.URL+"/api/cli",
+		"clob",
+		"logical",
+		"create",
+		"--market-id", "logical-created-1",
+		"--name", "Logical Create XRP Above $3",
+		"--headline", "CLI logical create smoke",
+		"--description", "Creates and registers one binary binding",
+		"--category", "crypto",
+		"--resolution-criteria", "Resolved off-chain for test coverage.",
+		"--starts-at", "2026-01-01T00:00:00Z",
+		"--ends-at", "2026-01-02T00:00:00Z",
+		"--visible",
+	)
+	if err != nil {
+		t.Fatalf("clob logical create error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	if len(receivedLaunchParams.Outcomes) != 1 {
+		t.Fatalf("launch outcomes = %+v, want one binary outcome for yes_no", receivedLaunchParams.Outcomes)
+	}
+	if receivedLaunchParams.LauncherAddress.Hex() != common.HexToAddress("0x00000000000000000000000000000000000000F5").Hex() {
+		t.Fatalf("launcherAddress = %q, want canonical launcher", receivedLaunchParams.LauncherAddress.Hex())
+	}
+	if receivedLaunchParams.Outcomes[0].MetadataURI != "ipfs://bafkreiuploadtest" {
+		t.Fatalf("metadataURI = %q, want uploaded metadata URI", receivedLaunchParams.Outcomes[0].MetadataURI)
+	}
+	if state.lastAddressesNetwork != "xrpl-mainnet" {
+		t.Fatalf("addresses network = %q, want xrpl-mainnet", state.lastAddressesNetwork)
+	}
+	state.mu.Lock()
+	request := state.lastClobRegistration
+	metadataUpload := state.lastMetadataUpload
+	state.mu.Unlock()
+	if metadataUpload.Metadata.Name != "Logical Create XRP Above $3 - Yes" {
+		t.Fatalf("metadata upload name = %q, want logical binary metadata title", metadataUpload.Metadata.Name)
+	}
+	if request.MarketID != "logical-created-1" {
+		t.Fatalf("registration marketId = %q, want logical-created-1", request.MarketID)
+	}
+	if len(request.Addresses) != 1 || !strings.EqualFold(request.Addresses[0], "0x00000000000000000000000000000000000000D1") {
+		t.Fatalf("registration addresses = %+v, want launched market address", request.Addresses)
+	}
+	if !request.AllowUnindexed {
+		t.Fatalf("allowUnindexed = %v, want true for logical create", request.AllowUnindexed)
+	}
+	if len(request.BookSignatures) != 1 || request.BookSignatures[0].Signature == "" {
+		t.Fatalf("book signatures = %+v, want one signature", request.BookSignatures)
+	}
+	if !strings.Contains(stdout, "logical-created-1") || !strings.Contains(stdout, "launchTxHash") {
+		t.Fatalf("clob logical create stdout missing launch payload\nstdout:\n%s", stdout)
+	}
+}
+
+func TestClobLogicalRegisterDryRunDoesNotSubmit(t *testing.T) {
+	setCLIEnv(t)
+	server, state := newMockAPIServer(t)
+	defer server.Close()
+
+	privateKey := "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+	if _, stderr, err := executeCLI(t, "--json", "wallet", "import", "--private-key", privateKey); err != nil {
+		t.Fatalf("wallet import error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	stdout, stderr, err := executeCLI(
+		t,
+		"--json",
+		"--console-api-url", server.URL+"/api/cli",
+		"clob",
+		"logical",
+		"register",
+		"--market-id", "logical-dry-run-1",
+		"--name", "Logical Dry Run",
+		"--description", "No submit expected",
+		"--category", "crypto",
+		"--resolution-criteria", "Dry run only.",
+		"--starts-at", "2026-01-01T00:00:00Z",
+		"--ends-at", "2026-01-02T00:00:00Z",
+		"--address", "0x00000000000000000000000000000000000000C1",
+		"--dry-run",
+	)
+	if err != nil {
+		t.Fatalf("clob logical register dry-run error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	state.mu.Lock()
+	request := state.lastClobRegistration
+	state.mu.Unlock()
+	if request.MarketID != "" {
+		t.Fatalf("last registration = %+v, want no submitted registration request during dry-run", request)
+	}
+	if !strings.Contains(stdout, "\"dryRun\": true") || !strings.Contains(stdout, "logical-dry-run-1") {
+		t.Fatalf("clob logical register dry-run stdout missing payload\nstdout:\n%s", stdout)
+	}
+}
+
+func TestClobLogicalCreateMultipleChoiceDryRunBuildsTwoBinaryOutcomesWithoutUpload(t *testing.T) {
+	setCLIEnv(t)
+	server, state := newMockAPIServer(t)
+	defer server.Close()
+
+	privateKey := "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+	if _, stderr, err := executeCLI(t, "--json", "wallet", "import", "--private-key", privateKey); err != nil {
+		t.Fatalf("wallet import error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	stdout, stderr, err := executeCLI(
+		t,
+		"--json",
+		"--console-api-url", server.URL+"/api/cli",
+		"clob",
+		"logical",
+		"create",
+		"--market-id", "logical-multi-dry-run-1",
+		"--market-type", "multiple_choice",
+		"--name", "Logical Multi Dry Run",
+		"--description", "Three displayed outcomes",
+		"--category", "sports",
+		"--resolution-criteria", "Dry run only.",
+		"--starts-at", "2026-01-01T00:00:00Z",
+		"--ends-at", "2026-01-02T00:00:00Z",
+		"--outcome-label", "Warriors",
+		"--outcome-label", "Lakers",
+		"--outcome-label", "Draw",
+		"--dry-run",
+	)
+	if err != nil {
+		t.Fatalf("clob logical create multiple-choice dry-run error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	state.mu.Lock()
+	metadataUpload := state.lastMetadataUpload
+	registration := state.lastClobRegistration
+	state.mu.Unlock()
+	if metadataUpload.Metadata.Name != "" {
+		t.Fatalf("last metadata upload = %+v, want no upload during dry-run", metadataUpload)
+	}
+	if registration.MarketID != "" {
+		t.Fatalf("last registration = %+v, want no register submission during dry-run", registration)
+	}
+	for _, want := range []string{"logical-multi-dry-run-1", "Warriors", "Lakers", "Draw", "ipfs://dry-run/logical-multi-dry-run-1/warriors"} {
+		if !strings.Contains(strings.ToLower(stdout), strings.ToLower(want)) {
+			t.Fatalf("clob logical create multiple-choice dry-run stdout missing %q\nstdout:\n%s", want, stdout)
+		}
+	}
+}
+
+func TestClobLogicalResolveResolvesBindingsClosesBooksAndMarksLogicalMarketResolved(t *testing.T) {
+	setCLIEnv(t)
+	server, state := newMockAPIServer(t)
+	defer server.Close()
+
+	privateKey := "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+	if _, stderr, err := executeCLI(t, "--json", "wallet", "import", "--private-key", privateKey); err != nil {
+		t.Fatalf("wallet import error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	originalResolveCTFMarket := resolveCTFMarket
+	originalWaitForReceipt := waitForTxReceipt
+	var receivedMarkets []common.Address
+	var receivedPayouts [][]*big.Int
+	resolveCTFMarket = func(_ context.Context, _ string, _ *big.Int, _ string, marketAddress common.Address, payoutNumerators []*big.Int) (common.Hash, error) {
+		receivedMarkets = append(receivedMarkets, marketAddress)
+		receivedPayouts = append(receivedPayouts, payoutNumerators)
+		return common.BigToHash(big.NewInt(int64(len(receivedMarkets)))), nil
+	}
+	waitForTxReceipt = func(_ context.Context, _ string, txHash common.Hash) (*types.Receipt, error) {
+		return &types.Receipt{TxHash: txHash, Status: 1}, nil
+	}
+	t.Cleanup(func() {
+		resolveCTFMarket = originalResolveCTFMarket
+		waitForTxReceipt = originalWaitForReceipt
+	})
+
+	t.Setenv("CLOB_ADMIN_TOKEN", "test-admin-token")
+
+	stdout, stderr, err := executeCLI(
+		t,
+		"--json",
+		"--api-url", server.URL+"/api/cli",
+		"--console-api-url", server.URL+"/api/cli",
+		"clob",
+		"--projection-url", server.URL,
+		"--eventstore-url", server.URL+"/api",
+		"logical",
+		"resolve",
+		"--market", "clob-1",
+		"--outcome", "0",
+		"--wait",
+	)
+	if err != nil {
+		t.Fatalf("clob logical resolve error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	if len(receivedMarkets) != 2 {
+		t.Fatalf("resolved market count = %d, want 2", len(receivedMarkets))
+	}
+	if len(receivedPayouts) != 2 {
+		t.Fatalf("resolved payout count = %d, want 2", len(receivedPayouts))
+	}
+	if len(receivedPayouts[0]) != 2 || receivedPayouts[0][0].Cmp(big.NewInt(1)) != 0 || receivedPayouts[0][1].Cmp(big.NewInt(0)) != 0 {
+		t.Fatalf("winning payouts = %v, want [1 0]", receivedPayouts[0])
+	}
+	if len(receivedPayouts[1]) != 2 || receivedPayouts[1][0].Cmp(big.NewInt(0)) != 0 || receivedPayouts[1][1].Cmp(big.NewInt(1)) != 0 {
+		t.Fatalf("losing payouts = %v, want [0 1]", receivedPayouts[1])
+	}
+
+	state.mu.Lock()
+	resolution := state.lastClobResolution
+	state.mu.Unlock()
+	if resolution.MarketID != "clob-1" {
+		t.Fatalf("resolved marketId = %q, want clob-1", resolution.MarketID)
+	}
+	if resolution.WinningOutcomeIndex != 0 {
+		t.Fatalf("winningOutcomeIndex = %d, want 0", resolution.WinningOutcomeIndex)
+	}
+	if len(resolution.ResolutionTxHashes) != 2 {
+		t.Fatalf("resolutionTxHashes = %+v, want 2", resolution.ResolutionTxHashes)
+	}
+	for _, want := range []string{"logicalResolution", "bookClosures", "resolutions", "winningOutcomeIndex"} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("clob logical resolve stdout missing %q\nstdout:\n%s", want, stdout)
+		}
+	}
+}
+
 func TestClobSmokeLiveSubmitsAndCancelsOrder(t *testing.T) {
 	setCLIEnv(t)
 	server, state := newMockAPIServer(t)
@@ -1476,6 +1894,8 @@ type mockAPIState struct {
 	lastDeviceHeader     string
 	lastAddressesNetwork string
 	lastMetadataUpload   api.UploadMetadataRequest
+	lastClobRegistration api.RegisterClobMarketRequest
+	lastClobResolution   api.ResolveClobMarketRequest
 	lastClobOrder        api.ClobSignedOrderPayload
 	clobSubmitCalls      int
 	clobConflictsLeft    int
@@ -1571,11 +1991,74 @@ func newMockAPIServer(t *testing.T) (*httptest.Server, *mockAPIState) {
 				IPFSURI:       "ipfs://bafkreiuploadtest",
 				GatewayURL:    "https://axiom.mypinata.cloud/ipfs/bafkreiuploadtest",
 			})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/markets/register-clob-market":
+			var request api.RegisterClobMarketRequest
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatalf("Decode(register clob body) error = %v", err)
+			}
+			state.mu.Lock()
+			state.lastClobRegistration = request
+			state.lastDeviceHeader = r.Header.Get("X-Axiom-CLI-Device")
+			state.mu.Unlock()
+			registeredContracts := make([]api.RegisteredClobContract, 0, len(request.Addresses))
+			for index, address := range request.Addresses {
+				label := fmt.Sprintf("Outcome %d", index)
+				if index < len(request.Metadata.DisplayOutcomes) {
+					label = request.Metadata.DisplayOutcomes[index].Label
+				}
+				registeredContracts = append(registeredContracts, api.RegisteredClobContract{
+					ContractAddress: strings.ToLower(address),
+					OutcomeIndex:    index,
+					OutcomeLabel:    label,
+					OutcomeTokenIDs: []string{fmt.Sprintf("%d01", index+1), fmt.Sprintf("%d02", index+1)},
+					ConditionID:     fmt.Sprintf("condition-%d", index),
+					QuestionID:      fmt.Sprintf("question-%d", index),
+					MetadataURI:     fmt.Sprintf("ipfs://registered-%d", index),
+					DeploymentID:    fmt.Sprintf("xrpl-mainnet_AxiomCTFMarket_%s", strings.ToLower(address)),
+					Creator:         "0x00000000000000000000000000000000000000A1",
+				})
+			}
+			booksTotal := len(request.Addresses) * 2
+			_ = json.NewEncoder(w).Encode(api.RegisterClobMarketResponse{
+				Success:             true,
+				MarketID:            request.MarketID,
+				SignerAddress:       "0x00000000000000000000000000000000000000A1",
+				RegisteredContracts: registeredContracts,
+				BooksCreated:        booksTotal,
+				BooksTotal:          booksTotal,
+				Warnings:            []string{"mock warning"},
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/markets/resolve-clob-market":
+			var request api.ResolveClobMarketRequest
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatalf("Decode(resolve-clob-market body) error = %v", err)
+			}
+			state.mu.Lock()
+			state.lastClobResolution = request
+			state.mu.Unlock()
+			winningLabel := fmt.Sprintf("Outcome %d", request.WinningOutcomeIndex)
+			resolvedOutcomeID := fmt.Sprintf("%s-outcome-%d", request.MarketID, request.WinningOutcomeIndex)
+			if request.MarketID == "clob-1" && request.WinningOutcomeIndex == 0 {
+				winningLabel = "Yes"
+				resolvedOutcomeID = "clob-1-yes"
+			}
+			_ = json.NewEncoder(w).Encode(api.ResolveClobMarketResponse{
+				Success:              true,
+				MarketID:             request.MarketID,
+				SignerAddress:        request.WalletAddress,
+				ResolvedOutcomeID:    resolvedOutcomeID,
+				ResolvedOutcomeLabel: winningLabel,
+				WinningOutcomeIndex:  request.WinningOutcomeIndex,
+				BooksClosed:          0,
+				BooksTotal:           0,
+			})
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/books/") && strings.HasSuffix(r.URL.Path, "/depth"):
 			_ = json.NewEncoder(w).Encode(api.ClobDepth{
 				Bids: []api.ClobDepthLevel{{ClobID: "clob-1-0", Side: "buy", Price: 45, TotalQty: 12, OrderCount: 2}},
 				Asks: []api.ClobDepthLevel{{ClobID: "clob-1-0", Side: "sell", Price: 55, TotalQty: 8, OrderCount: 1}},
 			})
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/close"):
+			_ = json.NewEncoder(w).Encode(api.ClobBookLifecycleResponse{Status: "closed", Message: "book closed"})
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/books/"):
 			_ = json.NewEncoder(w).Encode(api.ClobBook{ClobID: "clob-1-0", MarketID: "clob-1", Outcome: 0, Creator: "0xcreator", Status: "open", BidCount: 2, AskCount: 1, TradeCount: 0, Volume24h: 0, EventSequence: 1, CreatedAt: ptrTime(now), UpdatedAt: ptrTime(now)})
 		case r.Method == http.MethodPost && r.URL.Path == "/api/orders":
@@ -1757,7 +2240,6 @@ func newMockAPIServer(t *testing.T) (*httptest.Server, *mockAPIState) {
 				Tags:               []string{"crypto", "daily"},
 			})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/cli/markets/clob-1":
-			resolvedOutcomeIndex := 0
 			_ = json.NewEncoder(w).Encode(api.MarketDetails{
 				MarketListItem: api.MarketListItem{
 					ID:                   "clob-1",
@@ -1765,11 +2247,11 @@ func newMockAPIServer(t *testing.T) (*httptest.Server, *mockAPIState) {
 					MarketImplementation: "AxiomCTFMarket",
 					Title:                "Will XRP close above $3.00 on Friday?",
 					Category:             "crypto",
-					Status:               "resolved",
+					Status:               "active",
 					StartsAt:             now.Add(-24 * time.Hour),
 					EndsAt:               now.Add(-2 * time.Hour),
 					ContractAddress:      "0x00000000000000000000000000000000000000C1",
-					IsResolved:           true,
+					IsResolved:           false,
 					LogicalMarketAddresses: []string{
 						"0x00000000000000000000000000000000000000C1",
 						"0x00000000000000000000000000000000000000C2",
@@ -1783,7 +2265,6 @@ func newMockAPIServer(t *testing.T) (*httptest.Server, *mockAPIState) {
 				SettlementToken:      "0x0000000000000000000000000000000000000000",
 				Creator:              "0xcreator",
 				OwnerAddress:         "0xowner",
-				ResolvedOutcomeIndex: &resolvedOutcomeIndex,
 				ResolutionCriteria:   "Friday close must settle above $3.00.",
 				Tags:                 []string{"crypto", "clob"},
 			})
