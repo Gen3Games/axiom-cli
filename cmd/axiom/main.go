@@ -1742,7 +1742,7 @@ func newClobCommand() *cobra.Command {
 	logicalRegisterCmd.Flags().String("category", "", "Logical market category")
 	logicalRegisterCmd.Flags().StringSlice("tag", nil, "Metadata tag to include; repeatable")
 	logicalRegisterCmd.Flags().StringSlice("evidence-source", nil, "Evidence source URL to include in uploaded binary metadata; repeatable")
-	logicalRegisterCmd.Flags().String("image", "", "Optional image URI to include in uploaded binary metadata")
+	logicalRegisterCmd.Flags().String("image", "", "Optional logical market PFP image URL; also included in uploaded binary metadata")
 	logicalRegisterCmd.Flags().String("resolution-criteria", "", "Logical market resolution criteria")
 	logicalRegisterCmd.Flags().String("starts-at", "", "Logical market start time in RFC3339")
 	logicalRegisterCmd.Flags().String("ends-at", "", "Logical market end time in RFC3339")
@@ -1894,7 +1894,7 @@ func newClobCommand() *cobra.Command {
 	logicalCreateCmd.Flags().String("category", "", "Logical market category")
 	logicalCreateCmd.Flags().StringSlice("tag", nil, "Metadata tag to include; repeatable")
 	logicalCreateCmd.Flags().StringSlice("evidence-source", nil, "Evidence source URL to include in uploaded binary metadata; repeatable")
-	logicalCreateCmd.Flags().String("image", "", "Optional image URI to include in uploaded binary metadata")
+	logicalCreateCmd.Flags().String("image", "", "Optional logical market PFP image URL; also included in uploaded binary metadata")
 	logicalCreateCmd.Flags().String("resolution-criteria", "", "Logical market resolution criteria")
 	logicalCreateCmd.Flags().String("starts-at", "", "Logical market start time in RFC3339")
 	logicalCreateCmd.Flags().String("ends-at", "", "Logical market end time in RFC3339")
@@ -2044,6 +2044,114 @@ func newClobCommand() *cobra.Command {
 	logicalResolveCmd.Flags().Bool("wait", false, "Wait for each on-chain resolve transaction receipt")
 	logicalResolveCmd.Flags().Bool("dry-run", false, "Build the logical resolve plan locally without submitting transactions")
 	logicalCmd.AddCommand(logicalResolveCmd)
+
+	logicalUpdateCmd := &cobra.Command{
+		Use:   "update",
+		Short: "Update creator-owned logical CLOB market metadata fields",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+			wallet, _, err := requireEVMWalletWithKey(ctx)
+			if err != nil {
+				return err
+			}
+
+			marketRef := strings.TrimSpace(mustStringFlag(cmd, "market"))
+			if marketRef == "" {
+				return errors.New("--market is required")
+			}
+			market, err := loadMarketWithClobFallback(cmd.Context(), ctx, marketRef, mustStringFlag(cmd, "instance-date"))
+			if err != nil {
+				return err
+			}
+			if !isClobMarketImplementation(market.MarketImplementation) {
+				return errors.New("logical update requires an AxiomCTFMarket logical market")
+			}
+
+			trimmedOrNil := func(flagName string) *string {
+				if !cmd.Flags().Changed(flagName) {
+					return nil
+				}
+				value := strings.TrimSpace(mustStringFlag(cmd, flagName))
+				return &value
+			}
+			collectTags := func() []string {
+				values, _ := cmd.Flags().GetStringSlice("tag")
+				results := make([]string, 0, len(values))
+				for _, value := range values {
+					for _, part := range strings.Split(value, ",") {
+						trimmed := strings.TrimSpace(part)
+						if trimmed != "" {
+							results = append(results, trimmed)
+						}
+					}
+				}
+				return results
+			}
+
+			input := logicalUpdateInput{
+				Name:        trimmedOrNil("name"),
+				Headline:    trimmedOrNil("headline"),
+				Description: trimmedOrNil("description"),
+				Category:    trimmedOrNil("category"),
+				ImageURL:    trimmedOrNil("image"),
+			}
+			if cmd.Flags().Changed("tag") {
+				input.Tags = collectTags()
+			}
+			if input.Name == nil && input.Headline == nil && input.Description == nil && input.Category == nil && input.ImageURL == nil && !cmd.Flags().Changed("tag") {
+				return errors.New("at least one update field is required")
+			}
+
+			network := strings.TrimSpace(mustStringFlag(cmd, "network"))
+			if network == "" {
+				network = "xrpl-mainnet"
+			}
+			request, err := buildLogicalUpdateRequest(wallet, network, market.ID, input)
+			if err != nil {
+				return err
+			}
+			if mustBoolFlag(cmd, "dry-run") {
+				return printOutput(ctx.JSON, map[string]any{
+					"dryRun":           true,
+					"marketId":         request.MarketID,
+					"network":          request.Network,
+					"walletAddress":    request.WalletAddress,
+					"name":             request.Name,
+					"headline":         request.Headline,
+					"description":      request.Description,
+					"category":         request.Category,
+					"imageUrl":         request.ImageURL,
+					"tags":             request.Tags,
+					"message":          request.Message,
+					"signaturePresent": request.Signature != "",
+				})
+			}
+			response, err := ctx.ConsoleAPI.UpdateClobMarket(cmd.Context(), request)
+			if err != nil {
+				return err
+			}
+			return printOutput(ctx.JSON, map[string]any{
+				"mode":          "logical-update",
+				"marketId":      response.MarketID,
+				"signerAddress": response.SignerAddress,
+				"updatedFields": response.UpdatedFields,
+			})
+		},
+	}
+	logicalUpdateCmd.Flags().String("market", "", "Logical market ID or primary contract address to update")
+	logicalUpdateCmd.Flags().String("network", "xrpl-mainnet", "Network identifier used for logical market updates")
+	logicalUpdateCmd.Flags().String("instance-date", "", "Instance date for recurring markets in YYYY-MM-DD format")
+	logicalUpdateCmd.Flags().String("name", "", "Updated logical market title")
+	logicalUpdateCmd.Flags().String("headline", "", "Updated logical market headline")
+	logicalUpdateCmd.Flags().String("description", "", "Updated logical market description")
+	logicalUpdateCmd.Flags().String("category", "", "Updated logical market category")
+	logicalUpdateCmd.Flags().String("image", "", "Updated logical market PFP image URL")
+	logicalUpdateCmd.Flags().StringSlice("tag", nil, "Updated logical metadata tag list; repeatable")
+	logicalUpdateCmd.Flags().Bool("dry-run", false, "Build the logical update payload locally without submitting it")
+	logicalCmd.AddCommand(logicalUpdateCmd)
 	cmd.AddCommand(logicalCmd)
 
 	bookCmd := &cobra.Command{Use: "book", Short: "Inspect hosted CLOB books"}

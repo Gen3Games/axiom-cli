@@ -1480,6 +1480,101 @@ func TestClobLogicalResolveResolvesBindingsClosesBooksAndMarksLogicalMarketResol
 	}
 }
 
+func TestClobLogicalUpdateBuildsAndSubmitsSignedPayload(t *testing.T) {
+	setCLIEnv(t)
+	server, state := newMockAPIServer(t)
+	defer server.Close()
+
+	privateKey := "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+	if _, stderr, err := executeCLI(t, "--json", "wallet", "import", "--private-key", privateKey); err != nil {
+		t.Fatalf("wallet import error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	stdout, stderr, err := executeCLI(
+		t,
+		"--json",
+		"--api-url", server.URL+"/api/cli",
+		"--console-api-url", server.URL+"/api/cli",
+		"clob",
+		"logical",
+		"update",
+		"--market", "clob-1",
+		"--name", "Updated logical title",
+		"--description", "Updated logical description",
+		"--category", "sports",
+		"--image", "ipfs://updated-pfp",
+	)
+	if err != nil {
+		t.Fatalf("clob logical update error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	state.mu.Lock()
+	request := state.lastClobUpdate
+	state.mu.Unlock()
+	if request.MarketID != "clob-1" {
+		t.Fatalf("marketId = %q, want clob-1", request.MarketID)
+	}
+	if request.Name == nil || *request.Name != "Updated logical title" {
+		t.Fatalf("name = %#v, want Updated logical title", request.Name)
+	}
+	if request.Description == nil || *request.Description != "Updated logical description" {
+		t.Fatalf("description = %#v, want Updated logical description", request.Description)
+	}
+	if request.Category == nil || *request.Category != "sports" {
+		t.Fatalf("category = %#v, want sports", request.Category)
+	}
+	if request.ImageURL == nil || *request.ImageURL != "ipfs://updated-pfp" {
+		t.Fatalf("imageUrl = %#v, want ipfs://updated-pfp", request.ImageURL)
+	}
+	for _, want := range []string{"marketId=clob-1", "name=Updated logical title", "imageUrl=ipfs://updated-pfp"} {
+		if !strings.Contains(request.Message, want) {
+			t.Fatalf("message = %q, want to contain %q", request.Message, want)
+		}
+	}
+	for _, want := range []string{"logical-update", "updatedFields", "imageUrl"} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("clob logical update stdout missing %q\nstdout:\n%s", want, stdout)
+		}
+	}
+}
+
+func TestClobLogicalUpdateDryRunDoesNotSubmit(t *testing.T) {
+	setCLIEnv(t)
+	server, state := newMockAPIServer(t)
+	defer server.Close()
+
+	privateKey := "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+	if _, stderr, err := executeCLI(t, "--json", "wallet", "import", "--private-key", privateKey); err != nil {
+		t.Fatalf("wallet import error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	stdout, stderr, err := executeCLI(
+		t,
+		"--json",
+		"--api-url", server.URL+"/api/cli",
+		"--console-api-url", server.URL+"/api/cli",
+		"clob",
+		"logical",
+		"update",
+		"--market", "clob-1",
+		"--name", "Dry run title",
+		"--dry-run",
+	)
+	if err != nil {
+		t.Fatalf("clob logical update dry-run error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	state.mu.Lock()
+	request := state.lastClobUpdate
+	state.mu.Unlock()
+	if request.MarketID != "" {
+		t.Fatalf("last update request = %+v, want no submitted update during dry-run", request)
+	}
+	if !strings.Contains(stdout, "\"dryRun\": true") || !strings.Contains(stdout, "Dry run title") {
+		t.Fatalf("clob logical update dry-run stdout missing payload\nstdout:\n%s", stdout)
+	}
+}
+
 func TestClobSmokeLiveSubmitsAndCancelsOrder(t *testing.T) {
 	setCLIEnv(t)
 	server, state := newMockAPIServer(t)
@@ -2234,6 +2329,7 @@ type mockAPIState struct {
 	lastAddressesNetwork string
 	lastMetadataUpload   api.UploadMetadataRequest
 	lastClobRegistration api.RegisterClobMarketRequest
+	lastClobUpdate       api.UpdateClobMarketRequest
 	lastClobResolution   api.ResolveClobMarketRequest
 	lastClobOrder        api.ClobSignedOrderPayload
 	lastClobBookPath     string
@@ -2394,6 +2490,40 @@ func newMockAPIServer(t *testing.T) (*httptest.Server, *mockAPIState) {
 				WinningOutcomeIndex:  request.WinningOutcomeIndex,
 				BooksClosed:          0,
 				BooksTotal:           0,
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/markets/update-clob-market":
+			var request api.UpdateClobMarketRequest
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatalf("Decode(update-clob-market body) error = %v", err)
+			}
+			state.mu.Lock()
+			state.lastClobUpdate = request
+			state.lastDeviceHeader = r.Header.Get("X-Axiom-CLI-Device")
+			state.mu.Unlock()
+			updatedFields := make([]string, 0, 6)
+			if request.Name != nil {
+				updatedFields = append(updatedFields, "name")
+			}
+			if request.Headline != nil {
+				updatedFields = append(updatedFields, "headline")
+			}
+			if request.Description != nil {
+				updatedFields = append(updatedFields, "description")
+			}
+			if request.Category != nil {
+				updatedFields = append(updatedFields, "category")
+			}
+			if request.ImageURL != nil {
+				updatedFields = append(updatedFields, "imageUrl")
+			}
+			if len(request.Tags) > 0 {
+				updatedFields = append(updatedFields, "tags")
+			}
+			_ = json.NewEncoder(w).Encode(api.UpdateClobMarketResponse{
+				Success:       true,
+				MarketID:      request.MarketID,
+				SignerAddress: request.WalletAddress,
+				UpdatedFields: updatedFields,
 			})
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/books/") && strings.HasSuffix(r.URL.Path, "/depth"):
 			state.mu.Lock()

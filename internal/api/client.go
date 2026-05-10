@@ -169,6 +169,28 @@ type RegisterClobMarketResponse struct {
 	Error               string                   `json:"error"`
 }
 
+type UpdateClobMarketRequest struct {
+	MarketID      string   `json:"marketId"`
+	Network       string   `json:"network"`
+	WalletAddress string   `json:"walletAddress"`
+	Name          *string  `json:"name,omitempty"`
+	Headline      *string  `json:"headline,omitempty"`
+	Description   *string  `json:"description,omitempty"`
+	Category      *string  `json:"category,omitempty"`
+	ImageURL      *string  `json:"imageUrl,omitempty"`
+	Tags          []string `json:"tags,omitempty"`
+	Message       string   `json:"message"`
+	Signature     string   `json:"signature"`
+}
+
+type UpdateClobMarketResponse struct {
+	Success       bool     `json:"success"`
+	MarketID      string   `json:"marketId"`
+	SignerAddress string   `json:"signerAddress"`
+	UpdatedFields []string `json:"updatedFields"`
+	Error         string   `json:"error"`
+}
+
 type ResolveClobMarketRequest struct {
 	MarketID            string   `json:"marketId"`
 	Network             string   `json:"network"`
@@ -916,6 +938,20 @@ func (c *Client) RegisterClobMarket(ctx context.Context, request RegisterClobMar
 			return nil, fmt.Errorf("api error: %s", out.Error)
 		}
 		return nil, fmt.Errorf("api error: failed to register logical CLOB market")
+	}
+	return &out, nil
+}
+
+func (c *Client) UpdateClobMarket(ctx context.Context, request UpdateClobMarketRequest) (*UpdateClobMarketResponse, error) {
+	var out UpdateClobMarketResponse
+	if err := c.doJSONFromAppRoot(ctx, http.MethodPost, "api/markets/update-clob-market", request, &out); err != nil {
+		return nil, err
+	}
+	if !out.Success {
+		if strings.TrimSpace(out.Error) != "" {
+			return nil, fmt.Errorf("api error: %s", out.Error)
+		}
+		return nil, fmt.Errorf("api error: failed to update logical CLOB market")
 	}
 	return &out, nil
 }

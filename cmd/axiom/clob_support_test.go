@@ -333,3 +333,53 @@ func TestBuildLogicalMarketPlanUsesOutcomesJSONOverrides(t *testing.T) {
 		t.Fatal("third outcome question id = zero, want derived fallback")
 	}
 }
+
+func TestBuildLogicalUpdateMessageIncludesOnlyProvidedFields(t *testing.T) {
+	name := "Updated title"
+	imageURL := "ipfs://updated-pfp"
+	message := buildLogicalUpdateMessage("clob-1", "xrpl-mainnet", "0xabc", logicalUpdateInput{
+		Name:     &name,
+		ImageURL: &imageURL,
+	})
+	for _, want := range []string{
+		"axiom.update-clob-market:",
+		"marketId=clob-1",
+		"network=xrpl-mainnet",
+		"walletAddress=0xabc",
+		"name=Updated title",
+		"imageUrl=ipfs://updated-pfp",
+	} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("message = %q, want to contain %q", message, want)
+		}
+	}
+	if strings.Contains(message, "description=") {
+		t.Fatalf("message = %q, should not include omitted fields", message)
+	}
+}
+
+func TestBuildLogicalUpdateRequestSignsProvidedFields(t *testing.T) {
+	wallet, err := evm.WalletFromPrivateKeyHex("ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80")
+	if err != nil {
+		t.Fatalf("WalletFromPrivateKeyHex() error = %v", err)
+	}
+	description := "Updated description"
+	request, err := buildLogicalUpdateRequest(wallet, "xrpl-mainnet", "clob-1", logicalUpdateInput{
+		Description: &description,
+	})
+	if err != nil {
+		t.Fatalf("buildLogicalUpdateRequest() error = %v", err)
+	}
+	if request.MarketID != "clob-1" || request.Network != "xrpl-mainnet" {
+		t.Fatalf("request = %+v, want market/network preserved", request)
+	}
+	if request.Description == nil || *request.Description != "Updated description" {
+		t.Fatalf("description = %#v, want Updated description", request.Description)
+	}
+	if request.Signature == "" || !strings.HasPrefix(request.Signature, "0x") {
+		t.Fatalf("signature = %q, want signed payload", request.Signature)
+	}
+	if !strings.Contains(request.Message, "description=Updated description") {
+		t.Fatalf("message = %q, want description line", request.Message)
+	}
+}

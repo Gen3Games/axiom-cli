@@ -399,6 +399,59 @@ func TestRegisterClobMarketUsesAppRootEndpoint(t *testing.T) {
 	}
 }
 
+func TestUpdateClobMarketUsesAppRootEndpoint(t *testing.T) {
+	t.Parallel()
+
+	var gotPath string
+	var gotRequest UpdateClobMarketRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.RequestURI()
+		if err := json.NewDecoder(r.Body).Decode(&gotRequest); err != nil {
+			t.Fatalf("Decode(update-clob body) error = %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(UpdateClobMarketResponse{
+			Success:       true,
+			MarketID:      gotRequest.MarketID,
+			SignerAddress: gotRequest.WalletAddress,
+			UpdatedFields: []string{"name", "imageUrl"},
+		})
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL+"/api/cli", "device-123")
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	name := "Updated market"
+	imageURL := "ipfs://updated-image"
+	response, err := client.UpdateClobMarket(context.Background(), UpdateClobMarketRequest{
+		MarketID:      "logical-market-1",
+		Network:       "xrpl-mainnet",
+		WalletAddress: "0x00000000000000000000000000000000000000A1",
+		Name:          &name,
+		ImageURL:      &imageURL,
+		Message:       "signed update-clob-market message",
+		Signature:     "0xabc",
+	})
+	if err != nil {
+		t.Fatalf("UpdateClobMarket() error = %v", err)
+	}
+	if gotPath != "/api/markets/update-clob-market" {
+		t.Fatalf("request path = %q, want %q", gotPath, "/api/markets/update-clob-market")
+	}
+	if gotRequest.Name == nil || *gotRequest.Name != "Updated market" {
+		t.Fatalf("request name = %#v, want Updated market", gotRequest.Name)
+	}
+	if gotRequest.ImageURL == nil || *gotRequest.ImageURL != "ipfs://updated-image" {
+		t.Fatalf("request imageUrl = %#v, want ipfs://updated-image", gotRequest.ImageURL)
+	}
+	if response.MarketID != "logical-market-1" || len(response.UpdatedFields) != 2 {
+		t.Fatalf("response = %+v, want logical update payload", response)
+	}
+}
+
 func TestGetClobDepthUsesHostedProjectionBase(t *testing.T) {
 	t.Parallel()
 

@@ -200,6 +200,15 @@ type logicalBindingResolution struct {
 	Won     bool
 }
 
+type logicalUpdateInput struct {
+	Name        *string
+	Headline    *string
+	Description *string
+	Category    *string
+	ImageURL    *string
+	Tags        []string
+}
+
 type logicalBookClosure struct {
 	OutcomeIndex int    `json:"outcomeIndex"`
 	TokenSide    string `json:"tokenSide"`
@@ -1075,6 +1084,43 @@ func buildLogicalResolveMessage(marketID string, network string, winningOutcomeI
 	return strings.Join(lines, "\n")
 }
 
+func buildLogicalUpdateMessage(marketID string, network string, walletAddress string, input logicalUpdateInput) string {
+	lines := []string{
+		"axiom.update-clob-market:",
+		fmt.Sprintf("marketId=%s", strings.TrimSpace(marketID)),
+		fmt.Sprintf("network=%s", strings.TrimSpace(network)),
+		fmt.Sprintf("walletAddress=%s", strings.TrimSpace(walletAddress)),
+	}
+	if input.Name != nil {
+		lines = append(lines, fmt.Sprintf("name=%s", strings.TrimSpace(*input.Name)))
+	}
+	if input.Headline != nil {
+		lines = append(lines, fmt.Sprintf("headline=%s", strings.TrimSpace(*input.Headline)))
+	}
+	if input.Description != nil {
+		lines = append(lines, fmt.Sprintf("description=%s", strings.TrimSpace(*input.Description)))
+	}
+	if input.Category != nil {
+		lines = append(lines, fmt.Sprintf("category=%s", strings.TrimSpace(*input.Category)))
+	}
+	if input.ImageURL != nil {
+		lines = append(lines, fmt.Sprintf("imageUrl=%s", strings.TrimSpace(*input.ImageURL)))
+	}
+	if len(input.Tags) > 0 {
+		tags := make([]string, 0, len(input.Tags))
+		for _, tag := range input.Tags {
+			trimmed := strings.TrimSpace(tag)
+			if trimmed != "" {
+				tags = append(tags, trimmed)
+			}
+		}
+		if len(tags) > 0 {
+			lines = append(lines, fmt.Sprintf("tags=%s", strings.Join(tags, ",")))
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
 func buildLogicalResolveRequest(wallet *evm.Wallet, network string, rpcURL string, marketID string, winningOutcomeIndex int, resolutionTxHashes []common.Hash, reason string) (api.ResolveClobMarketRequest, error) {
 	resolutionHashValues := make([]string, 0, len(resolutionTxHashes))
 	for _, txHash := range resolutionTxHashes {
@@ -1095,6 +1141,27 @@ func buildLogicalResolveRequest(wallet *evm.Wallet, network string, rpcURL strin
 		Reason:              reason,
 		Message:             message,
 		Signature:           signature,
+	}, nil
+}
+
+func buildLogicalUpdateRequest(wallet *evm.Wallet, network string, marketID string, input logicalUpdateInput) (api.UpdateClobMarketRequest, error) {
+	message := buildLogicalUpdateMessage(marketID, network, wallet.Address().Hex(), input)
+	signature, err := wallet.SignMessage(message)
+	if err != nil {
+		return api.UpdateClobMarketRequest{}, err
+	}
+	return api.UpdateClobMarketRequest{
+		MarketID:      strings.TrimSpace(marketID),
+		Network:       strings.TrimSpace(network),
+		WalletAddress: wallet.Address().Hex(),
+		Name:          input.Name,
+		Headline:      input.Headline,
+		Description:   input.Description,
+		Category:      input.Category,
+		ImageURL:      input.ImageURL,
+		Tags:          append([]string(nil), input.Tags...),
+		Message:       message,
+		Signature:     signature,
 	}, nil
 }
 
