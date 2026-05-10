@@ -357,11 +357,13 @@ func TestRegisterClobMarketUsesAppRootEndpoint(t *testing.T) {
 		IsVisible:      true,
 		AllowUnindexed: true,
 		Metadata: RegisterClobMarketMetadata{
-			Name:       "Logical Market",
-			Category:   "crypto",
-			MarketType: "yes_no",
-			StartsAt:   "2026-01-01T00:00:00Z",
-			EndsAt:     "2026-01-02T00:00:00Z",
+			Name:            "Logical Market",
+			Category:        "crypto",
+			MarketType:      "yes_no",
+			EvidenceSources: []string{"https://example.com/rules"},
+			Image:           "ipfs://logical-market-image",
+			StartsAt:        "2026-01-01T00:00:00Z",
+			EndsAt:          "2026-01-02T00:00:00Z",
 			DisplayOutcomes: []RegisterClobMarketDisplayOutcome{
 				{Key: "yes", Label: "Yes"},
 				{Key: "no", Label: "No"},
@@ -382,6 +384,12 @@ func TestRegisterClobMarketUsesAppRootEndpoint(t *testing.T) {
 	}
 	if gotRequest.MarketID != "logical-market-1" {
 		t.Fatalf("request marketId = %q, want logical payload", gotRequest.MarketID)
+	}
+	if gotRequest.Metadata.Image != "ipfs://logical-market-image" {
+		t.Fatalf("request metadata image = %q, want logical registration image", gotRequest.Metadata.Image)
+	}
+	if len(gotRequest.Metadata.EvidenceSources) != 1 || gotRequest.Metadata.EvidenceSources[0] != "https://example.com/rules" {
+		t.Fatalf("request metadata evidenceSources = %+v, want preserved evidence source", gotRequest.Metadata.EvidenceSources)
 	}
 	if len(gotRequest.BookSignatures) != 1 || gotRequest.BookSignatures[0].Signature != "0xdef" {
 		t.Fatalf("request bookSignatures = %+v, want preserved signatures", gotRequest.BookSignatures)

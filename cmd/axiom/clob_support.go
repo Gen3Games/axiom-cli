@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
@@ -83,6 +84,8 @@ type logicalRegisterOutcome struct {
 	Key         string
 	Label       string
 	Description string
+	MetadataURI string
+	QuestionID  common.Hash
 }
 
 type logicalLaunchOutcome struct {
@@ -102,6 +105,8 @@ type logicalCreateMarketPlan struct {
 	Description         string
 	Category            string
 	Tags                []string
+	EvidenceSources     []string
+	Image               string
 	MarketType          string
 	ResolutionCriteria  string
 	StartsAt            time.Time
@@ -110,6 +115,83 @@ type logicalCreateMarketPlan struct {
 	DisplayOutcomes     []logicalRegisterOutcome
 	LaunchOutcomes      []logicalLaunchOutcome
 	LogicalMarketIDHash common.Hash
+}
+
+type logicalOutcomeJSONInput struct {
+	Key         string `json:"key"`
+	Label       string `json:"label"`
+	Description string `json:"description"`
+	MetadataURI string `json:"metadataUri"`
+	QuestionID  string `json:"questionId"`
+	Launch      *bool  `json:"launch"`
+}
+
+func normalizeLogicalQuestionID(label string, value string, fallback string) (common.Hash, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return common.BytesToHash(crypto.Keccak256([]byte(fallback))), nil
+	}
+	if len(trimmed) != 66 || !strings.HasPrefix(trimmed, "0x") {
+		return common.Hash{}, fmt.Errorf("questionId for outcome %q must be a 32-byte 0x-prefixed value", label)
+	}
+	questionID := common.HexToHash(trimmed)
+	if questionID == (common.Hash{}) {
+		return common.Hash{}, fmt.Errorf("questionId for outcome %q must not be zero", label)
+	}
+	return questionID, nil
+}
+
+func collectLogicalEvidenceSources(cmd *cobra.Command) []string {
+	values := mustStringSliceFlag(cmd, "evidence-source")
+	results := make([]string, 0, len(values))
+	for _, value := range values {
+		for _, part := range strings.Split(value, ",") {
+			trimmed := strings.TrimSpace(part)
+			if trimmed != "" {
+				results = append(results, trimmed)
+			}
+		}
+	}
+	return results
+}
+
+func parseLogicalOutcomeJSONInputs(raw string, marketType string) ([]logicalRegisterOutcome, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil, nil
+	}
+	var inputs []logicalOutcomeJSONInput
+	if err := json.Unmarshal([]byte(trimmed), &inputs); err != nil {
+		return nil, fmt.Errorf("parse --outcomes-json: %w", err)
+	}
+	if len(inputs) == 0 {
+		return nil, errors.New("--outcomes-json must contain at least one outcome object")
+	}
+	results := make([]logicalRegisterOutcome, 0, len(inputs))
+	seenKeys := make(map[string]struct{}, len(inputs))
+	for index, input := range inputs {
+		label := strings.TrimSpace(input.Label)
+		if label == "" {
+			return nil, fmt.Errorf("outcomes[%d].label is required", index)
+		}
+		key := normalizeLogicalKey(input.Key, normalizeLogicalKey(label, fmt.Sprintf("outcome-%d", index)))
+		if _, ok := seenKeys[key]; ok {
+			return nil, fmt.Errorf("duplicate logical outcome key %q in --outcomes-json", key)
+		}
+		seenKeys[key] = struct{}{}
+		questionID, err := normalizeLogicalQuestionID(label, input.QuestionID, fmt.Sprintf("%s:%s", marketType, key))
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, logicalRegisterOutcome{
+			Key:         key,
+			Label:       label,
+			Description: strings.TrimSpace(input.Description),
+			MetadataURI: strings.TrimSpace(input.MetadataURI),
+			QuestionID:  questionID,
+		})
+	}
+	return results, nil
 }
 
 type logicalBindingResolution struct {
@@ -689,6 +771,18 @@ func parseLogicalOutcomeLabels(values []string) []string {
 }
 
 func collectLogicalDisplayOutcomes(cmd *cobra.Command, marketType string) ([]logicalRegisterOutcome, error) {
+	if parsed, err := parseLogicalOutcomeJSONInputs(mustStringFlag(cmd, "outcomes-json"), marketType); err != nil {
+		return nil, err
+	} else if len(parsed) > 0 {
+		if marketType == "yes_no" && len(parsed) != 2 {
+			return nil, errors.New("yes_no logical markets require exactly 2 outcomes in --outcomes-json")
+		}
+		if marketType == "multiple_choice" && len(parsed) < 2 {
+			return nil, errors.New("multiple_choice logical markets require at least two outcomes in --outcomes-json")
+		}
+		return parsed, nil
+	}
+
 	if marketType == "yes_no" {
 		yesLabel := strings.TrimSpace(mustStringFlag(cmd, "yes-label"))
 		if yesLabel == "" {
@@ -698,9 +792,29 @@ func collectLogicalDisplayOutcomes(cmd *cobra.Command, marketType string) ([]log
 		if noLabel == "" {
 			noLabel = "No"
 		}
+		yesQuestionID, err := normalizeLogicalQuestionID(yesLabel, mustStringFlag(cmd, "yes-question-id"), "yes_no:yes")
+		if err != nil {
+			return nil, err
+		}
+		noQuestionID, err := normalizeLogicalQuestionID(noLabel, mustStringFlag(cmd, "no-question-id"), "yes_no:no")
+		if err != nil {
+			return nil, err
+		}
 		return []logicalRegisterOutcome{
-			{Key: "yes", Label: yesLabel, Description: strings.TrimSpace(mustStringFlag(cmd, "yes-description"))},
-			{Key: "no", Label: noLabel, Description: strings.TrimSpace(mustStringFlag(cmd, "no-description"))},
+			{
+				Key:         "yes",
+				Label:       yesLabel,
+				Description: strings.TrimSpace(mustStringFlag(cmd, "yes-description")),
+				MetadataURI: strings.TrimSpace(mustStringFlag(cmd, "yes-metadata-uri")),
+				QuestionID:  yesQuestionID,
+			},
+			{
+				Key:         "no",
+				Label:       noLabel,
+				Description: strings.TrimSpace(mustStringFlag(cmd, "no-description")),
+				MetadataURI: strings.TrimSpace(mustStringFlag(cmd, "no-metadata-uri")),
+				QuestionID:  noQuestionID,
+			},
 		}, nil
 	}
 
@@ -710,10 +824,15 @@ func collectLogicalDisplayOutcomes(cmd *cobra.Command, marketType string) ([]log
 	}
 	results := make([]logicalRegisterOutcome, 0, len(labels))
 	for index, label := range labels {
+		questionID, err := normalizeLogicalQuestionID(label, "", fmt.Sprintf("multiple_choice:%s", normalizeLogicalKey(label, fmt.Sprintf("outcome-%d", index))))
+		if err != nil {
+			return nil, err
+		}
 		results = append(results, logicalRegisterOutcome{
 			Key:         normalizeLogicalKey(label, fmt.Sprintf("outcome-%d", index)),
 			Label:       label,
 			Description: fmt.Sprintf("%s is the winning displayed outcome.", label),
+			QuestionID:  questionID,
 		})
 	}
 	return results, nil
@@ -800,21 +919,34 @@ func buildLogicalMarketPlan(cmd *cobra.Command) (*logicalCreateMarketPlan, error
 		bindingOutcomes = displayOutcomes[:1]
 	}
 	for _, outcome := range bindingOutcomes {
+		metadataDescription := strings.TrimSpace(description)
+		if metadataDescription == "" {
+			metadataDescription = fmt.Sprintf("Binary CTF market where YES resolves if the displayed winning outcome is %s.", outcome.Label)
+		}
+		if outcome.Description != "" {
+			metadataDescription = strings.TrimSpace(description)
+			if metadataDescription == "" {
+				metadataDescription = outcome.Description
+			}
+		}
 		launchOutcomes = append(launchOutcomes, logicalLaunchOutcome{
 			Key:                 outcome.Key,
 			Label:               outcome.Label,
 			Description:         outcome.Description,
 			MetadataName:        fmt.Sprintf("%s - %s", name, outcome.Label),
-			MetadataDescription: fmt.Sprintf("Binary CTF market where YES resolves if the displayed winning outcome is %s.", outcome.Label),
-			QuestionID:          common.Hash{},
+			MetadataDescription: metadataDescription,
+			QuestionID:          outcome.QuestionID,
+			MetadataURI:         outcome.MetadataURI,
 		})
 	}
 
 	logicalMarketHashInput := []byte("ctf:" + marketID)
 	logicalMarketHash := common.BytesToHash(crypto.Keccak256(logicalMarketHashInput))
 	for index := range launchOutcomes {
-		questionHashInput := []byte(fmt.Sprintf("%s:%s", marketID, launchOutcomes[index].Key))
-		launchOutcomes[index].QuestionID = common.BytesToHash(crypto.Keccak256(questionHashInput))
+		if launchOutcomes[index].QuestionID == (common.Hash{}) {
+			questionHashInput := []byte(fmt.Sprintf("%s:%s", marketID, launchOutcomes[index].Key))
+			launchOutcomes[index].QuestionID = common.BytesToHash(crypto.Keccak256(questionHashInput))
+		}
 	}
 
 	return &logicalCreateMarketPlan{
@@ -824,6 +956,8 @@ func buildLogicalMarketPlan(cmd *cobra.Command) (*logicalCreateMarketPlan, error
 		Description:         description,
 		Category:            category,
 		Tags:                trimmedTags,
+		EvidenceSources:     collectLogicalEvidenceSources(cmd),
+		Image:               strings.TrimSpace(mustStringFlag(cmd, "image")),
 		MarketType:          marketType,
 		ResolutionCriteria:  resolutionCriteria,
 		StartsAt:            startsAt.UTC(),
@@ -837,16 +971,22 @@ func buildLogicalMarketPlan(cmd *cobra.Command) (*logicalCreateMarketPlan, error
 
 func uploadLogicalLaunchMetadata(ctx context.Context, cliCtx *cliContext, wallet *evm.Wallet, network string, dryRun bool, plan *logicalCreateMarketPlan) error {
 	for index := range plan.LaunchOutcomes {
+		if strings.TrimSpace(plan.LaunchOutcomes[index].MetadataURI) != "" {
+			plan.LaunchOutcomes[index].MetadataURI = getIPFSURI(plan.LaunchOutcomes[index].MetadataURI)
+			continue
+		}
 		if dryRun {
 			plan.LaunchOutcomes[index].MetadataURI = fmt.Sprintf("ipfs://dry-run/%s/%s", plan.MarketID, plan.LaunchOutcomes[index].Key)
 			continue
 		}
 		metadata := clobMarketMetadata{
-			Name:        plan.LaunchOutcomes[index].MetadataName,
-			Headline:    plan.Headline,
-			Description: plan.LaunchOutcomes[index].MetadataDescription,
-			Category:    plan.Category,
-			Tags:        plan.Tags,
+			Name:            plan.LaunchOutcomes[index].MetadataName,
+			Headline:        plan.Headline,
+			Description:     plan.LaunchOutcomes[index].MetadataDescription,
+			Category:        plan.Category,
+			Tags:            plan.Tags,
+			EvidenceSources: plan.EvidenceSources,
+			Image:           plan.Image,
 			Outcomes: []clobOutcomeMetadata{
 				{Index: 0, Label: "Yes", Description: fmt.Sprintf("%s is the winning displayed outcome", plan.LaunchOutcomes[index].Label)},
 				{Index: 1, Label: "No", Description: fmt.Sprintf("%s is not the winning displayed outcome", plan.LaunchOutcomes[index].Label)},
@@ -1004,6 +1144,8 @@ func buildLogicalRegisterRequest(wallet *evm.Wallet, network string, chainID int
 		Tags:               plan.Tags,
 		MarketType:         plan.MarketType,
 		ResolutionCriteria: plan.ResolutionCriteria,
+		EvidenceSources:    plan.EvidenceSources,
+		Image:              plan.Image,
 		StartsAt:           plan.StartsAt.Format(time.RFC3339),
 		EndsAt:             plan.EndsAt.Format(time.RFC3339),
 		ResolveBy:          plan.ResolveBy.Format(time.RFC3339),

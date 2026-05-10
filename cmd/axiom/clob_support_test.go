@@ -284,3 +284,52 @@ func TestBuildLogicalMarketPlanMultipleChoiceUsesAllLaunchOutcomes(t *testing.T)
 		t.Fatalf("display outcome key = %q, want draw", plan.DisplayOutcomes[2].Key)
 	}
 }
+
+func TestBuildLogicalMarketPlanUsesOutcomesJSONOverrides(t *testing.T) {
+	cmd := mustFindCommand(t, newClobCommand(), "logical", "create")
+	args := []string{
+		"--market-id", "logical-plan-json",
+		"--market-type", "multiple_choice",
+		"--name", "JSON Outcomes",
+		"--description", "JSON-driven logical market",
+		"--category", "sports",
+		"--resolution-criteria", "Official final result.",
+		"--starts-at", "2026-01-01T00:00:00Z",
+		"--ends-at", "2026-01-02T00:00:00Z",
+		"--image", "ipfs://image-cid",
+		"--evidence-source", "https://example.com/rules",
+		"--outcomes-json", `[
+			{"key":"warriors","label":"Warriors","description":"Warriors win","metadataUri":"ipfs://warriors-meta","questionId":"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+			{"key":"lakers","label":"Lakers","description":"Lakers win","questionId":"0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+			{"key":"draw","label":"Draw","description":"Game ends level"}
+		]`,
+	}
+	if err := cmd.ParseFlags(args); err != nil {
+		t.Fatalf("ParseFlags() error = %v", err)
+	}
+	plan, err := buildLogicalMarketPlan(cmd)
+	if err != nil {
+		t.Fatalf("buildLogicalMarketPlan() error = %v", err)
+	}
+	if len(plan.DisplayOutcomes) != 3 || len(plan.LaunchOutcomes) != 3 {
+		t.Fatalf("display/launch outcomes = %d/%d, want 3/3", len(plan.DisplayOutcomes), len(plan.LaunchOutcomes))
+	}
+	if plan.Image != "ipfs://image-cid" {
+		t.Fatalf("image = %q, want ipfs://image-cid", plan.Image)
+	}
+	if len(plan.EvidenceSources) != 1 || plan.EvidenceSources[0] != "https://example.com/rules" {
+		t.Fatalf("evidence sources = %+v, want one custom source", plan.EvidenceSources)
+	}
+	if plan.DisplayOutcomes[0].Description != "Warriors win" {
+		t.Fatalf("display outcome description = %q, want Warriors win", plan.DisplayOutcomes[0].Description)
+	}
+	if plan.LaunchOutcomes[0].MetadataURI != "ipfs://warriors-meta" {
+		t.Fatalf("launch metadata uri = %q, want ipfs://warriors-meta", plan.LaunchOutcomes[0].MetadataURI)
+	}
+	if got := strings.ToLower(plan.LaunchOutcomes[0].QuestionID.Hex()); got != "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
+		t.Fatalf("question id = %q, want custom override", got)
+	}
+	if plan.LaunchOutcomes[2].QuestionID == (common.Hash{}) {
+		t.Fatal("third outcome question id = zero, want derived fallback")
+	}
+}

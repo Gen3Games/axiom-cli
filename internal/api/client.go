@@ -117,6 +117,8 @@ type RegisterClobMarketMetadata struct {
 	Tags               []string                           `json:"tags,omitempty"`
 	MarketType         string                             `json:"marketType"`
 	ResolutionCriteria string                             `json:"resolutionCriteria,omitempty"`
+	EvidenceSources    []string                           `json:"evidenceSources,omitempty"`
+	Image              string                             `json:"image,omitempty"`
 	StartsAt           string                             `json:"startsAt"`
 	EndsAt             string                             `json:"endsAt"`
 	ResolveBy          string                             `json:"resolveBy,omitempty"`
@@ -180,17 +182,17 @@ type ResolveClobMarketRequest struct {
 }
 
 type ResolveClobMarketResponse struct {
-	Success             bool     `json:"success"`
-	MarketID            string   `json:"marketId"`
-	SignerAddress       string   `json:"signerAddress"`
-	ResolvedOutcomeID   string   `json:"resolvedOutcomeId"`
-	ResolvedOutcomeLabel string  `json:"resolvedOutcomeLabel"`
-	WinningOutcomeIndex int      `json:"winningOutcomeIndex"`
-	BooksClosed         int      `json:"booksClosed"`
-	BooksTotal          int      `json:"booksTotal"`
-	AlreadyResolved     bool     `json:"alreadyResolved,omitempty"`
-	Warnings            []string `json:"warnings,omitempty"`
-	Error               string   `json:"error"`
+	Success              bool     `json:"success"`
+	MarketID             string   `json:"marketId"`
+	SignerAddress        string   `json:"signerAddress"`
+	ResolvedOutcomeID    string   `json:"resolvedOutcomeId"`
+	ResolvedOutcomeLabel string   `json:"resolvedOutcomeLabel"`
+	WinningOutcomeIndex  int      `json:"winningOutcomeIndex"`
+	BooksClosed          int      `json:"booksClosed"`
+	BooksTotal           int      `json:"booksTotal"`
+	AlreadyResolved      bool     `json:"alreadyResolved,omitempty"`
+	Warnings             []string `json:"warnings,omitempty"`
+	Error                string   `json:"error"`
 }
 
 type RegisterRequest struct {

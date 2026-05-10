@@ -1062,6 +1062,12 @@ func TestClobLogicalRegisterBuildsAndSubmitsLogicalPayload(t *testing.T) {
 	if len(request.Metadata.DisplayOutcomes) != 2 || request.Metadata.DisplayOutcomes[0].Label != "Yes" || request.Metadata.DisplayOutcomes[1].Label != "No" {
 		t.Fatalf("display outcomes = %+v, want yes/no display rows", request.Metadata.DisplayOutcomes)
 	}
+	if request.Metadata.Image != "" {
+		t.Fatalf("registration image = %q, want empty when --image is omitted", request.Metadata.Image)
+	}
+	if len(request.Metadata.EvidenceSources) != 0 {
+		t.Fatalf("registration evidenceSources = %+v, want empty when none supplied", request.Metadata.EvidenceSources)
+	}
 	if len(request.BookSignatures) != 1 || request.BookSignatures[0].OutcomeIndex != 0 || request.BookSignatures[0].Signature == "" {
 		t.Fatalf("book signatures = %+v, want one signature for the yes_no binding", request.BookSignatures)
 	}
@@ -1129,6 +1135,8 @@ func TestClobLogicalCreateUploadsLaunchMetadataAndRegistersLaunchedMarkets(t *te
 		"--headline", "CLI logical create smoke",
 		"--description", "Creates and registers one binary binding",
 		"--category", "crypto",
+		"--image", "ipfs://market-image",
+		"--evidence-source", "https://example.com/rules",
 		"--resolution-criteria", "Resolved off-chain for test coverage.",
 		"--starts-at", "2026-01-01T00:00:00Z",
 		"--ends-at", "2026-01-02T00:00:00Z",
@@ -1157,8 +1165,23 @@ func TestClobLogicalCreateUploadsLaunchMetadataAndRegistersLaunchedMarkets(t *te
 	if metadataUpload.Metadata.Name != "Logical Create XRP Above $3 - Yes" {
 		t.Fatalf("metadata upload name = %q, want logical binary metadata title", metadataUpload.Metadata.Name)
 	}
+	if metadataUpload.Metadata.Image != "ipfs://market-image" {
+		t.Fatalf("metadata upload image = %q, want ipfs://market-image", metadataUpload.Metadata.Image)
+	}
+	if len(metadataUpload.Metadata.EvidenceSources) != 1 || metadataUpload.Metadata.EvidenceSources[0] != "https://example.com/rules" {
+		t.Fatalf("metadata upload evidence sources = %+v, want one custom source", metadataUpload.Metadata.EvidenceSources)
+	}
+	if metadataUpload.Metadata.Description != "Creates and registers one binary binding" {
+		t.Fatalf("metadata upload description = %q, want original logical description", metadataUpload.Metadata.Description)
+	}
 	if request.MarketID != "logical-created-1" {
 		t.Fatalf("registration marketId = %q, want logical-created-1", request.MarketID)
+	}
+	if request.Metadata.Image != "ipfs://market-image" {
+		t.Fatalf("registration image = %q, want ipfs://market-image", request.Metadata.Image)
+	}
+	if len(request.Metadata.EvidenceSources) != 1 || request.Metadata.EvidenceSources[0] != "https://example.com/rules" {
+		t.Fatalf("registration evidence sources = %+v, want one custom source", request.Metadata.EvidenceSources)
 	}
 	if len(request.Addresses) != 1 || !strings.EqualFold(request.Addresses[0], "0x00000000000000000000000000000000000000D1") {
 		t.Fatalf("registration addresses = %+v, want launched market address", request.Addresses)
@@ -1171,6 +1194,117 @@ func TestClobLogicalCreateUploadsLaunchMetadataAndRegistersLaunchedMarkets(t *te
 	}
 	if !strings.Contains(stdout, "logical-created-1") || !strings.Contains(stdout, "launchTxHash") {
 		t.Fatalf("clob logical create stdout missing launch payload\nstdout:\n%s", stdout)
+	}
+}
+
+func TestClobLogicalCreateUsesOutcomesJSONMetadataAndQuestionOverrides(t *testing.T) {
+	setCLIEnv(t)
+	server, state := newMockAPIServer(t)
+	defer server.Close()
+
+	privateKey := "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+	if _, stderr, err := executeCLI(t, "--json", "wallet", "import", "--private-key", privateKey); err != nil {
+		t.Fatalf("wallet import error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	originalLaunchLogicalMarket := launchAxiomCTFLogicalMarket
+	var receivedLaunchParams evm.LaunchAxiomCTFLogicalMarketParams
+	launchAxiomCTFLogicalMarket = func(_ context.Context, rpcURL string, chainID *big.Int, privateKeyHex string, params evm.LaunchAxiomCTFLogicalMarketParams) (*evm.LaunchAxiomCTFLogicalMarketResult, error) {
+		receivedLaunchParams = params
+		return &evm.LaunchAxiomCTFLogicalMarketResult{
+			TxHash:      common.HexToHash("0x4444444444444444444444444444444444444444444444444444444444444444"),
+			BlockNumber: 12346,
+			LaunchedMarkets: []evm.LaunchedAxiomCTFMarket{
+				{
+					OutcomeIndex:    0,
+					Label:           "Warriors",
+					MarketAddress:   common.HexToAddress("0x00000000000000000000000000000000000000E1"),
+					OutcomeTokenIDs: [2]string{"101", "102"},
+					MetadataURI:     "ipfs://warriors-meta",
+					QuestionID:      common.HexToHash("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+					ConditionID:     common.HexToHash("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+				},
+				{
+					OutcomeIndex:    1,
+					Label:           "Lakers",
+					MarketAddress:   common.HexToAddress("0x00000000000000000000000000000000000000E2"),
+					OutcomeTokenIDs: [2]string{"201", "202"},
+					MetadataURI:     "ipfs://bafkreiuploadtest",
+					QuestionID:      common.HexToHash("0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"),
+					ConditionID:     common.HexToHash("0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"),
+				},
+			},
+		}, nil
+	}
+	t.Cleanup(func() {
+		launchAxiomCTFLogicalMarket = originalLaunchLogicalMarket
+	})
+
+	stdout, stderr, err := executeCLI(
+		t,
+		"--json",
+		"--console-api-url", server.URL+"/api/cli",
+		"clob",
+		"logical",
+		"create",
+		"--market-id", "logical-json-create-1",
+		"--market-type", "multiple_choice",
+		"--name", "Logical JSON Create",
+		"--headline", "CLI logical JSON create smoke",
+		"--description", "Creates and registers multiple binary bindings",
+		"--category", "sports",
+		"--resolution-criteria", "Resolved off-chain for JSON test coverage.",
+		"--starts-at", "2026-01-01T00:00:00Z",
+		"--ends-at", "2026-01-02T00:00:00Z",
+		"--image", "ipfs://logical-json-image",
+		"--evidence-source", "https://example.com/json-rules",
+		"--outcomes-json", `[
+			{"key":"warriors","label":"Warriors","description":"Warriors win the game","metadataUri":"ipfs://warriors-meta","questionId":"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+			{"key":"lakers","label":"Lakers","description":"Lakers win the game","questionId":"0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}
+		]`,
+		"--hidden",
+	)
+	if err != nil {
+		t.Fatalf("clob logical create with outcomes-json error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	if len(receivedLaunchParams.Outcomes) != 2 {
+		t.Fatalf("launch outcomes = %+v, want 2", receivedLaunchParams.Outcomes)
+	}
+	if receivedLaunchParams.Outcomes[0].MetadataURI != "ipfs://warriors-meta" {
+		t.Fatalf("first launch metadataURI = %q, want ipfs://warriors-meta", receivedLaunchParams.Outcomes[0].MetadataURI)
+	}
+	if got := strings.ToLower(receivedLaunchParams.Outcomes[0].QuestionID.Hex()); got != "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
+		t.Fatalf("first questionID = %q, want custom override", got)
+	}
+	if got := strings.ToLower(receivedLaunchParams.Outcomes[1].QuestionID.Hex()); got != "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" {
+		t.Fatalf("second questionID = %q, want custom override", got)
+	}
+
+	state.mu.Lock()
+	request := state.lastClobRegistration
+	metadataUpload := state.lastMetadataUpload
+	state.mu.Unlock()
+	if metadataUpload.Metadata.Name != "Logical JSON Create - Lakers" {
+		t.Fatalf("metadata upload name = %q, want second uploaded outcome title", metadataUpload.Metadata.Name)
+	}
+	if metadataUpload.Metadata.Image != "ipfs://logical-json-image" {
+		t.Fatalf("metadata upload image = %q, want ipfs://logical-json-image", metadataUpload.Metadata.Image)
+	}
+	if len(metadataUpload.Metadata.EvidenceSources) != 1 || metadataUpload.Metadata.EvidenceSources[0] != "https://example.com/json-rules" {
+		t.Fatalf("metadata upload evidence sources = %+v, want one JSON custom source", metadataUpload.Metadata.EvidenceSources)
+	}
+	if request.Metadata.Image != "ipfs://logical-json-image" {
+		t.Fatalf("registration image = %q, want ipfs://logical-json-image", request.Metadata.Image)
+	}
+	if len(request.Metadata.EvidenceSources) != 1 || request.Metadata.EvidenceSources[0] != "https://example.com/json-rules" {
+		t.Fatalf("registration evidence sources = %+v, want one JSON custom source", request.Metadata.EvidenceSources)
+	}
+	if request.Metadata.DisplayOutcomes[0].Description != "Warriors win the game" {
+		t.Fatalf("display outcome description = %q, want Warriors win the game", request.Metadata.DisplayOutcomes[0].Description)
+	}
+	if !strings.Contains(stdout, "logical-json-create-1") || !strings.Contains(stdout, "launchTxHash") {
+		t.Fatalf("clob logical create stdout missing json launch payload\nstdout:\n%s", stdout)
 	}
 }
 
