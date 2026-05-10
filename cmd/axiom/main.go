@@ -1946,10 +1946,10 @@ func newClobCommand() *cobra.Command {
 			}
 
 			result := map[string]any{
-				"mode":               "logical-resolve",
-				"marketId":           market.ID,
+				"mode":                "logical-resolve",
+				"marketId":            market.ID,
 				"winningOutcomeIndex": winningOutcomeIndex,
-				"resolutions":        make([]map[string]any, 0, len(resolutionPlan)),
+				"resolutions":         make([]map[string]any, 0, len(resolutionPlan)),
 			}
 			reason := firstNonEmpty(strings.TrimSpace(mustStringFlag(cmd, "reason")), "logical-market-resolved")
 
@@ -1957,11 +1957,11 @@ func newClobCommand() *cobra.Command {
 				preview := make([]map[string]any, 0, len(resolutionPlan))
 				for _, item := range resolutionPlan {
 					preview = append(preview, map[string]any{
-						"outcomeIndex":   item.Binding.OutcomeIndex,
-						"outcomeLabel":   item.Binding.Label,
+						"outcomeIndex":    item.Binding.OutcomeIndex,
+						"outcomeLabel":    item.Binding.Label,
 						"contractAddress": item.Binding.ContractAddress,
-						"won":            item.Won,
-						"payouts":        bigIntSliceToStrings(item.Payouts),
+						"won":             item.Won,
+						"payouts":         bigIntSliceToStrings(item.Payouts),
 					})
 				}
 				result["dryRun"] = true
@@ -2045,27 +2045,34 @@ func newClobCommand() *cobra.Command {
 			if market == "" {
 				return errors.New("--market is required")
 			}
-			outcome, err := cmd.Flags().GetInt("outcome")
+			marketDetails, selection, err := resolveClobReadSelection(cmd.Context(), ctx, cmd, market)
 			if err != nil {
 				return err
 			}
 			projectionURL := strings.TrimSpace(mustStringFlag(cmd, "projection-url"))
-			book, err := ctx.API.GetClobBook(cmd.Context(), projectionURL, market, outcome)
+			book, err := ctx.API.GetClobBook(cmd.Context(), projectionURL, marketDetails.ID, selection.Binding.OutcomeIndex, selection.DisplayedSide)
 			if err != nil {
 				return err
 			}
-			depth, err := ctx.API.GetClobDepth(cmd.Context(), projectionURL, market, outcome)
+			depth, err := ctx.API.GetClobDepth(cmd.Context(), projectionURL, marketDetails.ID, selection.Binding.OutcomeIndex, selection.DisplayedSide)
 			if err != nil {
 				return err
 			}
 			return printOutput(ctx.JSON, map[string]any{
-				"book":  book,
-				"depth": depth,
+				"marketId":  marketDetails.ID,
+				"outcome":   selection.LogicalOutcome.Index,
+				"label":     selection.LogicalOutcome.Label,
+				"tokenSide": selection.DisplayedSide,
+				"book":      book,
+				"depth":     depth,
 			})
 		},
 	}
 	depthCmd.Flags().String("market", "", "Logical market ID for the CLOB proposition")
 	depthCmd.Flags().Int("outcome", 0, "Displayed outcome index within the logical market")
+	depthCmd.Flags().String("label", "", "Displayed outcome label within the logical market")
+	depthCmd.Flags().String("token-side", "yes", "Hosted token-side book to inspect: yes or no; inferred from the displayed outcome for single-binding yes/no markets when omitted")
+	depthCmd.Flags().String("instance-date", "", "Instance date for recurring markets in YYYY-MM-DD format")
 	bookCmd.AddCommand(depthCmd)
 	cmd.AddCommand(bookCmd)
 	cmd.AddCommand(newClobSmokeCommand())
@@ -2223,16 +2230,12 @@ func newClobCommand() *cobra.Command {
 			}
 			market := strings.TrimSpace(mustStringFlag(cmd, "market"))
 			mine := mustBoolFlag(cmd, "mine")
-			outcome, err := cmd.Flags().GetInt("outcome")
-			if err != nil {
-				return err
-			}
 			maker := strings.TrimSpace(mustStringFlag(cmd, "maker"))
 			if mine {
 				maker = firstNonEmpty(maker, ctx.Profile.EVMAddress)
 			}
 			if market == "" && maker == "" {
-				return errors.New("provide --market with --outcome, or use --maker/--mine for wallet-wide order history")
+				return errors.New("provide --market with --outcome or --label, or use --maker/--mine for wallet-wide order history")
 			}
 			status := strings.TrimSpace(mustStringFlag(cmd, "status"))
 			limit, err := cmd.Flags().GetInt("limit")
@@ -2245,9 +2248,6 @@ func newClobCommand() *cobra.Command {
 			}
 			projectionURL := strings.TrimSpace(mustStringFlag(cmd, "projection-url"))
 			filters := url.Values{}
-			if market != "" {
-				filters.Set("clob_id", fmt.Sprintf("%s-%d", market, outcome))
-			}
 			if maker != "" {
 				filters.Set("maker", maker)
 			}
@@ -2260,14 +2260,26 @@ func newClobCommand() *cobra.Command {
 			if limit > 0 {
 				filters.Set("limit", strconv.Itoa(limit))
 			}
+			var marketDetails *api.MarketDetails
+			var selection *clobSelection
+			if market != "" {
+				marketDetails, selection, err = resolveClobReadSelection(cmd.Context(), ctx, cmd, market)
+				if err != nil {
+					return err
+				}
+				filters.Set("clob_id", clobIDForMarketOutcome(marketDetails.ID, selection.Binding.OutcomeIndex, selection.DisplayedSide))
+				filters.Set("token_side", selection.DisplayedSide)
+			}
 			orders, err := ctx.API.ListClobOrders(cmd.Context(), projectionURL, filters)
 			if err != nil {
 				return err
 			}
 			payload := map[string]any{"items": orders, "total": len(orders)}
-			if market != "" {
-				payload["market"] = market
-				payload["outcome"] = outcome
+			if marketDetails != nil && selection != nil {
+				payload["market"] = marketDetails.ID
+				payload["outcome"] = selection.LogicalOutcome.Index
+				payload["label"] = selection.LogicalOutcome.Label
+				payload["tokenSide"] = selection.DisplayedSide
 			}
 			if maker != "" {
 				payload["maker"] = maker
@@ -2277,11 +2289,14 @@ func newClobCommand() *cobra.Command {
 	}
 	ordersListCmd.Flags().String("market", "", "Logical market ID for the CLOB proposition; optional when using --maker or --mine")
 	ordersListCmd.Flags().Int("outcome", 0, "Displayed outcome index within the logical market")
+	ordersListCmd.Flags().String("label", "", "Displayed outcome label within the logical market")
+	ordersListCmd.Flags().String("token-side", "yes", "Hosted token-side book to inspect when using --market: yes or no; inferred from the displayed outcome for single-binding yes/no markets when omitted")
 	ordersListCmd.Flags().String("maker", "", "Optional maker wallet filter")
 	ordersListCmd.Flags().Bool("mine", false, "Filter orders to the active profile wallet")
 	ordersListCmd.Flags().String("status", "", "Optional order status filter")
 	ordersListCmd.Flags().Bool("active-only", false, "Only return resting active orders")
 	ordersListCmd.Flags().Int("limit", 20, "Maximum number of orders to return")
+	ordersListCmd.Flags().String("instance-date", "", "Instance date for recurring markets in YYYY-MM-DD format")
 	ordersCmd.AddCommand(ordersListCmd)
 	cmd.AddCommand(ordersCmd)
 
@@ -2296,16 +2311,12 @@ func newClobCommand() *cobra.Command {
 			}
 			market := strings.TrimSpace(mustStringFlag(cmd, "market"))
 			mine := mustBoolFlag(cmd, "mine")
-			outcome, err := cmd.Flags().GetInt("outcome")
-			if err != nil {
-				return err
-			}
 			wallet := strings.TrimSpace(mustStringFlag(cmd, "wallet"))
 			if mine {
 				wallet = firstNonEmpty(wallet, ctx.Profile.EVMAddress)
 			}
 			if market == "" && wallet == "" {
-				return errors.New("provide --market with --outcome, or use --wallet/--mine for wallet-wide fill history")
+				return errors.New("provide --market with --outcome or --label, or use --wallet/--mine for wallet-wide fill history")
 			}
 			limit, err := cmd.Flags().GetInt("limit")
 			if err != nil {
@@ -2313,8 +2324,15 @@ func newClobCommand() *cobra.Command {
 			}
 			projectionURL := strings.TrimSpace(mustStringFlag(cmd, "projection-url"))
 			filters := url.Values{}
+			var marketDetails *api.MarketDetails
+			var selection *clobSelection
 			if market != "" {
-				filters.Set("clob_id", fmt.Sprintf("%s-%d", market, outcome))
+				marketDetails, selection, err = resolveClobReadSelection(cmd.Context(), ctx, cmd, market)
+				if err != nil {
+					return err
+				}
+				filters.Set("clob_id", clobIDForMarketOutcome(marketDetails.ID, selection.Binding.OutcomeIndex, selection.DisplayedSide))
+				filters.Set("token_side", selection.DisplayedSide)
 			}
 			if wallet != "" {
 				filters.Set("wallet", wallet)
@@ -2327,9 +2345,11 @@ func newClobCommand() *cobra.Command {
 				return err
 			}
 			payload := map[string]any{"items": fills, "total": len(fills)}
-			if market != "" {
-				payload["market"] = market
-				payload["outcome"] = outcome
+			if marketDetails != nil && selection != nil {
+				payload["market"] = marketDetails.ID
+				payload["outcome"] = selection.LogicalOutcome.Index
+				payload["label"] = selection.LogicalOutcome.Label
+				payload["tokenSide"] = selection.DisplayedSide
 			}
 			if wallet != "" {
 				payload["wallet"] = wallet
@@ -2339,9 +2359,12 @@ func newClobCommand() *cobra.Command {
 	}
 	fillsListCmd.Flags().String("market", "", "Logical market ID for the CLOB proposition; optional when using --wallet or --mine")
 	fillsListCmd.Flags().Int("outcome", 0, "Displayed outcome index within the logical market")
+	fillsListCmd.Flags().String("label", "", "Displayed outcome label within the logical market")
+	fillsListCmd.Flags().String("token-side", "yes", "Hosted token-side book to inspect when using --market: yes or no; inferred from the displayed outcome for single-binding yes/no markets when omitted")
 	fillsListCmd.Flags().String("wallet", "", "Optional wallet filter for buyer or seller participation")
 	fillsListCmd.Flags().Bool("mine", false, "Filter fills to the active profile wallet")
 	fillsListCmd.Flags().Int("limit", 20, "Maximum number of fills to return")
+	fillsListCmd.Flags().String("instance-date", "", "Instance date for recurring markets in YYYY-MM-DD format")
 	fillsCmd.AddCommand(fillsListCmd)
 	cmd.AddCommand(fillsCmd)
 
@@ -2525,7 +2548,7 @@ func newClobCommand() *cobra.Command {
 			if requester != "" && !strings.EqualFold(strings.TrimSpace(order.Maker), requester) {
 				return errors.New("requester must match the order maker")
 			}
-			outcome, err := cmd.Flags().GetInt("outcome")
+			marketDetails, selection, err := resolveClobReadSelection(cmd.Context(), ctx, cmd, market)
 			if err != nil {
 				return err
 			}
@@ -2535,7 +2558,7 @@ func newClobCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			cancelRequest, err := buildSignedClobCancel(wallet, signingDomain, orderID, market, outcome, order.TokenSide, requester, reason)
+			cancelRequest, err := buildSignedClobCancel(wallet, signingDomain, orderID, marketDetails.ID, selection.Binding.OutcomeIndex, order.TokenSide, requester, reason)
 			if err != nil {
 				return err
 			}
@@ -2549,8 +2572,11 @@ func newClobCommand() *cobra.Command {
 	cancelCmd.Flags().String("order-id", "", "Order UUID to cancel")
 	cancelCmd.Flags().String("market", "", "Logical market ID for the order book")
 	cancelCmd.Flags().Int("outcome", 0, "Displayed outcome index within the logical market")
+	cancelCmd.Flags().String("label", "", "Displayed outcome label within the logical market")
 	cancelCmd.Flags().String("requester", "", "Requester wallet address; defaults to the active profile EVM address")
 	cancelCmd.Flags().String("reason", "user-requested", "Optional cancellation reason")
+	cancelCmd.Flags().String("token-side", "yes", "Hosted token-side book to inspect: yes or no; inferred from the displayed outcome for single-binding yes/no markets when omitted")
+	cancelCmd.Flags().String("instance-date", "", "Instance date for recurring markets in YYYY-MM-DD format")
 	orderCmd.AddCommand(cancelCmd)
 	cmd.AddCommand(orderCmd)
 

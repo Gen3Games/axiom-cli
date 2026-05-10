@@ -9,6 +9,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -17,8 +18,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Gen3Games/axiom-cli/internal/app"
 	"github.com/Gen3Games/axiom-cli/internal/api"
+	"github.com/Gen3Games/axiom-cli/internal/app"
 	"github.com/Gen3Games/axiom-cli/internal/evm"
 	axrpl "github.com/Gen3Games/axiom-cli/internal/xrpl"
 	"github.com/ethereum/go-ethereum/common"
@@ -1411,6 +1412,210 @@ func TestClobSmokeLiveSubmitsAndCancelsOrder(t *testing.T) {
 	}
 }
 
+func TestClobBookDepthResolvesSingleBindingDisplayedNoSide(t *testing.T) {
+	setCLIEnv(t)
+	server, state := newMockAPIServer(t)
+	defer server.Close()
+
+	stdout, stderr, err := executeCLI(
+		t,
+		"--json",
+		"--api-url", server.URL+"/api/cli",
+		"clob",
+		"--projection-url", server.URL,
+		"book",
+		"depth",
+		"--market", "clob-yes-no-single",
+		"--outcome", "1",
+	)
+	if err != nil {
+		t.Fatalf("clob book depth error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+		t.Fatalf("json.Unmarshal(stdout) error = %v\nstdout:\n%s", err, stdout)
+	}
+	if payload["tokenSide"] != "no" {
+		t.Fatalf("tokenSide = %#v, want %q", payload["tokenSide"], "no")
+	}
+	book, ok := payload["book"].(map[string]any)
+	if !ok {
+		t.Fatalf("book payload = %#v, want object", payload["book"])
+	}
+	if book["outcome"] != float64(0) {
+		t.Fatalf("book outcome = %#v, want 0", book["outcome"])
+	}
+
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.lastClobBookPath != "/books/clob-yes-no-single/0?token_side=no" {
+		t.Fatalf("book path = %q, want %q", state.lastClobBookPath, "/books/clob-yes-no-single/0?token_side=no")
+	}
+	if state.lastClobDepthPath != "/books/clob-yes-no-single/0/depth?token_side=no" {
+		t.Fatalf("depth path = %q, want %q", state.lastClobDepthPath, "/books/clob-yes-no-single/0/depth?token_side=no")
+	}
+}
+
+func TestClobOrdersListResolvesSingleBindingDisplayedNoSide(t *testing.T) {
+	setCLIEnv(t)
+	server, state := newMockAPIServer(t)
+	defer server.Close()
+
+	stdout, stderr, err := executeCLI(
+		t,
+		"--json",
+		"--api-url", server.URL+"/api/cli",
+		"clob",
+		"--projection-url", server.URL,
+		"orders",
+		"list",
+		"--market", "clob-yes-no-single",
+		"--outcome", "1",
+	)
+	if err != nil {
+		t.Fatalf("clob orders list error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+		t.Fatalf("json.Unmarshal(stdout) error = %v\nstdout:\n%s", err, stdout)
+	}
+	if payload["tokenSide"] != "no" {
+		t.Fatalf("tokenSide = %#v, want %q", payload["tokenSide"], "no")
+	}
+
+	state.mu.Lock()
+	rawQuery := state.lastClobOrdersQuery
+	state.mu.Unlock()
+	query, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		t.Fatalf("ParseQuery(%q) error = %v", rawQuery, err)
+	}
+	if query.Get("clob_id") != "clob-yes-no-single-0-no" {
+		t.Fatalf("clob_id = %q, want %q", query.Get("clob_id"), "clob-yes-no-single-0-no")
+	}
+	if query.Get("token_side") != "no" {
+		t.Fatalf("token_side = %q, want %q", query.Get("token_side"), "no")
+	}
+	if query.Get("limit") != "20" {
+		t.Fatalf("limit = %q, want %q", query.Get("limit"), "20")
+	}
+}
+
+func TestClobFillsListResolvesSingleBindingDisplayedNoSide(t *testing.T) {
+	setCLIEnv(t)
+	server, state := newMockAPIServer(t)
+	defer server.Close()
+
+	stdout, stderr, err := executeCLI(
+		t,
+		"--json",
+		"--api-url", server.URL+"/api/cli",
+		"clob",
+		"--projection-url", server.URL,
+		"fills",
+		"list",
+		"--market", "clob-yes-no-single",
+		"--outcome", "1",
+	)
+	if err != nil {
+		t.Fatalf("clob fills list error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+		t.Fatalf("json.Unmarshal(stdout) error = %v\nstdout:\n%s", err, stdout)
+	}
+	if payload["tokenSide"] != "no" {
+		t.Fatalf("tokenSide = %#v, want %q", payload["tokenSide"], "no")
+	}
+
+	state.mu.Lock()
+	rawQuery := state.lastClobFillsQuery
+	state.mu.Unlock()
+	query, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		t.Fatalf("ParseQuery(%q) error = %v", rawQuery, err)
+	}
+	if query.Get("clob_id") != "clob-yes-no-single-0-no" {
+		t.Fatalf("clob_id = %q, want %q", query.Get("clob_id"), "clob-yes-no-single-0-no")
+	}
+	if query.Get("token_side") != "no" {
+		t.Fatalf("token_side = %q, want %q", query.Get("token_side"), "no")
+	}
+	if query.Get("limit") != "20" {
+		t.Fatalf("limit = %q, want %q", query.Get("limit"), "20")
+	}
+}
+
+func TestClobOrderCancelResolvesSingleBindingDisplayedNoSide(t *testing.T) {
+	setCLIEnv(t)
+	server, state := newMockAPIServer(t)
+	defer server.Close()
+
+	privateKey := "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+	if _, stderr, err := executeCLI(t, "--json", "wallet", "import", "--private-key", privateKey); err != nil {
+		t.Fatalf("wallet import error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	wallet, err := evm.WalletFromPrivateKeyHex(privateKey)
+	if err != nil {
+		t.Fatalf("WalletFromPrivateKeyHex() error = %v", err)
+	}
+
+	price := 55
+	now := time.Date(2026, time.March, 10, 12, 0, 0, 0, time.UTC)
+	state.mu.Lock()
+	state.clobOrders["order-no-1"] = api.ClobOrder{
+		OrderID:       "order-no-1",
+		ClobID:        "clob-yes-no-single-0-no",
+		Maker:         wallet.Address().Hex(),
+		TokenSide:     "no",
+		Side:          "buy",
+		OrderType:     "limit",
+		Price:         &price,
+		Quantity:      1,
+		Remaining:     1,
+		TotalFilled:   0,
+		Status:        "open",
+		EventSequence: 1,
+		CreatedAt:     &now,
+		UpdatedAt:     &now,
+	}
+	state.mu.Unlock()
+
+	stdout, stderr, err := executeCLI(
+		t,
+		"--json",
+		"--api-url", server.URL+"/api/cli",
+		"clob",
+		"--projection-url", server.URL,
+		"--eventstore-url", server.URL+"/api",
+		"order",
+		"cancel",
+		"--order-id", "order-no-1",
+		"--market", "clob-yes-no-single",
+		"--outcome", "1",
+	)
+	if err != nil {
+		t.Fatalf("clob order cancel error = %v\nstderr:\n%s", err, stderr)
+	}
+	if !strings.Contains(stdout, "order-no-1") {
+		t.Fatalf("clob order cancel stdout missing order id\nstdout:\n%s", stdout)
+	}
+
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	order := state.clobOrders["order-no-1"]
+	if order.Status != "cancelled" {
+		t.Fatalf("order status = %q, want cancelled", order.Status)
+	}
+	if order.Remaining != 0 {
+		t.Fatalf("order remaining = %d, want 0", order.Remaining)
+	}
+}
+
 func TestMarketsListMyPositionsFiltersAndIncludesSpotPrices(t *testing.T) {
 	setCLIEnv(t)
 	server, _ := newMockAPIServer(t)
@@ -1897,6 +2102,10 @@ type mockAPIState struct {
 	lastClobRegistration api.RegisterClobMarketRequest
 	lastClobResolution   api.ResolveClobMarketRequest
 	lastClobOrder        api.ClobSignedOrderPayload
+	lastClobBookPath     string
+	lastClobDepthPath    string
+	lastClobOrdersQuery  string
+	lastClobFillsQuery   string
 	clobSubmitCalls      int
 	clobConflictsLeft    int
 	rewardsSyncError     string
@@ -2053,6 +2262,9 @@ func newMockAPIServer(t *testing.T) (*httptest.Server, *mockAPIState) {
 				BooksTotal:           0,
 			})
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/books/") && strings.HasSuffix(r.URL.Path, "/depth"):
+			state.mu.Lock()
+			state.lastClobDepthPath = r.URL.RequestURI()
+			state.mu.Unlock()
 			_ = json.NewEncoder(w).Encode(api.ClobDepth{
 				Bids: []api.ClobDepthLevel{{ClobID: "clob-1-0", Side: "buy", Price: 45, TotalQty: 12, OrderCount: 2}},
 				Asks: []api.ClobDepthLevel{{ClobID: "clob-1-0", Side: "sell", Price: 55, TotalQty: 8, OrderCount: 1}},
@@ -2060,6 +2272,9 @@ func newMockAPIServer(t *testing.T) (*httptest.Server, *mockAPIState) {
 		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/close"):
 			_ = json.NewEncoder(w).Encode(api.ClobBookLifecycleResponse{Status: "closed", Message: "book closed"})
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/books/"):
+			state.mu.Lock()
+			state.lastClobBookPath = r.URL.RequestURI()
+			state.mu.Unlock()
 			_ = json.NewEncoder(w).Encode(api.ClobBook{ClobID: "clob-1-0", MarketID: "clob-1", Outcome: 0, Creator: "0xcreator", Status: "open", BidCount: 2, AskCount: 1, TradeCount: 0, Volume24h: 0, EventSequence: 1, CreatedAt: ptrTime(now), UpdatedAt: ptrTime(now)})
 		case r.Method == http.MethodPost && r.URL.Path == "/api/orders":
 			var body struct {
@@ -2084,7 +2299,7 @@ func newMockAPIServer(t *testing.T) (*httptest.Server, *mockAPIState) {
 			if strings.Contains(strings.ToLower(body.SignedOrder.OutcomeTokenID), "02") {
 				tokenSide = "no"
 			}
-			state.clobOrders[orderID] = api.ClobOrder{OrderID: orderID, ClobID: fmt.Sprintf("%s-%d", body.SignedOrder.Market, body.SignedOrder.Outcome), Maker: body.SignedOrder.Maker, TokenSide: tokenSide, Side: "buy", OrderType: "limit", Price: &price, Quantity: 1, Remaining: 1, TotalFilled: 0, Status: "open", EventSequence: len(state.clobOrders) + 1, CreatedAt: ptrTime(now), UpdatedAt: ptrTime(now)}
+			state.clobOrders[orderID] = api.ClobOrder{OrderID: orderID, ClobID: clobIDForMarketOutcome(body.SignedOrder.Market, body.SignedOrder.Outcome, tokenSide), Maker: body.SignedOrder.Maker, TokenSide: tokenSide, Side: "buy", OrderType: "limit", Price: &price, Quantity: 1, Remaining: 1, TotalFilled: 0, Status: "open", EventSequence: len(state.clobOrders) + 1, CreatedAt: ptrTime(now), UpdatedAt: ptrTime(now)}
 			state.mu.Unlock()
 			_ = json.NewEncoder(w).Encode(api.ClobOrderResponse{OrderID: orderID, RemainingQuantity: 1, TradeCount: 0, WasAddedToBook: true})
 		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/api/orders/"):
@@ -2126,12 +2341,16 @@ func newMockAPIServer(t *testing.T) (*httptest.Server, *mockAPIState) {
 			_ = json.NewEncoder(w).Encode(api.ClobOrderResponse{OrderID: orderID, RemainingQuantity: 0, TradeCount: 0, WasAddedToBook: false})
 		case r.Method == http.MethodGet && r.URL.Path == "/orders":
 			state.mu.Lock()
+			state.lastClobOrdersQuery = r.URL.RawQuery
 			orders := make([]api.ClobOrder, 0, len(state.clobOrders))
 			for _, order := range state.clobOrders {
 				if maker := strings.TrimSpace(r.URL.Query().Get("maker")); maker != "" && !strings.EqualFold(order.Maker, maker) {
 					continue
 				}
 				if clobID := strings.TrimSpace(r.URL.Query().Get("clob_id")); clobID != "" && order.ClobID != clobID {
+					continue
+				}
+				if tokenSide := strings.TrimSpace(r.URL.Query().Get("token_side")); tokenSide != "" && !strings.EqualFold(order.TokenSide, tokenSide) {
 					continue
 				}
 				if activeOnly := strings.TrimSpace(r.URL.Query().Get("active_only")); activeOnly == "true" && order.Status != "open" {
@@ -2153,7 +2372,17 @@ func newMockAPIServer(t *testing.T) (*httptest.Server, *mockAPIState) {
 			_ = json.NewEncoder(w).Encode(order)
 		case r.Method == http.MethodGet && r.URL.Path == "/fills":
 			state.mu.Lock()
-			fills := append([]api.ClobFill(nil), state.clobFills...)
+			state.lastClobFillsQuery = r.URL.RawQuery
+			fills := make([]api.ClobFill, 0, len(state.clobFills))
+			for _, fill := range state.clobFills {
+				if wallet := strings.TrimSpace(r.URL.Query().Get("wallet")); wallet != "" && !strings.EqualFold(fill.Buyer, wallet) && !strings.EqualFold(fill.Seller, wallet) {
+					continue
+				}
+				if clobID := strings.TrimSpace(r.URL.Query().Get("clob_id")); clobID != "" && fill.ClobID != clobID {
+					continue
+				}
+				fills = append(fills, fill)
+			}
 			state.mu.Unlock()
 			_ = json.NewEncoder(w).Encode(fills)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/cli/register":
@@ -2293,11 +2522,38 @@ func newMockAPIServer(t *testing.T) (*httptest.Server, *mockAPIState) {
 					},
 					Outcomes: []api.Outcome{{Index: 0, Label: "Yes"}, {Index: 1, Label: "No"}},
 				},
-				SettlementToken:      "0x0000000000000000000000000000000000000000",
-				Creator:              "0xcreator",
-				OwnerAddress:         "0xowner",
-				ResolutionCriteria:   "Friday close must settle above $3.00.",
-				Tags:                 []string{"crypto", "clob"},
+				SettlementToken:    "0x0000000000000000000000000000000000000000",
+				Creator:            "0xcreator",
+				OwnerAddress:       "0xowner",
+				ResolutionCriteria: "Friday close must settle above $3.00.",
+				Tags:               []string{"crypto", "clob"},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/cli/markets/clob-yes-no-single":
+			_ = json.NewEncoder(w).Encode(api.MarketDetails{
+				MarketListItem: api.MarketListItem{
+					ID:                   "clob-yes-no-single",
+					MarketType:           "binary",
+					MarketImplementation: "AxiomCTFMarket",
+					Title:                "Will XRP close above $3.00 with a shared yes/no book?",
+					Category:             "crypto",
+					Status:               "active",
+					StartsAt:             now.Add(-24 * time.Hour),
+					EndsAt:               now.Add(24 * time.Hour),
+					ContractAddress:      "0x00000000000000000000000000000000000000D1",
+					IsResolved:           false,
+					LogicalMarketAddresses: []string{
+						"0x00000000000000000000000000000000000000D1",
+					},
+					CTFOutcomeMarkets: []api.CtfOutcomeMarketBinding{
+						{OutcomeID: "shared-outcome-yes", OutcomeIndex: 0, Label: "Yes", ContractAddress: "0x00000000000000000000000000000000000000D1", OutcomeTokenIDs: []string{"301", "302"}, QuestionID: "question-shared-yes", ConditionID: "condition-shared-yes"},
+					},
+					Outcomes: []api.Outcome{{Index: 0, Label: "Yes"}, {Index: 1, Label: "No"}},
+				},
+				SettlementToken:    "0x0000000000000000000000000000000000000000",
+				Creator:            "0xcreator",
+				OwnerAddress:       "0xowner",
+				ResolutionCriteria: "Friday close must settle above $3.00.",
+				Tags:               []string{"crypto", "clob", "shared-book"},
 			})
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/cli/profile/") && strings.HasSuffix(r.URL.Path, "/rewards"):
 			epochID := 12

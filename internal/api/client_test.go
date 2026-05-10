@@ -410,12 +410,12 @@ func TestGetClobDepthUsesHostedProjectionBase(t *testing.T) {
 		t.Fatalf("NewClient() error = %v", err)
 	}
 
-	depth, err := client.GetClobDepth(context.Background(), server.URL, "market-123", 1)
+	depth, err := client.GetClobDepth(context.Background(), server.URL, "market-123", 1, "no")
 	if err != nil {
 		t.Fatalf("GetClobDepth() error = %v", err)
 	}
-	if gotPath != "/books/market-123/1/depth" {
-		t.Fatalf("request path = %q, want %q", gotPath, "/books/market-123/1/depth")
+	if gotPath != "/books/market-123/1/depth?token_side=no" {
+		t.Fatalf("request path = %q, want %q", gotPath, "/books/market-123/1/depth?token_side=no")
 	}
 	if len(depth.Bids) != 1 || depth.Bids[0].Price != 6100 {
 		t.Fatalf("depth.Bids = %+v, want hosted bid ladder", depth.Bids)
@@ -577,6 +577,7 @@ func TestSubmitClobOrderUsesHostedEventstoreBase(t *testing.T) {
 		CollateralToken: "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE",
 		OutcomeToken:    "0x43e3fa6De5D87dd7265053FA55601d1972984edA",
 		OutcomeTokenID:  "101",
+		TokenSide:       "yes",
 		Side:            0,
 		MakerAmount:     "5000",
 		TakerAmount:     "10000",
@@ -599,6 +600,9 @@ func TestSubmitClobOrderUsesHostedEventstoreBase(t *testing.T) {
 	}
 	if gotPayload.SignedOrder.Market != "market-123" || gotPayload.SignedOrder.OutcomeTokenID != "101" {
 		t.Fatalf("payload = %+v, want signed order preserved", gotPayload.SignedOrder)
+	}
+	if gotPayload.SignedOrder.TokenSide != "yes" {
+		t.Fatalf("payload tokenSide = %q, want yes", gotPayload.SignedOrder.TokenSide)
 	}
 	if response.OrderID != "order-2" || !response.WasAddedToBook {
 		t.Fatalf("response = %+v, want created resting order response", response)

@@ -59,6 +59,26 @@ type clobSigningDomain struct {
 	VerifyingContract common.Address
 }
 
+func normalizeClobTokenSide(value string) (string, error) {
+	trimmed := strings.ToLower(strings.TrimSpace(value))
+	if trimmed == "" {
+		return "yes", nil
+	}
+	normalized, ok := clobTokenSideValue[trimmed]
+	if !ok {
+		return "", errors.New("token side must be yes or no")
+	}
+	return normalized, nil
+}
+
+func clobIDForMarketOutcome(marketID string, outcome int, tokenSide string) string {
+	normalized, err := normalizeClobTokenSide(tokenSide)
+	if err != nil {
+		normalized = "yes"
+	}
+	return fmt.Sprintf("%s-%d-%s", marketID, outcome, normalized)
+}
+
 type logicalRegisterOutcome struct {
 	Key         string
 	Label       string
@@ -216,6 +236,37 @@ func resolveClobSelection(market *api.MarketDetails, outcomeRaw string, label st
 		OutcomeToken:        outcomeToken,
 		ExchangeAddress:     exchangeAddress,
 	}, nil
+}
+
+func resolveClobReadSelection(ctx context.Context, cliCtx *cliContext, cmd *cobra.Command, marketRef string) (*api.MarketDetails, *clobSelection, error) {
+	market, err := loadMarketWithClobFallback(ctx, cliCtx, marketRef, mustStringFlag(cmd, "instance-date"))
+	if err != nil {
+		return nil, nil, err
+	}
+	if !isClobMarketImplementation(market.MarketImplementation) {
+		return nil, nil, errors.New("this command requires an AxiomCTFMarket logical market")
+	}
+
+	label := strings.TrimSpace(mustStringFlag(cmd, "label"))
+	outcomeRaw := ""
+	if cmd.Flags().Changed("outcome") || label == "" {
+		outcome, err := cmd.Flags().GetInt("outcome")
+		if err != nil {
+			return nil, nil, err
+		}
+		outcomeRaw = strconv.Itoa(outcome)
+	}
+
+	displayedSide := ""
+	if cmd.Flags().Changed("token-side") {
+		displayedSide = mustStringFlag(cmd, "token-side")
+	}
+
+	selection, err := resolveClobSelection(market, outcomeRaw, label, displayedSide, "", "")
+	if err != nil {
+		return nil, nil, err
+	}
+	return market, selection, nil
 }
 
 func resolveClobLogicalOutcome(market *api.MarketDetails, outcomeRaw string, label string) (api.Outcome, error) {
@@ -446,6 +497,7 @@ func buildClobSignedOrder(wallet *evm.Wallet, marketID string, selection *clobSe
 		CollateralToken: selection.CollateralToken.Hex(),
 		OutcomeToken:    selection.OutcomeToken.Hex(),
 		OutcomeTokenID:  selection.DisplayedTokenIDRaw,
+		TokenSide:       selection.DisplayedSide,
 		Side:            sideValue,
 		MakerAmount:     makerAmount.String(),
 		TakerAmount:     takerAmount.String(),

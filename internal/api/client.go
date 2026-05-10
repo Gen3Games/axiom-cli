@@ -412,6 +412,7 @@ type ClobSignedOrderPayload struct {
 	CollateralToken string `json:"collateralToken"`
 	OutcomeToken    string `json:"outcomeToken"`
 	OutcomeTokenID  string `json:"outcomeTokenId"`
+	TokenSide       string `json:"tokenSide,omitempty"`
 	Side            uint8  `json:"side"`
 	MakerAmount     string `json:"makerAmount"`
 	TakerAmount     string `json:"takerAmount"`
@@ -1066,17 +1067,25 @@ func (c *Client) GetFunding(ctx context.Context, address string, limit int) (*Fu
 	return &out, nil
 }
 
-func (c *Client) GetClobBook(ctx context.Context, projectionBaseURL string, market string, outcome int) (*ClobBook, error) {
+func (c *Client) GetClobBook(ctx context.Context, projectionBaseURL string, market string, outcome int, tokenSide string) (*ClobBook, error) {
 	var out ClobBook
-	if err := c.doJSONAgainstBase(ctx, http.MethodGet, projectionBaseURL, path.Join("books", url.PathEscape(market), strconv.Itoa(outcome)), nil, &out); err != nil {
+	requestPath := path.Join("books", url.PathEscape(market), strconv.Itoa(outcome))
+	if trimmedTokenSide := strings.TrimSpace(tokenSide); trimmedTokenSide != "" {
+		requestPath += "?token_side=" + url.QueryEscape(trimmedTokenSide)
+	}
+	if err := c.doJSONAgainstBase(ctx, http.MethodGet, projectionBaseURL, requestPath, nil, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
 }
 
-func (c *Client) GetClobDepth(ctx context.Context, projectionBaseURL string, market string, outcome int) (*ClobDepth, error) {
+func (c *Client) GetClobDepth(ctx context.Context, projectionBaseURL string, market string, outcome int, tokenSide string) (*ClobDepth, error) {
 	var out ClobDepth
-	if err := c.doJSONAgainstBase(ctx, http.MethodGet, projectionBaseURL, path.Join("books", url.PathEscape(market), strconv.Itoa(outcome), "depth"), nil, &out); err != nil {
+	requestPath := path.Join("books", url.PathEscape(market), strconv.Itoa(outcome), "depth")
+	if trimmedTokenSide := strings.TrimSpace(tokenSide); trimmedTokenSide != "" {
+		requestPath += "?token_side=" + url.QueryEscape(trimmedTokenSide)
+	}
+	if err := c.doJSONAgainstBase(ctx, http.MethodGet, projectionBaseURL, requestPath, nil, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil

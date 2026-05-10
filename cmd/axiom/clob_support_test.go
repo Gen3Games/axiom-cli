@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Gen3Games/axiom-cli/internal/api"
 	"github.com/Gen3Games/axiom-cli/internal/evm"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/spf13/cobra"
@@ -110,7 +111,7 @@ func TestParseClobAmountRejectsNegative(t *testing.T) {
 func TestParseClobAmountRejectsTooManyDecimals(t *testing.T) {
 	_, err := parseClobAmount("0.1234567890123456789")
 	if err == nil {
-		 t.Fatal("parseClobAmount with >18 decimals should return an error")
+		t.Fatal("parseClobAmount with >18 decimals should return an error")
 	}
 }
 
@@ -162,6 +163,42 @@ func TestBuildSignedClobCancelIncludesSignedFields(t *testing.T) {
 	}
 	if len(request.Signature) != 132 {
 		t.Fatalf("signature length = %d, want 132", len(request.Signature))
+	}
+}
+
+func TestResolveClobSelectionSingleBindingInfersNoDisplayedSide(t *testing.T) {
+	market := &api.MarketDetails{
+		MarketListItem: api.MarketListItem{
+			ID:                   "clob-yes-no-single",
+			MarketImplementation: "AxiomCTFMarket",
+			ContractAddress:      "0x00000000000000000000000000000000000000C1",
+			Outcomes:             []api.Outcome{{Index: 0, Label: "Yes"}, {Index: 1, Label: "No"}},
+			CTFOutcomeMarkets: []api.CtfOutcomeMarketBinding{{
+				OutcomeID:       "outcome-yes",
+				OutcomeIndex:    0,
+				Label:           "Yes",
+				ContractAddress: "0x00000000000000000000000000000000000000C1",
+				OutcomeTokenIDs: []string{"101", "102"},
+			}},
+		},
+		SettlementToken: "0x0000000000000000000000000000000000000000",
+	}
+
+	selection, err := resolveClobSelection(market, "1", "", "", "", "")
+	if err != nil {
+		t.Fatalf("resolveClobSelection() error = %v", err)
+	}
+	if selection.Binding.OutcomeIndex != 0 {
+		t.Fatalf("binding outcome index = %d, want 0", selection.Binding.OutcomeIndex)
+	}
+	if selection.LogicalOutcome.Index != 1 {
+		t.Fatalf("logical outcome index = %d, want 1", selection.LogicalOutcome.Index)
+	}
+	if selection.DisplayedSide != "no" {
+		t.Fatalf("displayed side = %q, want no", selection.DisplayedSide)
+	}
+	if selection.DisplayedTokenIDRaw != "102" {
+		t.Fatalf("displayed token id = %q, want 102", selection.DisplayedTokenIDRaw)
 	}
 }
 

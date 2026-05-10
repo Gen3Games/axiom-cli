@@ -71,11 +71,11 @@ func newClobSmokeCommand() *cobra.Command {
 			}
 
 			projectionURL := strings.TrimSpace(mustStringFlag(cmd, "projection-url"))
-			book, err := ctx.API.GetClobBook(cmd.Context(), projectionURL, market.ID, selection.Binding.OutcomeIndex)
+			book, err := ctx.API.GetClobBook(cmd.Context(), projectionURL, market.ID, selection.Binding.OutcomeIndex, selection.DisplayedSide)
 			if err != nil {
 				return err
 			}
-			depth, err := ctx.API.GetClobDepth(cmd.Context(), projectionURL, market.ID, selection.Binding.OutcomeIndex)
+			depth, err := ctx.API.GetClobDepth(cmd.Context(), projectionURL, market.ID, selection.Binding.OutcomeIndex, selection.DisplayedSide)
 			if err != nil {
 				return err
 			}
@@ -218,7 +218,8 @@ func newClobSmokeCommand() *cobra.Command {
 
 			orderFilters := url.Values{}
 			orderFilters.Set("maker", primaryWallet.Address().Hex())
-			orderFilters.Set("clob_id", fmt.Sprintf("%s-%d", market.ID, selection.Binding.OutcomeIndex))
+			orderFilters.Set("clob_id", clobIDForMarketOutcome(market.ID, selection.Binding.OutcomeIndex, selection.DisplayedSide))
+			orderFilters.Set("token_side", selection.DisplayedSide)
 			orders, err := ctx.API.ListClobOrders(cmd.Context(), projectionURL, orderFilters)
 			if err != nil {
 				return err
@@ -227,7 +228,8 @@ func newClobSmokeCommand() *cobra.Command {
 
 			fillFilters := url.Values{}
 			fillFilters.Set("wallet", primaryWallet.Address().Hex())
-			fillFilters.Set("clob_id", fmt.Sprintf("%s-%d", market.ID, selection.Binding.OutcomeIndex))
+			fillFilters.Set("clob_id", clobIDForMarketOutcome(market.ID, selection.Binding.OutcomeIndex, selection.DisplayedSide))
+			fillFilters.Set("token_side", selection.DisplayedSide)
 			fills, err := ctx.API.ListClobFills(cmd.Context(), projectionURL, fillFilters)
 			if err != nil {
 				return err
