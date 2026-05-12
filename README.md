@@ -260,6 +260,77 @@ Manual MM notes:
 - Hosted CLOB limit orders must be settleable on-chain. The CLI now preflights the same venue rule the backend enforces, so too-small orders fail locally with an error like `order quantity too small for on-chain settlement: quantity 1 at price 4500 bps, minimum is 3 shares`.
 - `mm cancel-all` scopes to the exact hosted book when you pass `--label` plus `--displayed-side` (or `--token-side`).
 
+### Six-book beta validation
+
+The manual MM flow above was validated end to end against the hidden beta market `beta-test-where-will-xrp-close-on-sunday-may-17-2026-at-21-00-utc-1778403914962` using the local `./axiom` binary.
+
+Select the active operator market once:
+
+```bash
+./axiom mm market use beta-test-where-will-xrp-close-on-sunday-may-17-2026-at-21-00-utc-1778403914962
+```
+
+Mint three complete sets on each logical outcome before quoting:
+
+```bash
+./axiom mm mint --label 'Below $1.35' --amount 3.0 --wait
+./axiom mm mint --label '$1.35 to $1.50 inclusive' --amount 3.0 --wait
+./axiom mm mint --label 'Above $1.50' --amount 3.0 --wait
+```
+
+At the tested `45` bid and `55` ask spread, the minimum settleable size for this market shape was `3` shares:
+
+```bash
+./axiom --json mm quote --label 'Below $1.35' --displayed-side yes --bid-price 45 --ask-price 55 --quantity 1 --dry-run
+./axiom --json mm quote --label 'Below $1.35' --displayed-side yes --bid-price 45 --ask-price 55 --quantity 2 --dry-run
+```
+
+Observed dry-run blockers:
+
+- `quantity 1` failed both sides: the `45` bid needed `3` shares and the `55` ask needed `2` shares.
+- `quantity 2` still failed the `45` bid side, so `quantity 3` was the smallest passing size.
+
+The full live sweep used `--bid-price 45 --ask-price 55 --quantity 3` on all six hosted books:
+
+```bash
+./axiom mm quote --label 'Below $1.35' --displayed-side yes --bid-price 45 --ask-price 55 --quantity 3
+./axiom mm cancel-all --label 'Below $1.35' --displayed-side yes
+
+./axiom mm quote --label 'Below $1.35' --displayed-side no --bid-price 45 --ask-price 55 --quantity 3
+./axiom mm cancel-all --label 'Below $1.35' --displayed-side no
+
+./axiom mm quote --label '$1.35 to $1.50 inclusive' --displayed-side yes --bid-price 45 --ask-price 55 --quantity 3
+./axiom mm cancel-all --label '$1.35 to $1.50 inclusive' --displayed-side yes
+
+./axiom mm quote --label '$1.35 to $1.50 inclusive' --displayed-side no --bid-price 45 --ask-price 55 --quantity 3
+./axiom mm cancel-all --label '$1.35 to $1.50 inclusive' --displayed-side no
+
+./axiom mm quote --label 'Above $1.50' --displayed-side yes --bid-price 45 --ask-price 55 --quantity 3
+./axiom mm cancel-all --label 'Above $1.50' --displayed-side yes
+
+./axiom mm quote --label 'Above $1.50' --displayed-side no --bid-price 45 --ask-price 55 --quantity 3
+./axiom mm cancel-all --label 'Above $1.50' --displayed-side no
+```
+
+Observed live results:
+
+- All six books accepted live two-sided quotes at `45/55 x 3`.
+- Each `mm cancel-all` canceled only the targeted two orders on the exact hosted book that was just quoted.
+- The unrelated open order `16a758d5-8533-40f1-b17e-c4d9bb97935c` on `smoke-hidden-20260509-neonfix-01-0-yes` remained untouched.
+
+Final verification commands:
+
+```bash
+./axiom --json --projection-url 'https://clob.axiomprotocol.io' clob orders list --mine --active-only
+./axiom --json mm status --label 'Above $1.50' --displayed-side no
+```
+
+Final verification results:
+
+- The global active-order scan returned only `16a758d5-8533-40f1-b17e-c4d9bb97935c`, confirming the beta cleanup did not touch unrelated books.
+- `mm status` for `'Above $1.50'` plus displayed side `no` returned `activeOrderCount: 0` on `beta-test-where-will-xrp-close-on-sunday-may-17-2026-at-21-00-utc-1778403914962-2-no`.
+- Projection reads can lag briefly immediately after a cancel, so a just-canceled order may momentarily still appear `open` before converging to `status: "cancelled"` with `remaining: 0`.
+
 Run a smoke test against the hosted CLOB stack with imported CLI accounts:
 
 ```bash
