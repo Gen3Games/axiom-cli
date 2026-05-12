@@ -73,6 +73,34 @@ func TestBuildClobOrderAmountsMarketOrder(t *testing.T) {
 	}
 }
 
+func TestValidateClobSettleableQuantityRejectsTinyLimitBuy(t *testing.T) {
+	payload := api.ClobSignedOrderPayload{
+		Side:        clobOrderSideValue["buy"],
+		MakerAmount: "450000000000000000",
+		TakerAmount: "1000000000000000000",
+	}
+
+	err := validateClobSettleableQuantity(payload)
+	if err == nil {
+		t.Fatal("validateClobSettleableQuantity() error = nil, want minimum-size rejection")
+	}
+	if err.Error() != "order quantity too small for on-chain settlement: quantity 1 at price 4500 bps, minimum is 3 shares" {
+		t.Fatalf("validateClobSettleableQuantity() error = %q", err.Error())
+	}
+}
+
+func TestValidateClobSettleableQuantityAllowsSettleableLimitSell(t *testing.T) {
+	payload := api.ClobSignedOrderPayload{
+		Side:        clobOrderSideValue["sell"],
+		MakerAmount: "3000000000000000000",
+		TakerAmount: "1350000000000000000",
+	}
+
+	if err := validateClobSettleableQuantity(payload); err != nil {
+		t.Fatalf("validateClobSettleableQuantity() error = %v", err)
+	}
+}
+
 func TestParseClobAmountDecimalXRP(t *testing.T) {
 	amount, err := parseClobAmount("0.01")
 	if err != nil {

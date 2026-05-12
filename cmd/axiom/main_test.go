@@ -70,6 +70,17 @@ func TestCommandHelpSmoke(t *testing.T) {
 		{args: []string{"predict", "quote", "--help"}, want: "Preview weighted shares"},
 		{args: []string{"predict", "buy", "--help"}, want: "Buy into an Axiom market outcome"},
 		{args: []string{"clob", "--help"}, want: "Inspect and manage hosted CLOB books, orders, fills, and cancellations"},
+		{args: []string{"mm", "--help"}, want: "Run higher-level market-making workflows on hosted CLOB markets"},
+		{args: []string{"mm", "market", "--help"}, want: "Search, select, and manage the active market-maker market"},
+		{args: []string{"mm", "market", "use", "--help"}, want: "Set the active market-maker market, optionally via an interactive picker"},
+		{args: []string{"mm", "mint", "--help"}, want: "Mint complete-set CTF inventory for the active market-making workflow"},
+		{args: []string{"mm", "inventory", "--help"}, want: "Summarize inventory, approvals, and imbalance for a hosted CLOB market"},
+		{args: []string{"mm", "status", "--help"}, want: "Show active market, inventory, orders, fills, and top-of-book for one MM workflow"},
+		{args: []string{"mm", "orders", "--help"}, want: "List active MM orders for one exact hosted CLOB book"},
+		{args: []string{"mm", "book", "--help"}, want: "Fetch the hosted book summary and depth for one exact MM book"},
+		{args: []string{"mm", "fills", "--help"}, want: "List recent MM fills for one exact hosted CLOB book"},
+		{args: []string{"mm", "quote", "--help"}, want: "Place a two-sided market-making quote on one hosted CLOB book"},
+		{args: []string{"mm", "cancel-all", "--help"}, want: "Cancel active hosted CLOB orders for the active market-making wallet"},
 		{args: []string{"clob", "market", "create", "--help"}, want: "Deploy a single binary AxiomCTFMarket via MarketFactory.createMarket(...)"},
 		{args: []string{"clob", "market", "resolve", "--help"}, want: "Resolve a deployed binary AxiomCTFMarket with an explicit payout vector"},
 		{args: []string{"clob", "logical", "register", "--help"}, want: "Register existing binary AxiomCTFMarket contracts as one logical hosted CLOB market"},
@@ -1732,6 +1743,38 @@ func TestClobOrdersListResolvesSingleBindingDisplayedNoSide(t *testing.T) {
 	}
 }
 
+func TestClobOrderPlaceRejectsUnsettlableTinyLimitOrder(t *testing.T) {
+	setCLIEnv(t)
+	server, _ := newMockAPIServer(t)
+	defer server.Close()
+
+	privateKey := "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+	if _, stderr, err := executeCLI(t, "--json", "wallet", "import", "--private-key", privateKey); err != nil {
+		t.Fatalf("wallet import error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	_, stderr, err := executeCLI(
+		t,
+		"--json",
+		"--api-url", server.URL+"/api/cli",
+		"clob",
+		"order",
+		"place",
+		"clob-1",
+		"--label", "Yes",
+		"--side", "buy",
+		"--type", "limit",
+		"--price", "45",
+		"--quantity", "1",
+	)
+	if err == nil {
+		t.Fatal("clob order place error = nil, want minimum-size rejection")
+	}
+	if !strings.Contains(err.Error(), "order quantity too small for on-chain settlement: quantity 1 at price 4500 bps, minimum is 3 shares") {
+		t.Fatalf("clob order place error = %q\nstderr:\n%s", err.Error(), stderr)
+	}
+}
+
 func TestClobFillsListResolvesSingleBindingDisplayedNoSide(t *testing.T) {
 	setCLIEnv(t)
 	server, state := newMockAPIServer(t)
@@ -1842,6 +1885,1184 @@ func TestClobOrderCancelResolvesSingleBindingDisplayedNoSide(t *testing.T) {
 	}
 	if order.Remaining != 0 {
 		t.Fatalf("order remaining = %d, want 0", order.Remaining)
+	}
+}
+
+func TestMMMarketUseInteractivePersistsDedicatedState(t *testing.T) {
+	setCLIEnv(t)
+	server, _ := newMockAPIServer(t)
+	defer server.Close()
+
+	stdout, stderr, err := executeCLIWithInput(
+		t,
+		"1\n",
+		"--json",
+		"--api-url", server.URL+"/api/cli",
+		"--console-api-url", server.URL+"/api/cli",
+		"mm",
+		"market",
+		"use",
+		"--search", "xrp",
+	)
+	if err != nil {
+		t.Fatalf("mm market use interactive error = %v\nstderr:\n%s", err, stderr)
+	}
+	if !strings.Contains(stderr, "Select market-maker market") {
+		t.Fatalf("stderr missing interactive prompt\nstderr:\n%s", stderr)
+	}
+	if !strings.Contains(stderr, "Loading hosted CLOB markets") {
+		t.Fatalf("stderr missing loading indicator\nstderr:\n%s", stderr)
+	}
+	if !strings.Contains(stdout, "clob-1") {
+		t.Fatalf("stdout missing selected market\nstdout:\n%s", stdout)
+	}
+
+	state, err := app.LoadMMState()
+	if err != nil {
+		t.Fatalf("LoadMMState() error = %v", err)
+	}
+	account := state.Account("default")
+	if account.ActiveMarketID != "clob-1" {
+		t.Fatalf("active market id = %q, want clob-1", account.ActiveMarketID)
+	}
+	if account.ActiveMarketTitle == "" {
+		t.Fatal("active market title should be persisted")
+	}
+
+	stdout, stderr, err = executeCLI(t, "--json", "mm", "market", "show")
+	if err != nil {
+		t.Fatalf("mm market show error = %v\nstderr:\n%s", err, stderr)
+	}
+	if !strings.Contains(stdout, "clob-1") {
+		t.Fatalf("mm market show stdout missing active market\nstdout:\n%s", stdout)
+	}
+
+	stdout, stderr, err = executeCLI(t, "--json", "mm", "market", "clear")
+	if err != nil {
+		t.Fatalf("mm market clear error = %v\nstderr:\n%s", err, stderr)
+	}
+	if !strings.Contains(stdout, "\"cleared\": true") {
+		t.Fatalf("mm market clear stdout missing cleared flag\nstdout:\n%s", stdout)
+	}
+
+	state, err = app.LoadMMState()
+	if err != nil {
+		t.Fatalf("LoadMMState() after clear error = %v", err)
+	}
+	account = state.Account("default")
+	if account.ActiveMarketID != "" {
+		t.Fatalf("active market id after clear = %q, want empty", account.ActiveMarketID)
+	}
+}
+
+func TestMMMarketListIncludesHiddenClobMarkets(t *testing.T) {
+	setCLIEnv(t)
+	server, _ := newMockAPIServer(t)
+	defer server.Close()
+
+	stdout, stderr, err := executeCLI(t, "--json", "--api-url", server.URL+"/api/cli", "--console-api-url", server.URL+"/api/cli", "mm", "market", "list")
+	if err != nil {
+		t.Fatalf("mm market list error = %v\nstderr:\n%s", err, stderr)
+	}
+	if !strings.Contains(stdout, "clob-hidden-1") {
+		t.Fatalf("stdout missing hidden clob market\nstdout:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "\"isVisible\": false") {
+		t.Fatalf("stdout missing hidden visibility flag\nstdout:\n%s", stdout)
+	}
+}
+
+func TestMMInventoryUsesActiveMarketFallback(t *testing.T) {
+	setCLIEnv(t)
+	server, _ := newMockAPIServer(t)
+	defer server.Close()
+
+	if err := saveActiveMMMarket("default", mmMarketSelection{MarketID: "clob-1", MarketTitle: "Will XRP close above $3.00 on Friday?"}); err != nil {
+		t.Fatalf("saveActiveMMMarket() error = %v", err)
+	}
+
+	privateKey := "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+	if _, stderr, err := executeCLI(t, "--json", "wallet", "import", "--private-key", privateKey); err != nil {
+		t.Fatalf("wallet import error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	originalGetERC20Balance := getERC20Balance
+	originalGetERC20Allowance := getERC20Allowance
+	originalIsERC1155ApprovedForAll := isERC1155ApprovedForAll
+	originalGetERC1155Balance := getERC1155Balance
+	getERC20Balance = func(_ context.Context, _ string, _ common.Address, _ common.Address) (*big.Int, error) {
+		return testBigInt("1000000000000000000"), nil
+	}
+	getERC20Allowance = func(_ context.Context, _ string, _ common.Address, _ common.Address, _ common.Address) (*big.Int, error) {
+		return testBigInt("1000000000000000000"), nil
+	}
+	isERC1155ApprovedForAll = func(_ context.Context, _ string, _ common.Address, _ common.Address, _ common.Address) (bool, error) {
+		return true, nil
+	}
+	getERC1155Balance = func(_ context.Context, _ string, _ common.Address, _ common.Address, _ *big.Int) (*big.Int, error) {
+		return big.NewInt(0), nil
+	}
+	t.Cleanup(func() {
+		getERC20Balance = originalGetERC20Balance
+		getERC20Allowance = originalGetERC20Allowance
+		isERC1155ApprovedForAll = originalIsERC1155ApprovedForAll
+		getERC1155Balance = originalGetERC1155Balance
+	})
+
+	stdout, stderr, err := executeCLI(
+		t,
+		"--json",
+		"--api-url", server.URL+"/api/cli",
+		"--console-api-url", server.URL+"/api/cli",
+		"mm",
+		"inventory",
+	)
+	if err != nil {
+		t.Fatalf("mm inventory fallback error = %v\nstderr:\n%s", err, stderr)
+	}
+	if !strings.Contains(stdout, "\"marketId\": \"clob-1\"") {
+		t.Fatalf("mm inventory stdout missing fallback market\nstdout:\n%s", stdout)
+	}
+}
+
+func TestMMInventorySummarizesBindingsAndImbalance(t *testing.T) {
+	setCLIEnv(t)
+	server, _ := newMockAPIServer(t)
+	defer server.Close()
+
+	privateKey := "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+	if _, stderr, err := executeCLI(t, "--json", "wallet", "import", "--private-key", privateKey); err != nil {
+		t.Fatalf("wallet import error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	originalGetERC20Balance := getERC20Balance
+	originalGetERC20Allowance := getERC20Allowance
+	originalIsERC1155ApprovedForAll := isERC1155ApprovedForAll
+	originalGetERC1155Balance := getERC1155Balance
+	getERC20Balance = func(_ context.Context, _ string, _ common.Address, _ common.Address) (*big.Int, error) {
+		return testBigInt("10000000000000000000"), nil
+	}
+	getERC20Allowance = func(_ context.Context, _ string, _ common.Address, _ common.Address, _ common.Address) (*big.Int, error) {
+		return testBigInt("8000000000000000000"), nil
+	}
+	isERC1155ApprovedForAll = func(_ context.Context, _ string, _ common.Address, _ common.Address, _ common.Address) (bool, error) {
+		return true, nil
+	}
+	getERC1155Balance = func(_ context.Context, _ string, _ common.Address, _ common.Address, tokenID *big.Int) (*big.Int, error) {
+		switch tokenID.String() {
+		case "101":
+			return testBigInt("3000000000000000000"), nil
+		case "102":
+			return testBigInt("1000000000000000000"), nil
+		case "201":
+			return testBigInt("2000000000000000000"), nil
+		case "202":
+			return testBigInt("2000000000000000000"), nil
+		default:
+			return big.NewInt(0), nil
+		}
+	}
+	t.Cleanup(func() {
+		getERC20Balance = originalGetERC20Balance
+		getERC20Allowance = originalGetERC20Allowance
+		isERC1155ApprovedForAll = originalIsERC1155ApprovedForAll
+		getERC1155Balance = originalGetERC1155Balance
+	})
+
+	stdout, stderr, err := executeCLI(
+		t,
+		"--json",
+		"--api-url", server.URL+"/api/cli",
+		"--console-api-url", server.URL+"/api/cli",
+		"mm",
+		"inventory",
+		"clob-1",
+	)
+	if err != nil {
+		t.Fatalf("mm inventory error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+		t.Fatalf("json.Unmarshal(stdout) error = %v\nstdout:\n%s", err, stdout)
+	}
+	if payload["marketId"] != "clob-1" {
+		t.Fatalf("marketId = %#v, want clob-1", payload["marketId"])
+	}
+	summary, ok := payload["summary"].(map[string]any)
+	if !ok {
+		t.Fatalf("summary = %#v, want object", payload["summary"])
+	}
+	if summary["totalCompleteSetsXrp"] != "3.000000" {
+		t.Fatalf("totalCompleteSetsXrp = %#v, want 3.000000", summary["totalCompleteSetsXrp"])
+	}
+	if summary["inventoryBias"] != "yes" {
+		t.Fatalf("inventoryBias = %#v, want yes", summary["inventoryBias"])
+	}
+	bindings, ok := payload["bindings"].([]any)
+	if !ok || len(bindings) != 2 {
+		t.Fatalf("bindings = %#v, want two binding summaries", payload["bindings"])
+	}
+	firstBinding, ok := bindings[0].(map[string]any)
+	if !ok {
+		t.Fatalf("first binding = %#v, want object", bindings[0])
+	}
+	if firstBinding["inventoryBias"] != "yes" {
+		t.Fatalf("first binding inventoryBias = %#v, want yes", firstBinding["inventoryBias"])
+	}
+	if firstBinding["completeSetsXrp"] != "1.000000" {
+		t.Fatalf("first binding completeSetsXrp = %#v, want 1.000000", firstBinding["completeSetsXrp"])
+	}
+}
+
+func TestMMQuoteDryRunBuildsTwoSidedPreview(t *testing.T) {
+	setCLIEnv(t)
+	server, _ := newMockAPIServer(t)
+	defer server.Close()
+
+	privateKey := "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+	if _, stderr, err := executeCLI(t, "--json", "wallet", "import", "--private-key", privateKey); err != nil {
+		t.Fatalf("wallet import error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	originalGetERC20Balance := getERC20Balance
+	originalGetERC20Allowance := getERC20Allowance
+	originalIsERC1155ApprovedForAll := isERC1155ApprovedForAll
+	originalGetERC1155Balance := getERC1155Balance
+	getERC20Balance = func(_ context.Context, _ string, _ common.Address, _ common.Address) (*big.Int, error) {
+		return testBigInt("10000000000000000000"), nil
+	}
+	getERC20Allowance = func(_ context.Context, _ string, _ common.Address, _ common.Address, _ common.Address) (*big.Int, error) {
+		return testBigInt("10000000000000000000"), nil
+	}
+	isERC1155ApprovedForAll = func(_ context.Context, _ string, _ common.Address, _ common.Address, _ common.Address) (bool, error) {
+		return true, nil
+	}
+	getERC1155Balance = func(_ context.Context, _ string, _ common.Address, _ common.Address, tokenID *big.Int) (*big.Int, error) {
+		if tokenID.String() == "101" {
+			return testBigInt("5000000000000000000"), nil
+		}
+		return big.NewInt(0), nil
+	}
+	t.Cleanup(func() {
+		getERC20Balance = originalGetERC20Balance
+		getERC20Allowance = originalGetERC20Allowance
+		isERC1155ApprovedForAll = originalIsERC1155ApprovedForAll
+		getERC1155Balance = originalGetERC1155Balance
+	})
+
+	stdout, stderr, err := executeCLI(
+		t,
+		"--json",
+		"--api-url", server.URL+"/api/cli",
+		"--console-api-url", server.URL+"/api/cli",
+		"mm",
+		"quote",
+		"clob-1",
+		"--label", "Yes",
+		"--bid-price", "45",
+		"--ask-price", "55",
+		"--quantity", "3",
+		"--dry-run",
+	)
+	if err != nil {
+		t.Fatalf("mm quote dry-run error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+		t.Fatalf("json.Unmarshal(stdout) error = %v\nstdout:\n%s", err, stdout)
+	}
+	if payload["quoteReady"] != true {
+		t.Fatalf("quoteReady = %#v, want true", payload["quoteReady"])
+	}
+	bid, ok := payload["bid"].(map[string]any)
+	if !ok {
+		t.Fatalf("bid = %#v, want object", payload["bid"])
+	}
+	ask, ok := payload["ask"].(map[string]any)
+	if !ok {
+		t.Fatalf("ask = %#v, want object", payload["ask"])
+	}
+	if bid["priceBps"] != float64(4500) {
+		t.Fatalf("bid priceBps = %#v, want 4500", bid["priceBps"])
+	}
+	if ask["priceBps"] != float64(5500) {
+		t.Fatalf("ask priceBps = %#v, want 5500", ask["priceBps"])
+	}
+	if bid["tokenSide"] != "yes" || ask["tokenSide"] != "yes" {
+		t.Fatalf("token sides = bid:%#v ask:%#v, want yes/yes", bid["tokenSide"], ask["tokenSide"])
+	}
+}
+
+func TestMMQuoteDryRunShowsMinimumSettleableBlocker(t *testing.T) {
+	setCLIEnv(t)
+	server, _ := newMockAPIServer(t)
+	defer server.Close()
+
+	privateKey := "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+	if _, stderr, err := executeCLI(t, "--json", "wallet", "import", "--private-key", privateKey); err != nil {
+		t.Fatalf("wallet import error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	originalGetERC20Balance := getERC20Balance
+	originalGetERC20Allowance := getERC20Allowance
+	originalIsERC1155ApprovedForAll := isERC1155ApprovedForAll
+	originalGetERC1155Balance := getERC1155Balance
+	getERC20Balance = func(_ context.Context, _ string, _ common.Address, _ common.Address) (*big.Int, error) {
+		return testBigInt("10000000000000000000"), nil
+	}
+	getERC20Allowance = func(_ context.Context, _ string, _ common.Address, _ common.Address, _ common.Address) (*big.Int, error) {
+		return testBigInt("10000000000000000000"), nil
+	}
+	isERC1155ApprovedForAll = func(_ context.Context, _ string, _ common.Address, _ common.Address, _ common.Address) (bool, error) {
+		return true, nil
+	}
+	getERC1155Balance = func(_ context.Context, _ string, _ common.Address, _ common.Address, tokenID *big.Int) (*big.Int, error) {
+		if tokenID.String() == "101" {
+			return testBigInt("1000000000000000000"), nil
+		}
+		return testBigInt("1000000000000000000"), nil
+	}
+	t.Cleanup(func() {
+		getERC20Balance = originalGetERC20Balance
+		getERC20Allowance = originalGetERC20Allowance
+		isERC1155ApprovedForAll = originalIsERC1155ApprovedForAll
+		getERC1155Balance = originalGetERC1155Balance
+	})
+
+	stdout, stderr, err := executeCLI(
+		t,
+		"--json",
+		"--api-url", server.URL+"/api/cli",
+		"--console-api-url", server.URL+"/api/cli",
+		"mm",
+		"quote",
+		"clob-1",
+		"--label", "Yes",
+		"--bid-price", "45",
+		"--ask-price", "55",
+		"--quantity", "1",
+		"--dry-run",
+	)
+	if err != nil {
+		t.Fatalf("mm quote dry-run settleable blocker error = %v\nstderr:\n%s", err, stderr)
+	}
+	if !strings.Contains(stdout, "order quantity too small for on-chain settlement: quantity 1 at price 4500 bps, minimum is 3 shares") {
+		t.Fatalf("mm quote dry-run stdout missing settleable blocker\nstdout:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "\"quoteReady\": false") {
+		t.Fatalf("mm quote dry-run stdout missing quoteReady false\nstdout:\n%s", stdout)
+	}
+}
+
+func TestMMQuoteSubmitsBidAndAskOrders(t *testing.T) {
+	setCLIEnv(t)
+	server, state := newMockAPIServer(t)
+	defer server.Close()
+
+	privateKey := "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+	if _, stderr, err := executeCLI(t, "--json", "wallet", "import", "--private-key", privateKey); err != nil {
+		t.Fatalf("wallet import error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	originalGetERC20Balance := getERC20Balance
+	originalGetERC20Allowance := getERC20Allowance
+	originalIsERC1155ApprovedForAll := isERC1155ApprovedForAll
+	originalGetERC1155Balance := getERC1155Balance
+	getERC20Balance = func(_ context.Context, _ string, _ common.Address, _ common.Address) (*big.Int, error) {
+		return testBigInt("10000000000000000000"), nil
+	}
+	getERC20Allowance = func(_ context.Context, _ string, _ common.Address, _ common.Address, _ common.Address) (*big.Int, error) {
+		return testBigInt("10000000000000000000"), nil
+	}
+	isERC1155ApprovedForAll = func(_ context.Context, _ string, _ common.Address, _ common.Address, _ common.Address) (bool, error) {
+		return true, nil
+	}
+	getERC1155Balance = func(_ context.Context, _ string, _ common.Address, _ common.Address, tokenID *big.Int) (*big.Int, error) {
+		if tokenID.String() == "101" {
+			return testBigInt("5000000000000000000"), nil
+		}
+		return big.NewInt(0), nil
+	}
+	t.Cleanup(func() {
+		getERC20Balance = originalGetERC20Balance
+		getERC20Allowance = originalGetERC20Allowance
+		isERC1155ApprovedForAll = originalIsERC1155ApprovedForAll
+		getERC1155Balance = originalGetERC1155Balance
+	})
+
+	stdout, stderr, err := executeCLI(
+		t,
+		"--json",
+		"--api-url", server.URL+"/api/cli",
+		"--console-api-url", server.URL+"/api/cli",
+		"mm",
+		"--eventstore-url", server.URL+"/api",
+		"quote",
+		"clob-1",
+		"--label", "Yes",
+		"--bid-price", "45",
+		"--ask-price", "55",
+		"--quantity", "3",
+	)
+	if err != nil {
+		t.Fatalf("mm quote error = %v\nstderr:\n%s", err, stderr)
+	}
+	if !strings.Contains(stdout, "Two-sided quote resting on the hosted CLOB book") {
+		t.Fatalf("mm quote stdout missing completion message\nstdout:\n%s", stdout)
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.clobSubmitCalls != 2 {
+		t.Fatalf("clobSubmitCalls = %d, want 2", state.clobSubmitCalls)
+	}
+	if len(state.clobOrders) != 2 {
+		t.Fatalf("clobOrders = %d, want 2", len(state.clobOrders))
+	}
+}
+
+func TestMMQuoteUsesActiveMarketFallback(t *testing.T) {
+	setCLIEnv(t)
+	server, state := newMockAPIServer(t)
+	defer server.Close()
+
+	if err := saveActiveMMMarket("default", mmMarketSelection{MarketID: "clob-1", MarketTitle: "Will XRP close above $3.00 on Friday?"}); err != nil {
+		t.Fatalf("saveActiveMMMarket() error = %v", err)
+	}
+
+	privateKey := "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+	if _, stderr, err := executeCLI(t, "--json", "wallet", "import", "--private-key", privateKey); err != nil {
+		t.Fatalf("wallet import error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	originalGetERC20Balance := getERC20Balance
+	originalGetERC20Allowance := getERC20Allowance
+	originalIsERC1155ApprovedForAll := isERC1155ApprovedForAll
+	originalGetERC1155Balance := getERC1155Balance
+	getERC20Balance = func(_ context.Context, _ string, _ common.Address, _ common.Address) (*big.Int, error) {
+		return testBigInt("10000000000000000000"), nil
+	}
+	getERC20Allowance = func(_ context.Context, _ string, _ common.Address, _ common.Address, _ common.Address) (*big.Int, error) {
+		return testBigInt("10000000000000000000"), nil
+	}
+	isERC1155ApprovedForAll = func(_ context.Context, _ string, _ common.Address, _ common.Address, _ common.Address) (bool, error) {
+		return true, nil
+	}
+	getERC1155Balance = func(_ context.Context, _ string, _ common.Address, _ common.Address, tokenID *big.Int) (*big.Int, error) {
+		if tokenID.String() == "101" {
+			return testBigInt("5000000000000000000"), nil
+		}
+		return big.NewInt(0), nil
+	}
+	t.Cleanup(func() {
+		getERC20Balance = originalGetERC20Balance
+		getERC20Allowance = originalGetERC20Allowance
+		isERC1155ApprovedForAll = originalIsERC1155ApprovedForAll
+		getERC1155Balance = originalGetERC1155Balance
+	})
+
+	stdout, stderr, err := executeCLI(
+		t,
+		"--json",
+		"--api-url", server.URL+"/api/cli",
+		"--console-api-url", server.URL+"/api/cli",
+		"mm",
+		"--eventstore-url", server.URL+"/api",
+		"quote",
+		"--label", "Yes",
+		"--bid-price", "45",
+		"--ask-price", "55",
+		"--quantity", "3",
+	)
+	if err != nil {
+		t.Fatalf("mm quote fallback error = %v\nstderr:\n%s", err, stderr)
+	}
+	if !strings.Contains(stdout, "\"marketId\": \"clob-1\"") {
+		t.Fatalf("mm quote stdout missing fallback market\nstdout:\n%s", stdout)
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.clobSubmitCalls != 2 {
+		t.Fatalf("clobSubmitCalls = %d, want 2", state.clobSubmitCalls)
+	}
+}
+
+func TestMMQuoteAutoApprovesMissingExchangeApprovals(t *testing.T) {
+	setCLIEnv(t)
+	server, state := newMockAPIServer(t)
+	defer server.Close()
+
+	privateKey := "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+	if _, stderr, err := executeCLI(t, "--json", "wallet", "import", "--private-key", privateKey); err != nil {
+		t.Fatalf("wallet import error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	originalGetERC20Balance := getERC20Balance
+	originalGetERC20Allowance := getERC20Allowance
+	originalIsERC1155ApprovedForAll := isERC1155ApprovedForAll
+	originalGetERC1155Balance := getERC1155Balance
+	originalApproveERC20 := approveERC20
+	originalSetERC1155ApprovalForAll := setERC1155ApprovalForAll
+	originalWaitForReceipt := waitForTxReceipt
+	var approveERC20Calls int
+	var approveERC1155Calls int
+	getERC20Balance = func(_ context.Context, _ string, _ common.Address, _ common.Address) (*big.Int, error) {
+		return testBigInt("10000000000000000000"), nil
+	}
+	getERC20Allowance = func(_ context.Context, _ string, _ common.Address, _ common.Address, _ common.Address) (*big.Int, error) {
+		return big.NewInt(0), nil
+	}
+	isERC1155ApprovedForAll = func(_ context.Context, _ string, _ common.Address, _ common.Address, _ common.Address) (bool, error) {
+		return false, nil
+	}
+	getERC1155Balance = func(_ context.Context, _ string, _ common.Address, _ common.Address, tokenID *big.Int) (*big.Int, error) {
+		if tokenID.String() == "101" {
+			return testBigInt("5000000000000000000"), nil
+		}
+		return big.NewInt(0), nil
+	}
+	approveERC20 = func(_ context.Context, _ string, _ *big.Int, _ string, _ common.Address, _ common.Address, amount *big.Int) (common.Hash, error) {
+		approveERC20Calls++
+		if amount.String() != clobMaxUint256 {
+			t.Fatalf("approveERC20 amount = %s, want max uint256", amount.String())
+		}
+		return common.HexToHash("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), nil
+	}
+	setERC1155ApprovalForAll = func(_ context.Context, _ string, _ *big.Int, _ string, _ common.Address, _ common.Address, approved bool) (common.Hash, error) {
+		approveERC1155Calls++
+		if !approved {
+			t.Fatal("setERC1155ApprovalForAll approved = false, want true")
+		}
+		return common.HexToHash("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"), nil
+	}
+	waitForTxReceipt = func(_ context.Context, _ string, txHash common.Hash) (*types.Receipt, error) {
+		return &types.Receipt{TxHash: txHash, Status: 1}, nil
+	}
+	t.Cleanup(func() {
+		getERC20Balance = originalGetERC20Balance
+		getERC20Allowance = originalGetERC20Allowance
+		isERC1155ApprovedForAll = originalIsERC1155ApprovedForAll
+		getERC1155Balance = originalGetERC1155Balance
+		approveERC20 = originalApproveERC20
+		setERC1155ApprovalForAll = originalSetERC1155ApprovalForAll
+		waitForTxReceipt = originalWaitForReceipt
+	})
+
+	stdout, stderr, err := executeCLI(
+		t,
+		"--json",
+		"--api-url", server.URL+"/api/cli",
+		"--console-api-url", server.URL+"/api/cli",
+		"mm",
+		"--eventstore-url", server.URL+"/api",
+		"quote",
+		"clob-1",
+		"--label", "Yes",
+		"--bid-price", "45",
+		"--ask-price", "55",
+		"--quantity", "3",
+	)
+	if err != nil {
+		t.Fatalf("mm quote auto-approve error = %v\nstderr:\n%s", err, stderr)
+	}
+	if approveERC20Calls != 1 {
+		t.Fatalf("approveERC20Calls = %d, want 1", approveERC20Calls)
+	}
+	if approveERC1155Calls != 1 {
+		t.Fatalf("approveERC1155Calls = %d, want 1", approveERC1155Calls)
+	}
+	if !strings.Contains(stdout, "collateral-approve") {
+		t.Fatalf("mm quote stdout missing collateral approval\nstdout:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "outcome-approval-for-all") {
+		t.Fatalf("mm quote stdout missing outcome approval\nstdout:\n%s", stdout)
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.clobSubmitCalls != 2 {
+		t.Fatalf("clobSubmitCalls = %d, want 2", state.clobSubmitCalls)
+	}
+}
+
+func TestMMQuoteDryRunDoesNotAutoApprove(t *testing.T) {
+	setCLIEnv(t)
+	server, _ := newMockAPIServer(t)
+	defer server.Close()
+
+	privateKey := "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+	if _, stderr, err := executeCLI(t, "--json", "wallet", "import", "--private-key", privateKey); err != nil {
+		t.Fatalf("wallet import error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	originalGetERC20Balance := getERC20Balance
+	originalGetERC20Allowance := getERC20Allowance
+	originalIsERC1155ApprovedForAll := isERC1155ApprovedForAll
+	originalGetERC1155Balance := getERC1155Balance
+	originalApproveERC20 := approveERC20
+	originalSetERC1155ApprovalForAll := setERC1155ApprovalForAll
+	var approveERC20Calls int
+	var approveERC1155Calls int
+	getERC20Balance = func(_ context.Context, _ string, _ common.Address, _ common.Address) (*big.Int, error) {
+		return testBigInt("10000000000000000000"), nil
+	}
+	getERC20Allowance = func(_ context.Context, _ string, _ common.Address, _ common.Address, _ common.Address) (*big.Int, error) {
+		return big.NewInt(0), nil
+	}
+	isERC1155ApprovedForAll = func(_ context.Context, _ string, _ common.Address, _ common.Address, _ common.Address) (bool, error) {
+		return false, nil
+	}
+	getERC1155Balance = func(_ context.Context, _ string, _ common.Address, _ common.Address, tokenID *big.Int) (*big.Int, error) {
+		if tokenID.String() == "101" {
+			return testBigInt("5000000000000000000"), nil
+		}
+		return big.NewInt(0), nil
+	}
+	approveERC20 = func(_ context.Context, _ string, _ *big.Int, _ string, _ common.Address, _ common.Address, _ *big.Int) (common.Hash, error) {
+		approveERC20Calls++
+		return common.Hash{}, nil
+	}
+	setERC1155ApprovalForAll = func(_ context.Context, _ string, _ *big.Int, _ string, _ common.Address, _ common.Address, _ bool) (common.Hash, error) {
+		approveERC1155Calls++
+		return common.Hash{}, nil
+	}
+	t.Cleanup(func() {
+		getERC20Balance = originalGetERC20Balance
+		getERC20Allowance = originalGetERC20Allowance
+		isERC1155ApprovedForAll = originalIsERC1155ApprovedForAll
+		getERC1155Balance = originalGetERC1155Balance
+		approveERC20 = originalApproveERC20
+		setERC1155ApprovalForAll = originalSetERC1155ApprovalForAll
+	})
+
+	stdout, stderr, err := executeCLI(
+		t,
+		"--json",
+		"--api-url", server.URL+"/api/cli",
+		"--console-api-url", server.URL+"/api/cli",
+		"mm",
+		"quote",
+		"clob-1",
+		"--label", "Yes",
+		"--bid-price", "45",
+		"--ask-price", "55",
+		"--quantity", "2",
+		"--dry-run",
+	)
+	if err != nil {
+		t.Fatalf("mm quote dry-run no-auto-approve error = %v\nstderr:\n%s", err, stderr)
+	}
+	if approveERC20Calls != 0 {
+		t.Fatalf("approveERC20Calls = %d, want 0", approveERC20Calls)
+	}
+	if approveERC1155Calls != 0 {
+		t.Fatalf("approveERC1155Calls = %d, want 0", approveERC1155Calls)
+	}
+	if !strings.Contains(stdout, "collateral allowance 0 wei is below required maker amount") {
+		t.Fatalf("mm quote dry-run stdout missing collateral blocker\nstdout:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "outcome-token approval-for-all is not enabled") {
+		t.Fatalf("mm quote dry-run stdout missing outcome approval blocker\nstdout:\n%s", stdout)
+	}
+}
+
+func TestMMMintDryRunUsesExplicitMarket(t *testing.T) {
+	setCLIEnv(t)
+	server, _ := newMockAPIServer(t)
+	defer server.Close()
+
+	privateKey := "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+	if _, stderr, err := executeCLI(t, "--json", "wallet", "import", "--private-key", privateKey); err != nil {
+		t.Fatalf("wallet import error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	originalGetERC20Balance := getERC20Balance
+	originalGetERC20Allowance := getERC20Allowance
+	getERC20Balance = func(_ context.Context, _ string, _ common.Address, _ common.Address) (*big.Int, error) {
+		return testBigInt("2000000000000000000"), nil
+	}
+	getERC20Allowance = func(_ context.Context, _ string, _ common.Address, _ common.Address, _ common.Address) (*big.Int, error) {
+		return big.NewInt(0), nil
+	}
+	t.Cleanup(func() {
+		getERC20Balance = originalGetERC20Balance
+		getERC20Allowance = originalGetERC20Allowance
+	})
+
+	stdout, stderr, err := executeCLI(
+		t,
+		"--json",
+		"--api-url", server.URL+"/api/cli",
+		"--console-api-url", server.URL+"/api/cli",
+		"mm",
+		"mint",
+		"clob-hidden-1",
+		"--label", "Yes",
+		"--amount", "1",
+		"--dry-run",
+	)
+	if err != nil {
+		t.Fatalf("mm mint dry-run error = %v\nstderr:\n%s", err, stderr)
+	}
+	if !strings.Contains(stdout, "\"action\": \"mint\"") {
+		t.Fatalf("mm mint dry-run stdout missing mint action\nstdout:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "\"marketId\": \"clob-hidden-1\"") {
+		t.Fatalf("mm mint dry-run stdout missing market id\nstdout:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "\"needsApproval\": true") {
+		t.Fatalf("mm mint dry-run stdout missing approval preview\nstdout:\n%s", stdout)
+	}
+}
+
+func TestMMMintUsesActiveMarketFallback(t *testing.T) {
+	setCLIEnv(t)
+	server, _ := newMockAPIServer(t)
+	defer server.Close()
+
+	if err := saveActiveMMMarket("default", mmMarketSelection{MarketID: "clob-hidden-1", MarketTitle: "Hidden Test Market"}); err != nil {
+		t.Fatalf("saveActiveMMMarket() error = %v", err)
+	}
+
+	privateKey := "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+	if _, stderr, err := executeCLI(t, "--json", "wallet", "import", "--private-key", privateKey); err != nil {
+		t.Fatalf("wallet import error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	originalGetERC20Balance := getERC20Balance
+	originalGetERC20Allowance := getERC20Allowance
+	getERC20Balance = func(_ context.Context, _ string, _ common.Address, _ common.Address) (*big.Int, error) {
+		return testBigInt("2000000000000000000"), nil
+	}
+	getERC20Allowance = func(_ context.Context, _ string, _ common.Address, _ common.Address, _ common.Address) (*big.Int, error) {
+		return testBigInt("2000000000000000000"), nil
+	}
+	t.Cleanup(func() {
+		getERC20Balance = originalGetERC20Balance
+		getERC20Allowance = originalGetERC20Allowance
+	})
+
+	stdout, stderr, err := executeCLI(
+		t,
+		"--json",
+		"--api-url", server.URL+"/api/cli",
+		"--console-api-url", server.URL+"/api/cli",
+		"mm",
+		"mint",
+		"--label", "Yes",
+		"--amount", "1",
+		"--dry-run",
+	)
+	if err != nil {
+		t.Fatalf("mm mint fallback error = %v\nstderr:\n%s", err, stderr)
+	}
+	if !strings.Contains(stdout, "\"marketId\": \"clob-hidden-1\"") {
+		t.Fatalf("mm mint stdout missing fallback market\nstdout:\n%s", stdout)
+	}
+}
+
+func TestMMCancelAllCancelsScopedOpenOrders(t *testing.T) {
+	setCLIEnv(t)
+	server, state := newMockAPIServer(t)
+	defer server.Close()
+
+	privateKey := "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+	if _, stderr, err := executeCLI(t, "--json", "wallet", "import", "--private-key", privateKey); err != nil {
+		t.Fatalf("wallet import error = %v\nstderr:\n%s", err, stderr)
+	}
+	wallet, err := evm.WalletFromPrivateKeyHex(privateKey)
+	if err != nil {
+		t.Fatalf("WalletFromPrivateKeyHex() error = %v", err)
+	}
+
+	price := 55
+	now := time.Date(2026, time.March, 10, 12, 0, 0, 0, time.UTC)
+	state.mu.Lock()
+	state.clobOrders["order-1"] = api.ClobOrder{OrderID: "order-1", ClobID: "clob-1-0-yes", Maker: wallet.Address().Hex(), TokenSide: "yes", Side: "buy", OrderType: "limit", Price: &price, Quantity: 1, Remaining: 1, TotalFilled: 0, Status: "open", EventSequence: 1, CreatedAt: &now, UpdatedAt: &now}
+	state.clobOrders["order-2"] = api.ClobOrder{OrderID: "order-2", ClobID: "clob-1-1-yes", Maker: wallet.Address().Hex(), TokenSide: "yes", Side: "sell", OrderType: "limit", Price: &price, Quantity: 1, Remaining: 1, TotalFilled: 0, Status: "open", EventSequence: 2, CreatedAt: &now, UpdatedAt: &now}
+	state.clobOrders["order-3"] = api.ClobOrder{OrderID: "order-3", ClobID: "clob-1-0-yes", Maker: wallet.Address().Hex(), TokenSide: "yes", Side: "buy", OrderType: "limit", Price: &price, Quantity: 1, Remaining: 0, TotalFilled: 1, Status: "filled", EventSequence: 3, CreatedAt: &now, UpdatedAt: &now}
+	state.mu.Unlock()
+
+	stdout, stderr, err := executeCLI(
+		t,
+		"--json",
+		"--api-url", server.URL+"/api/cli",
+		"--console-api-url", server.URL+"/api/cli",
+		"mm",
+		"--projection-url", server.URL,
+		"--eventstore-url", server.URL+"/api",
+		"cancel-all",
+		"--market", "clob-1",
+		"--label", "Yes",
+	)
+	if err != nil {
+		t.Fatalf("mm cancel-all error = %v\nstderr:\n%s", err, stderr)
+	}
+	if !strings.Contains(stdout, "\"cancelled\": 1") {
+		t.Fatalf("mm cancel-all stdout missing cancelled count\nstdout:\n%s", stdout)
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.clobOrders["order-1"].Status != "cancelled" {
+		t.Fatalf("order-1 status = %q, want cancelled", state.clobOrders["order-1"].Status)
+	}
+	if state.clobOrders["order-2"].Status != "open" {
+		t.Fatalf("order-2 status = %q, want open", state.clobOrders["order-2"].Status)
+	}
+	if state.clobOrders["order-3"].Status != "filled" {
+		t.Fatalf("order-3 status = %q, want filled", state.clobOrders["order-3"].Status)
+	}
+}
+
+func TestMMCancelAllAcceptsDisplayedSideAlias(t *testing.T) {
+	setCLIEnv(t)
+	server, state := newMockAPIServer(t)
+	defer server.Close()
+
+	privateKey := "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+	if _, stderr, err := executeCLI(t, "--json", "wallet", "import", "--private-key", privateKey); err != nil {
+		t.Fatalf("wallet import error = %v\nstderr:\n%s", err, stderr)
+	}
+	wallet, err := evm.WalletFromPrivateKeyHex(privateKey)
+	if err != nil {
+		t.Fatalf("WalletFromPrivateKeyHex() error = %v", err)
+	}
+
+	price := 55
+	now := time.Date(2026, time.March, 10, 12, 0, 0, 0, time.UTC)
+	state.mu.Lock()
+	state.clobOrders["order-1"] = api.ClobOrder{OrderID: "order-1", ClobID: "clob-1-0-yes", Maker: wallet.Address().Hex(), TokenSide: "yes", Side: "buy", OrderType: "limit", Price: &price, Quantity: 1, Remaining: 1, TotalFilled: 0, Status: "open", EventSequence: 1, CreatedAt: &now, UpdatedAt: &now}
+	state.clobOrders["order-2"] = api.ClobOrder{OrderID: "order-2", ClobID: "clob-1-1-yes", Maker: wallet.Address().Hex(), TokenSide: "yes", Side: "sell", OrderType: "limit", Price: &price, Quantity: 1, Remaining: 1, TotalFilled: 0, Status: "open", EventSequence: 2, CreatedAt: &now, UpdatedAt: &now}
+	state.mu.Unlock()
+
+	stdout, stderr, err := executeCLI(
+		t,
+		"--json",
+		"--api-url", server.URL+"/api/cli",
+		"--console-api-url", server.URL+"/api/cli",
+		"mm",
+		"--projection-url", server.URL,
+		"--eventstore-url", server.URL+"/api",
+		"cancel-all",
+		"--market", "clob-1",
+		"--label", "Yes",
+		"--displayed-side", "yes",
+	)
+	if err != nil {
+		t.Fatalf("mm cancel-all displayed-side alias error = %v\nstderr:\n%s", err, stderr)
+	}
+	if !strings.Contains(stdout, "\"cancelled\": 1") {
+		t.Fatalf("mm cancel-all stdout missing cancelled count\nstdout:\n%s", stdout)
+	}
+}
+
+func TestMMOrdersUsesActiveMarketFallback(t *testing.T) {
+	setCLIEnv(t)
+	server, state := newMockAPIServer(t)
+	defer server.Close()
+
+	if err := saveActiveMMMarket("default", mmMarketSelection{MarketID: "clob-yes-no-single", MarketTitle: "Will XRP close above $3.00 with a shared yes/no book?"}); err != nil {
+		t.Fatalf("saveActiveMMMarket() error = %v", err)
+	}
+
+	privateKey := "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+	if _, stderr, err := executeCLI(t, "--json", "wallet", "import", "--private-key", privateKey); err != nil {
+		t.Fatalf("wallet import error = %v\nstderr:\n%s", err, stderr)
+	}
+	wallet, err := evm.WalletFromPrivateKeyHex(privateKey)
+	if err != nil {
+		t.Fatalf("WalletFromPrivateKeyHex() error = %v", err)
+	}
+
+	price := 45
+	now := time.Date(2026, time.March, 10, 12, 0, 0, 0, time.UTC)
+	state.mu.Lock()
+	state.clobOrders["order-no-1"] = api.ClobOrder{OrderID: "order-no-1", ClobID: "clob-yes-no-single-0-no", Maker: wallet.Address().Hex(), TokenSide: "no", Side: "buy", OrderType: "limit", Price: &price, Quantity: 2, Remaining: 2, TotalFilled: 0, Status: "open", EventSequence: 1, CreatedAt: &now, UpdatedAt: &now}
+	state.mu.Unlock()
+
+	stdout, stderr, err := executeCLI(
+		t,
+		"--json",
+		"--api-url", server.URL+"/api/cli",
+		"--console-api-url", server.URL+"/api/cli",
+		"mm",
+		"--projection-url", server.URL,
+		"orders",
+		"--outcome", "1",
+	)
+	if err != nil {
+		t.Fatalf("mm orders error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+		t.Fatalf("json.Unmarshal(stdout) error = %v\nstdout:\n%s", err, stdout)
+	}
+	if payload["displayedSide"] != "no" {
+		t.Fatalf("displayedSide = %#v, want no", payload["displayedSide"])
+	}
+	if payload["clobId"] != "clob-yes-no-single-0-no" {
+		t.Fatalf("clobId = %#v, want clob-yes-no-single-0-no", payload["clobId"])
+	}
+	if payload["total"] != float64(1) {
+		t.Fatalf("total = %#v, want 1", payload["total"])
+	}
+
+	state.mu.Lock()
+	rawQuery := state.lastClobOrdersQuery
+	state.mu.Unlock()
+	query, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		t.Fatalf("ParseQuery(%q) error = %v", rawQuery, err)
+	}
+	if query.Get("clob_id") != "clob-yes-no-single-0-no" {
+		t.Fatalf("clob_id = %q, want clob-yes-no-single-0-no", query.Get("clob_id"))
+	}
+	if query.Get("active_only") != "true" {
+		t.Fatalf("active_only = %q, want true", query.Get("active_only"))
+	}
+}
+
+func TestMMBookUsesActiveMarketFallback(t *testing.T) {
+	setCLIEnv(t)
+	server, state := newMockAPIServer(t)
+	defer server.Close()
+
+	if err := saveActiveMMMarket("default", mmMarketSelection{MarketID: "clob-yes-no-single", MarketTitle: "Will XRP close above $3.00 with a shared yes/no book?"}); err != nil {
+		t.Fatalf("saveActiveMMMarket() error = %v", err)
+	}
+
+	stdout, stderr, err := executeCLI(
+		t,
+		"--json",
+		"--api-url", server.URL+"/api/cli",
+		"--console-api-url", server.URL+"/api/cli",
+		"mm",
+		"--projection-url", server.URL,
+		"book",
+		"--outcome", "1",
+	)
+	if err != nil {
+		t.Fatalf("mm book error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+		t.Fatalf("json.Unmarshal(stdout) error = %v\nstdout:\n%s", err, stdout)
+	}
+	if payload["displayedSide"] != "no" {
+		t.Fatalf("displayedSide = %#v, want no", payload["displayedSide"])
+	}
+	if payload["clobId"] != "clob-yes-no-single-0-no" {
+		t.Fatalf("clobId = %#v, want clob-yes-no-single-0-no", payload["clobId"])
+	}
+
+	state.mu.Lock()
+	bookPath := state.lastClobBookPath
+	depthPath := state.lastClobDepthPath
+	state.mu.Unlock()
+	if bookPath != "/books/clob-yes-no-single/0?token_side=no" {
+		t.Fatalf("book path = %q, want /books/clob-yes-no-single/0?token_side=no", bookPath)
+	}
+	if depthPath != "/books/clob-yes-no-single/0/depth?token_side=no" {
+		t.Fatalf("depth path = %q, want /books/clob-yes-no-single/0/depth?token_side=no", depthPath)
+	}
+}
+
+func TestMMFillsUsesActiveMarketFallback(t *testing.T) {
+	setCLIEnv(t)
+	server, state := newMockAPIServer(t)
+	defer server.Close()
+
+	if err := saveActiveMMMarket("default", mmMarketSelection{MarketID: "clob-yes-no-single", MarketTitle: "Will XRP close above $3.00 with a shared yes/no book?"}); err != nil {
+		t.Fatalf("saveActiveMMMarket() error = %v", err)
+	}
+
+	privateKey := "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+	if _, stderr, err := executeCLI(t, "--json", "wallet", "import", "--private-key", privateKey); err != nil {
+		t.Fatalf("wallet import error = %v\nstderr:\n%s", err, stderr)
+	}
+	wallet, err := evm.WalletFromPrivateKeyHex(privateKey)
+	if err != nil {
+		t.Fatalf("WalletFromPrivateKeyHex() error = %v", err)
+	}
+
+	settled := "settled"
+	now := time.Date(2026, time.March, 10, 12, 0, 0, 0, time.UTC)
+	state.mu.Lock()
+	state.clobFills = []api.ClobFill{{TradeID: "trade-1", ClobID: "clob-yes-no-single-0-no", BuyOrderID: "order-no-1", SellOrderID: "other-order", TakerSide: "buy", Buyer: wallet.Address().Hex(), Seller: "0x00000000000000000000000000000000000000BB", Price: 45, Quantity: 1, SettlementStatus: &settled, CreatedAt: &now}}
+	state.mu.Unlock()
+
+	stdout, stderr, err := executeCLI(
+		t,
+		"--json",
+		"--api-url", server.URL+"/api/cli",
+		"--console-api-url", server.URL+"/api/cli",
+		"mm",
+		"--projection-url", server.URL,
+		"fills",
+		"--outcome", "1",
+	)
+	if err != nil {
+		t.Fatalf("mm fills error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+		t.Fatalf("json.Unmarshal(stdout) error = %v\nstdout:\n%s", err, stdout)
+	}
+	if payload["displayedSide"] != "no" {
+		t.Fatalf("displayedSide = %#v, want no", payload["displayedSide"])
+	}
+	if payload["total"] != float64(1) {
+		t.Fatalf("total = %#v, want 1", payload["total"])
+	}
+
+	state.mu.Lock()
+	rawQuery := state.lastClobFillsQuery
+	state.mu.Unlock()
+	query, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		t.Fatalf("ParseQuery(%q) error = %v", rawQuery, err)
+	}
+	if query.Get("clob_id") != "clob-yes-no-single-0-no" {
+		t.Fatalf("clob_id = %q, want clob-yes-no-single-0-no", query.Get("clob_id"))
+	}
+	if query.Get("wallet") != wallet.Address().Hex() {
+		t.Fatalf("wallet = %q, want %q", query.Get("wallet"), wallet.Address().Hex())
+	}
+}
+
+func TestMMStatusIncludesInventoryOrdersFillsAndDepth(t *testing.T) {
+	setCLIEnv(t)
+	server, state := newMockAPIServer(t)
+	defer server.Close()
+
+	if err := saveActiveMMMarket("default", mmMarketSelection{MarketID: "clob-yes-no-single", MarketTitle: "Will XRP close above $3.00 with a shared yes/no book?"}); err != nil {
+		t.Fatalf("saveActiveMMMarket() error = %v", err)
+	}
+
+	privateKey := "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+	if _, stderr, err := executeCLI(t, "--json", "wallet", "import", "--private-key", privateKey); err != nil {
+		t.Fatalf("wallet import error = %v\nstderr:\n%s", err, stderr)
+	}
+	wallet, err := evm.WalletFromPrivateKeyHex(privateKey)
+	if err != nil {
+		t.Fatalf("WalletFromPrivateKeyHex() error = %v", err)
+	}
+
+	originalGetERC20Balance := getERC20Balance
+	originalGetERC20Allowance := getERC20Allowance
+	originalIsERC1155ApprovedForAll := isERC1155ApprovedForAll
+	originalGetERC1155Balance := getERC1155Balance
+	getERC20Balance = func(_ context.Context, _ string, _ common.Address, _ common.Address) (*big.Int, error) {
+		return testBigInt("5000000000000000000"), nil
+	}
+	getERC20Allowance = func(_ context.Context, _ string, _ common.Address, _ common.Address, _ common.Address) (*big.Int, error) {
+		return testBigInt("4000000000000000000"), nil
+	}
+	isERC1155ApprovedForAll = func(_ context.Context, _ string, _ common.Address, _ common.Address, _ common.Address) (bool, error) {
+		return true, nil
+	}
+	getERC1155Balance = func(_ context.Context, _ string, _ common.Address, _ common.Address, tokenID *big.Int) (*big.Int, error) {
+		if tokenID.String() == "301" {
+			return testBigInt("2000000000000000000"), nil
+		}
+		if tokenID.String() == "302" {
+			return testBigInt("1000000000000000000"), nil
+		}
+		return big.NewInt(0), nil
+	}
+	t.Cleanup(func() {
+		getERC20Balance = originalGetERC20Balance
+		getERC20Allowance = originalGetERC20Allowance
+		isERC1155ApprovedForAll = originalIsERC1155ApprovedForAll
+		getERC1155Balance = originalGetERC1155Balance
+	})
+
+	price := 45
+	now := time.Date(2026, time.March, 10, 12, 0, 0, 0, time.UTC)
+	state.mu.Lock()
+	state.clobOrders["order-no-1"] = api.ClobOrder{OrderID: "order-no-1", ClobID: "clob-yes-no-single-0-no", Maker: wallet.Address().Hex(), TokenSide: "no", Side: "buy", OrderType: "limit", Price: &price, Quantity: 2, Remaining: 2, TotalFilled: 0, Status: "open", EventSequence: 1, CreatedAt: &now, UpdatedAt: &now}
+	settled := "settled"
+	state.clobFills = []api.ClobFill{{TradeID: "trade-1", ClobID: "clob-yes-no-single-0-no", BuyOrderID: "order-no-1", SellOrderID: "other-order", TakerSide: "buy", Buyer: wallet.Address().Hex(), Seller: "0x00000000000000000000000000000000000000BB", Price: 45, Quantity: 1, SettlementStatus: &settled, CreatedAt: &now}}
+	state.mu.Unlock()
+
+	stdout, stderr, err := executeCLI(
+		t,
+		"--json",
+		"--api-url", server.URL+"/api/cli",
+		"--console-api-url", server.URL+"/api/cli",
+		"mm",
+		"--projection-url", server.URL,
+		"status",
+		"--outcome", "1",
+	)
+	if err != nil {
+		t.Fatalf("mm status error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+		t.Fatalf("json.Unmarshal(stdout) error = %v\nstdout:\n%s", err, stdout)
+	}
+	if payload["displayedSide"] != "no" {
+		t.Fatalf("displayedSide = %#v, want no", payload["displayedSide"])
+	}
+	if payload["activeOrderCount"] != float64(1) {
+		t.Fatalf("activeOrderCount = %#v, want 1", payload["activeOrderCount"])
+	}
+	if payload["recentFillCount"] != float64(1) {
+		t.Fatalf("recentFillCount = %#v, want 1", payload["recentFillCount"])
+	}
+	depth, ok := payload["depth"].(map[string]any)
+	if !ok {
+		t.Fatalf("depth = %#v, want object", payload["depth"])
+	}
+	bids, ok := depth["bids"].([]any)
+	if !ok || len(bids) != 1 {
+		t.Fatalf("depth bids = %#v, want one bid level", depth["bids"])
+	}
+	inventory, ok := payload["inventory"].(map[string]any)
+	if !ok {
+		t.Fatalf("inventory = %#v, want object", payload["inventory"])
+	}
+	summary, ok := inventory["summary"].(map[string]any)
+	if !ok {
+		t.Fatalf("inventory summary = %#v, want object", inventory["summary"])
+	}
+	if summary["totalYesXrp"] != "2.000000" {
+		t.Fatalf("totalYesXrp = %#v, want 2.000000", summary["totalYesXrp"])
+	}
+	if summary["totalNoXrp"] != "1.000000" {
+		t.Fatalf("totalNoXrp = %#v, want 1.000000", summary["totalNoXrp"])
+	}
+
+	state.mu.Lock()
+	bookPath := state.lastClobBookPath
+	depthPath := state.lastClobDepthPath
+	ordersQuery := state.lastClobOrdersQuery
+	fillsQuery := state.lastClobFillsQuery
+	state.mu.Unlock()
+	if bookPath != "/books/clob-yes-no-single/0?token_side=no" {
+		t.Fatalf("book path = %q, want /books/clob-yes-no-single/0?token_side=no", bookPath)
+	}
+	if depthPath != "/books/clob-yes-no-single/0/depth?token_side=no" {
+		t.Fatalf("depth path = %q, want /books/clob-yes-no-single/0/depth?token_side=no", depthPath)
+	}
+	ordersParsed, err := url.ParseQuery(ordersQuery)
+	if err != nil {
+		t.Fatalf("ParseQuery(orders) error = %v", err)
+	}
+	if ordersParsed.Get("clob_id") != "clob-yes-no-single-0-no" {
+		t.Fatalf("orders clob_id = %q, want clob-yes-no-single-0-no", ordersParsed.Get("clob_id"))
+	}
+	fillsParsed, err := url.ParseQuery(fillsQuery)
+	if err != nil {
+		t.Fatalf("ParseQuery(fills) error = %v", err)
+	}
+	if fillsParsed.Get("wallet") != wallet.Address().Hex() {
+		t.Fatalf("fills wallet = %q, want %q", fillsParsed.Get("wallet"), wallet.Address().Hex())
 	}
 }
 
@@ -2262,23 +3483,35 @@ func TestCommandHelperFunctions(t *testing.T) {
 
 func executeCLI(t *testing.T, args ...string) (string, string, error) {
 	t.Helper()
+	return executeCLIWithInput(t, "", args...)
+}
+
+func executeCLIWithInput(t *testing.T, input string, args ...string) (string, string, error) {
+	t.Helper()
 	resetCLIFlags()
 	cmd := newRootCommand()
 	cmd.SetArgs(normalizeCLIArgs(args))
-	stdout, stderr, err := captureStdIO(func() error {
+	stdout, stderr, err := captureStdIO(input, func() error {
 		return cmd.Execute()
 	})
 	resetCLIFlags()
 	return stdout, stderr, err
 }
 
-func captureStdIO(run func() error) (string, string, error) {
+func captureStdIO(input string, run func() error) (string, string, error) {
 	stdoutReader, stdoutWriter, _ := os.Pipe()
 	stderrReader, stderrWriter, _ := os.Pipe()
+	stdinReader, stdinWriter, _ := os.Pipe()
 	oldStdout := os.Stdout
 	oldStderr := os.Stderr
+	oldStdin := os.Stdin
 	os.Stdout = stdoutWriter
 	os.Stderr = stderrWriter
+	os.Stdin = stdinReader
+	if input != "" {
+		_, _ = io.WriteString(stdinWriter, input)
+	}
+	_ = stdinWriter.Close()
 
 	var stdoutBuf bytes.Buffer
 	var stderrBuf bytes.Buffer
@@ -2298,6 +3531,7 @@ func captureStdIO(run func() error) (string, string, error) {
 	_ = stderrWriter.Close()
 	os.Stdout = oldStdout
 	os.Stderr = oldStderr
+	os.Stdin = oldStdin
 	wg.Wait()
 	return stdoutBuf.String(), stderrBuf.String(), err
 }
@@ -2314,6 +3548,7 @@ func setCLIEnv(t *testing.T) {
 
 func resetCLIFlags() {
 	flagAPIURL = ""
+	flagConsoleAPIURL = ""
 	flagRPCURL = ""
 	flagXRPLURL = ""
 	flagJSON = false
@@ -2360,6 +3595,7 @@ func newMockAPIServer(t *testing.T) (*httptest.Server, *mockAPIState) {
 		{
 			ID:              "market-0",
 			MarketType:      "binary",
+			IsVisible:       ptrBool(true),
 			Title:           "Will BTC reach $120k?",
 			Category:        "crypto",
 			Status:          "active",
@@ -2371,6 +3607,7 @@ func newMockAPIServer(t *testing.T) (*httptest.Server, *mockAPIState) {
 		{
 			ID:              "market-1",
 			MarketType:      "binary",
+			IsVisible:       ptrBool(true),
 			Title:           "Will XRP close above $3.00?",
 			Category:        "crypto",
 			Status:          "active",
@@ -2382,6 +3619,7 @@ func newMockAPIServer(t *testing.T) (*httptest.Server, *mockAPIState) {
 		{
 			ID:              "market-2",
 			MarketType:      "binary",
+			IsVisible:       ptrBool(true),
 			Title:           "Will the Lakers win tonight?",
 			Category:        "sports",
 			Status:          "active",
@@ -2389,6 +3627,55 @@ func newMockAPIServer(t *testing.T) (*httptest.Server, *mockAPIState) {
 			EndsAt:          now.Add(3 * time.Hour),
 			ContractAddress: "0x0000000000000000000000000000000000000003",
 			Outcomes:        []api.Outcome{{Index: 0, Label: "Yes"}, {Index: 1, Label: "No"}},
+		},
+		{
+			ID:                   "clob-1",
+			MarketType:           "binary",
+			MarketImplementation: "AxiomCTFMarket",
+			IsVisible:            ptrBool(true),
+			Title:                "Will XRP close above $3.00 on Friday?",
+			Category:             "crypto",
+			Status:               "active",
+			StartsAt:             now.Add(-24 * time.Hour),
+			EndsAt:               now.Add(-2 * time.Hour),
+			ContractAddress:      "0x00000000000000000000000000000000000000C1",
+			Outcomes:             []api.Outcome{{Index: 0, Label: "Yes"}, {Index: 1, Label: "No"}},
+			CTFOutcomeMarkets: []api.CtfOutcomeMarketBinding{
+				{OutcomeID: "outcome-yes", OutcomeIndex: 0, Label: "Yes", ContractAddress: "0x00000000000000000000000000000000000000C1", OutcomeTokenIDs: []string{"101", "102"}, QuestionID: "question-yes", ConditionID: "condition-yes"},
+				{OutcomeID: "outcome-no", OutcomeIndex: 1, Label: "No", ContractAddress: "0x00000000000000000000000000000000000000C2", OutcomeTokenIDs: []string{"201", "202"}, QuestionID: "question-no", ConditionID: "condition-no"},
+			},
+		},
+		{
+			ID:                   "clob-yes-no-single",
+			MarketType:           "binary",
+			MarketImplementation: "AxiomCTFMarket",
+			IsVisible:            ptrBool(true),
+			Title:                "Will XRP close above $3.00 with a shared yes/no book?",
+			Category:             "crypto",
+			Status:               "active",
+			StartsAt:             now.Add(-24 * time.Hour),
+			EndsAt:               now.Add(24 * time.Hour),
+			ContractAddress:      "0x00000000000000000000000000000000000000D1",
+			Outcomes:             []api.Outcome{{Index: 0, Label: "Yes"}, {Index: 1, Label: "No"}},
+			CTFOutcomeMarkets: []api.CtfOutcomeMarketBinding{
+				{OutcomeID: "shared-outcome-yes", OutcomeIndex: 0, Label: "Yes", ContractAddress: "0x00000000000000000000000000000000000000D1", OutcomeTokenIDs: []string{"301", "302"}, QuestionID: "question-shared-yes", ConditionID: "condition-shared-yes"},
+			},
+		},
+		{
+			ID:                   "clob-hidden-1",
+			MarketType:           "binary",
+			MarketImplementation: "AxiomCTFMarket",
+			IsVisible:            ptrBool(false),
+			Title:                "Hidden XRP market for MM operators",
+			Category:             "crypto",
+			Status:               "active",
+			StartsAt:             now.Add(-12 * time.Hour),
+			EndsAt:               now.Add(6 * time.Hour),
+			ContractAddress:      "0x00000000000000000000000000000000000000E1",
+			Outcomes:             []api.Outcome{{Index: 0, Label: "Yes"}, {Index: 1, Label: "No"}},
+			CTFOutcomeMarkets: []api.CtfOutcomeMarketBinding{
+				{OutcomeID: "hidden-outcome-yes", OutcomeIndex: 0, Label: "Yes", ContractAddress: "0x00000000000000000000000000000000000000E1", OutcomeTokenIDs: []string{"401", "402"}, QuestionID: "question-hidden-yes", ConditionID: "condition-hidden-yes"},
+			},
 		},
 	}
 
@@ -2743,7 +4030,15 @@ func newMockAPIServer(t *testing.T) (*httptest.Server, *mockAPIState) {
 				Stats:                 api.ProfileStats{TotalPredictions: 12, ResolvedMarkets: 5, OpenMarkets: 7, UnclaimedMarkets: 1, UnclaimedPayoutUSD: "22.00", UnclaimedPnlUSD: "3.00", LeaderboardRank: &rank, PnlUSD: 4.56, PnlPercent: 7.89, VolumeUSD: 123.45, WinRate: 66.6, TradeCount: 12},
 			})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/cli/markets":
-			_ = json.NewEncoder(w).Encode(api.MarketsResponse{Items: markets, Total: len(markets), Limit: len(markets), Offset: 0})
+			includeHidden := r.URL.Query().Get("includeHidden") == "true"
+			filtered := make([]api.MarketListItem, 0, len(markets))
+			for _, market := range markets {
+				if market.IsVisible != nil && !*market.IsVisible && !includeHidden {
+					continue
+				}
+				filtered = append(filtered, market)
+			}
+			_ = json.NewEncoder(w).Encode(api.MarketsResponse{Items: filtered, Total: len(filtered), Limit: len(filtered), Offset: 0})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/cli/markets/market-1":
 			_ = json.NewEncoder(w).Encode(api.MarketDetails{
 				MarketListItem: api.MarketListItem{
@@ -2781,8 +4076,8 @@ func newMockAPIServer(t *testing.T) (*httptest.Server, *mockAPIState) {
 						"0x00000000000000000000000000000000000000C2",
 					},
 					CTFOutcomeMarkets: []api.CtfOutcomeMarketBinding{
-						{OutcomeID: "outcome-yes", OutcomeIndex: 0, Label: "Yes", ContractAddress: "0x00000000000000000000000000000000000000C1", OutcomeTokenIDs: []string{"101", "102"}, QuestionID: "question-yes", ConditionID: "condition-yes"},
-						{OutcomeID: "outcome-no", OutcomeIndex: 1, Label: "No", ContractAddress: "0x00000000000000000000000000000000000000C2", OutcomeTokenIDs: []string{"201", "202"}, QuestionID: "question-no", ConditionID: "condition-no"},
+						{OutcomeID: "outcome-yes", OutcomeIndex: 0, Label: "Yes", ContractAddress: "0x00000000000000000000000000000000000000C1", OutcomeTokenIDs: []string{"101", "102"}, QuestionID: "question-yes", ConditionID: "0x1111111111111111111111111111111111111111111111111111111111111111"},
+						{OutcomeID: "outcome-no", OutcomeIndex: 1, Label: "No", ContractAddress: "0x00000000000000000000000000000000000000C2", OutcomeTokenIDs: []string{"201", "202"}, QuestionID: "question-no", ConditionID: "0x2222222222222222222222222222222222222222222222222222222222222222"},
 					},
 					Outcomes: []api.Outcome{{Index: 0, Label: "Yes"}, {Index: 1, Label: "No"}},
 				},
@@ -2809,7 +4104,7 @@ func newMockAPIServer(t *testing.T) (*httptest.Server, *mockAPIState) {
 						"0x00000000000000000000000000000000000000D1",
 					},
 					CTFOutcomeMarkets: []api.CtfOutcomeMarketBinding{
-						{OutcomeID: "shared-outcome-yes", OutcomeIndex: 0, Label: "Yes", ContractAddress: "0x00000000000000000000000000000000000000D1", OutcomeTokenIDs: []string{"301", "302"}, QuestionID: "question-shared-yes", ConditionID: "condition-shared-yes"},
+						{OutcomeID: "shared-outcome-yes", OutcomeIndex: 0, Label: "Yes", ContractAddress: "0x00000000000000000000000000000000000000D1", OutcomeTokenIDs: []string{"301", "302"}, QuestionID: "question-shared-yes", ConditionID: "0x3333333333333333333333333333333333333333333333333333333333333333"},
 					},
 					Outcomes: []api.Outcome{{Index: 0, Label: "Yes"}, {Index: 1, Label: "No"}},
 				},
@@ -2818,6 +4113,34 @@ func newMockAPIServer(t *testing.T) (*httptest.Server, *mockAPIState) {
 				OwnerAddress:       "0xowner",
 				ResolutionCriteria: "Friday close must settle above $3.00.",
 				Tags:               []string{"crypto", "clob", "shared-book"},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/cli/markets/clob-hidden-1":
+			_ = json.NewEncoder(w).Encode(api.MarketDetails{
+				MarketListItem: api.MarketListItem{
+					ID:                   "clob-hidden-1",
+					MarketType:           "binary",
+					MarketImplementation: "AxiomCTFMarket",
+					IsVisible:            ptrBool(false),
+					Title:                "Hidden XRP market for MM operators",
+					Category:             "crypto",
+					Status:               "active",
+					StartsAt:             now.Add(-12 * time.Hour),
+					EndsAt:               now.Add(6 * time.Hour),
+					ContractAddress:      "0x00000000000000000000000000000000000000E1",
+					IsResolved:           false,
+					LogicalMarketAddresses: []string{
+						"0x00000000000000000000000000000000000000E1",
+					},
+					CTFOutcomeMarkets: []api.CtfOutcomeMarketBinding{
+						{OutcomeID: "hidden-outcome-yes", OutcomeIndex: 0, Label: "Yes", ContractAddress: "0x00000000000000000000000000000000000000E1", OutcomeTokenIDs: []string{"401", "402"}, QuestionID: "question-hidden-yes", ConditionID: "0x4444444444444444444444444444444444444444444444444444444444444444"},
+					},
+					Outcomes: []api.Outcome{{Index: 0, Label: "Yes"}, {Index: 1, Label: "No"}},
+				},
+				SettlementToken:    "0x0000000000000000000000000000000000000000",
+				Creator:            "0xcreator",
+				OwnerAddress:       "0xowner",
+				ResolutionCriteria: "Operator-only hidden market.",
+				Tags:               []string{"crypto", "clob", "hidden"},
 			})
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/cli/profile/") && strings.HasSuffix(r.URL.Path, "/rewards"):
 			epochID := 12
@@ -2899,6 +4222,10 @@ func ptrTime(value time.Time) *time.Time {
 }
 
 func ptrInt(value int) *int {
+	return &value
+}
+
+func ptrBool(value bool) *bool {
 	return &value
 }
 

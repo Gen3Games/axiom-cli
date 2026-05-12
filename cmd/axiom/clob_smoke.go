@@ -401,7 +401,19 @@ func ensureClobSmokeApprovals(cmd *cobra.Command, ctx *cliContext, privateKeyHex
 	if !mustBoolFlag(cmd, "auto-approve") {
 		return nil, nil
 	}
+	return ensureClobOrderApprovals(cmd.Context(), ctx.Config.EVMRPCURL, privateKeyHex, walletAddress, status, selection, payload, mustBoolFlag(cmd, "wait"))
+}
 
+func ensureClobOrderApprovals(
+	ctx context.Context,
+	rpcURL string,
+	privateKeyHex string,
+	walletAddress common.Address,
+	status *clobWalletStatus,
+	selection *clobSelection,
+	payload api.ClobSignedOrderPayload,
+	wait bool,
+) ([]map[string]any, error) {
 	transactions := make([]map[string]any, 0, 2)
 	makerAmount, err := evm.ParseBigInt(payload.MakerAmount)
 	if err != nil {
@@ -418,7 +430,7 @@ func ensureClobSmokeApprovals(cmd *cobra.Command, ctx *cliContext, privateKeyHex
 			if parseErr != nil {
 				return nil, parseErr
 			}
-			txHash, approveErr := approveERC20(cmd.Context(), ctx.Config.EVMRPCURL, big.NewInt(xrplEVMChainID), privateKeyHex, selection.CollateralToken, selection.ExchangeAddress, approveAmount)
+			txHash, approveErr := approveERC20(ctx, rpcURL, big.NewInt(xrplEVMChainID), privateKeyHex, selection.CollateralToken, selection.ExchangeAddress, approveAmount)
 			if approveErr != nil {
 				return nil, approveErr
 			}
@@ -427,10 +439,12 @@ func ensureClobSmokeApprovals(cmd *cobra.Command, ctx *cliContext, privateKeyHex
 				"walletAddress": walletAddress.Hex(),
 				"token":         selection.CollateralToken.Hex(),
 				"spender":       selection.ExchangeAddress.Hex(),
+				"amountWei":     approveAmount.String(),
+				"amountXrp":     formatWeiToXRP(approveAmount),
 				"txHash":        txHash.Hex(),
 			}
-			if mustBoolFlag(cmd, "wait") {
-				receipt, waitErr := waitForTxReceipt(cmd.Context(), ctx.Config.EVMRPCURL, txHash)
+			if wait {
+				receipt, waitErr := waitForTxReceipt(ctx, rpcURL, txHash)
 				if waitErr != nil {
 					return nil, waitErr
 				}
@@ -442,7 +456,7 @@ func ensureClobSmokeApprovals(cmd *cobra.Command, ctx *cliContext, privateKeyHex
 	}
 
 	if !status.OutcomeApprovalForAll {
-		txHash, approveErr := setERC1155ApprovalForAll(cmd.Context(), ctx.Config.EVMRPCURL, big.NewInt(xrplEVMChainID), privateKeyHex, selection.OutcomeToken, selection.ExchangeAddress, true)
+		txHash, approveErr := setERC1155ApprovalForAll(ctx, rpcURL, big.NewInt(xrplEVMChainID), privateKeyHex, selection.OutcomeToken, selection.ExchangeAddress, true)
 		if approveErr != nil {
 			return nil, approveErr
 		}
@@ -454,8 +468,8 @@ func ensureClobSmokeApprovals(cmd *cobra.Command, ctx *cliContext, privateKeyHex
 			"approved":      true,
 			"txHash":        txHash.Hex(),
 		}
-		if mustBoolFlag(cmd, "wait") {
-			receipt, waitErr := waitForTxReceipt(cmd.Context(), ctx.Config.EVMRPCURL, txHash)
+		if wait {
+			receipt, waitErr := waitForTxReceipt(ctx, rpcURL, txHash)
 			if waitErr != nil {
 				return nil, waitErr
 			}

@@ -114,7 +114,7 @@ func TestListAllMarketsAggregatesPages(t *testing.T) {
 		t.Fatalf("NewClient() error = %v", err)
 	}
 
-	response, err := client.ListAllMarkets(context.Background(), "active", "", "", "", 0)
+	response, err := client.ListAllMarkets(context.Background(), "active", "", "", "", false, 0)
 	if err != nil {
 		t.Fatalf("ListAllMarkets() error = %v", err)
 	}
@@ -123,6 +123,31 @@ func TestListAllMarketsAggregatesPages(t *testing.T) {
 	}
 	if requestCount != 1 {
 		t.Fatalf("ListAllMarkets() requests = %d, want 1 for a small result set", requestCount)
+	}
+}
+
+func TestListMarketsIncludesHiddenQueryWhenRequested(t *testing.T) {
+	t.Parallel()
+
+	var gotIncludeHidden string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotIncludeHidden = r.URL.Query().Get("includeHidden")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(MarketsResponse{Items: []MarketListItem{}, Total: 0, Limit: 20, Offset: 0})
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL+"/api/cli", "device-123")
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	_, err = client.ListMarkets(context.Background(), "open", "", "", "AxiomCTFMarket", true, 20, 0)
+	if err != nil {
+		t.Fatalf("ListMarkets() error = %v", err)
+	}
+	if gotIncludeHidden != "true" {
+		t.Fatalf("includeHidden query = %q, want %q", gotIncludeHidden, "true")
 	}
 }
 

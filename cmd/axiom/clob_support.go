@@ -455,6 +455,14 @@ func loadMarketWithClobFallback(ctx context.Context, cliCtx *cliContext, marketR
 	return hydrateStandaloneClobMarket(ctx, cliCtx, market)
 }
 
+func loadMMMarket(ctx context.Context, cliCtx *cliContext, marketRef string, instanceDate string) (*api.MarketDetails, error) {
+	market, err := cliCtx.ConsoleAPI.GetMarket(ctx, marketRef, instanceDate)
+	if err != nil {
+		return nil, err
+	}
+	return hydrateStandaloneClobMarket(ctx, cliCtx, market)
+}
+
 func hydrateStandaloneClobMarket(ctx context.Context, cliCtx *cliContext, market *api.MarketDetails) (*api.MarketDetails, error) {
 	if market == nil {
 		return nil, errors.New("market details are required")
@@ -1293,6 +1301,112 @@ func buildClobOrderAmounts(side string, priceBps int, quantity int) (*big.Int, *
 		bpsScale,
 	)
 	return makerAmount, takerAmount
+}
+
+func clobMinSettleableShares(payload api.ClobSignedOrderPayload) (int, error) {
+	makerAmount, err := evm.ParseBigInt(payload.MakerAmount)
+	if err != nil {
+		return 0, fmt.Errorf("parse maker amount: %w", err)
+	}
+	takerAmount, err := evm.ParseBigInt(payload.TakerAmount)
+	if err != nil {
+		return 0, fmt.Errorf("parse taker amount: %w", err)
+	}
+	if makerAmount.Sign() <= 0 || takerAmount.Sign() <= 0 {
+		return 1, nil
+	}
+
+	one := big.NewInt(1)
+	var minShares *big.Int
+	if payload.Side == clobOrderSideValue["buy"] {
+		minShares = new(big.Int).Add(
+			new(big.Int).Div(new(big.Int).Sub(takerAmount, one), makerAmount),
+			one,
+		)
+	} else {
+		minShares = new(big.Int).Add(
+			new(big.Int).Div(new(big.Int).Sub(makerAmount, one), takerAmount),
+			one,
+		)
+	}
+	if !minShares.IsInt64() || minShares.Int64() <= 0 {
+		return 1, nil
+	}
+	if minShares.Int64() > int64(^uint(0)>>1) {
+		return 0, errors.New("minimum settleable quantity exceeds supported CLI integer range")
+	}
+	return int(minShares.Int64()), nil
+}
+
+func validateClobSettleableQuantity(payload api.ClobSignedOrderPayload) error {
+	minShares, err := clobMinSettleableShares(payload)
+	if err != nil {
+		return err
+	}
+	derivedQuantity, err := clobPayloadQuantity(payload)
+	if err != nil {
+		return err
+	}
+	if derivedQuantity < minShares {
+		priceBps, priceErr := clobPayloadPriceBps(payload)
+		if priceErr != nil {
+			return priceErr
+		}
+		return fmt.Errorf("order quantity too small for on-chain settlement: quantity %d at price %d bps, minimum is %d shares", derivedQuantity, priceBps, minShares)
+	}
+	return nil
+}
+
+func clobPayloadQuantity(payload api.ClobSignedOrderPayload) (int, error) {
+	var amountRaw string
+	if payload.Side == clobOrderSideValue["buy"] {
+		amountRaw = payload.TakerAmount
+	} else {
+		amountRaw = payload.MakerAmount
+	}
+	amount, err := evm.ParseBigInt(amountRaw)
+	if err != nil {
+		return 0, fmt.Errorf("parse order quantity amount: %w", err)
+	}
+	tokenScale := big.NewInt(1_000_000_000_000_000_000)
+	quantity := new(big.Int).Div(amount, tokenScale)
+	if !quantity.IsInt64() {
+		return 0, errors.New("derived order quantity exceeds supported CLI integer range")
+	}
+	if quantity.Int64() > int64(^uint(0)>>1) {
+		return 0, errors.New("derived order quantity exceeds supported CLI integer range")
+	}
+	return int(quantity.Int64()), nil
+}
+
+func clobPayloadPriceBps(payload api.ClobSignedOrderPayload) (int, error) {
+	makerAmount, err := evm.ParseBigInt(payload.MakerAmount)
+	if err != nil {
+		return 0, fmt.Errorf("parse maker amount: %w", err)
+	}
+	takerAmount, err := evm.ParseBigInt(payload.TakerAmount)
+	if err != nil {
+		return 0, fmt.Errorf("parse taker amount: %w", err)
+	}
+	if makerAmount.Sign() <= 0 || takerAmount.Sign() <= 0 {
+		return 0, nil
+	}
+	bpsScale := big.NewInt(10000)
+	bps := new(big.Int)
+	if payload.Side == clobOrderSideValue["buy"] {
+		bps.Mul(makerAmount, bpsScale)
+		bps.Div(bps, takerAmount)
+	} else {
+		bps.Mul(takerAmount, bpsScale)
+		bps.Div(bps, makerAmount)
+	}
+	if !bps.IsInt64() {
+		return 0, errors.New("derived order price exceeds supported CLI integer range")
+	}
+	if bps.Int64() > int64(^uint(0)>>1) {
+		return 0, errors.New("derived order price exceeds supported CLI integer range")
+	}
+	return int(bps.Int64()), nil
 }
 
 func resolveClobExpiration(preset string) int64 {

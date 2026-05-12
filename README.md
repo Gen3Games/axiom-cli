@@ -233,6 +233,33 @@ axiom clob fills list --mine
 axiom claim market clob-1
 ```
 
+Run the manual MM workflow on one hosted CLOB book:
+
+```bash
+axiom mm market list --search xrp
+axiom mm market use beta-test-where-will-xrp-close-on-sunday-may-17-2026-at-21-00-utc-1778403914962
+axiom mm market show
+
+axiom mm status --label 'Below $1.35' --displayed-side yes
+axiom mm book --label 'Below $1.35' --displayed-side yes
+axiom mm orders --label 'Below $1.35' --displayed-side yes
+axiom mm fills --label 'Below $1.35' --displayed-side yes
+
+axiom mm mint --label 'Below $1.35' --amount 3.0 --wait
+axiom mm quote --label 'Below $1.35' --displayed-side yes --bid-price 45 --ask-price 55 --quantity 3 --dry-run
+axiom mm quote --label 'Below $1.35' --displayed-side yes --bid-price 45 --ask-price 55 --quantity 3
+axiom mm cancel-all --label 'Below $1.35' --displayed-side yes
+```
+
+Manual MM notes:
+
+- `axiom mm` is the operator convenience layer above the lower-level `axiom clob` commands.
+- The active MM market is stored separately from the main CLI config, so `mm inventory`, `mm status`, `mm orders`, `mm fills`, `mm book`, `mm quote`, and `mm cancel-all` can all use the selected market without repeating it.
+- When a label contains `$`, quote it with single quotes in the shell, for example `'Below $1.35'`.
+- `mm quote --dry-run` returns machine-readable blockers instead of submitting orders.
+- Hosted CLOB limit orders must be settleable on-chain. The CLI now preflights the same venue rule the backend enforces, so too-small orders fail locally with an error like `order quantity too small for on-chain settlement: quantity 1 at price 4500 bps, minimum is 3 shares`.
+- `mm cancel-all` scopes to the exact hosted book when you pass `--label` plus `--displayed-side` (or `--token-side`).
+
 Run a smoke test against the hosted CLOB stack with imported CLI accounts:
 
 ```bash

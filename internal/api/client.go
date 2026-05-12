@@ -275,6 +275,7 @@ type MarketListItem struct {
 	ID                     string                    `json:"id"`
 	MarketType             string                    `json:"marketType"`
 	MarketImplementation   string                    `json:"marketImplementation"`
+	IsVisible              *bool                     `json:"isVisible,omitempty"`
 	Title                  string                    `json:"title"`
 	Headline               string                    `json:"headline"`
 	Description            string                    `json:"description"`
@@ -978,7 +979,7 @@ func (c *Client) RegisterWallet(ctx context.Context, request RegisterRequest) (*
 	return &out, nil
 }
 
-func (c *Client) ListMarkets(ctx context.Context, status string, search string, category string, implementation string, limit int, offset int) (*MarketsResponse, error) {
+func (c *Client) ListMarkets(ctx context.Context, status string, search string, category string, implementation string, includeHidden bool, limit int, offset int) (*MarketsResponse, error) {
 	values := url.Values{}
 	if status != "" {
 		values.Set("status", status)
@@ -991,6 +992,9 @@ func (c *Client) ListMarkets(ctx context.Context, status string, search string, 
 	}
 	if implementation != "" {
 		values.Set("marketImplementation", implementation)
+	}
+	if includeHidden {
+		values.Set("includeHidden", "true")
 	}
 	if limit > 0 {
 		values.Set("limit", strconv.Itoa(limit))
@@ -1006,7 +1010,7 @@ func (c *Client) ListMarkets(ctx context.Context, status string, search string, 
 	return &out, nil
 }
 
-func (c *Client) ListAllMarkets(ctx context.Context, status string, search string, category string, implementation string, offset int) (*MarketsResponse, error) {
+func (c *Client) ListAllMarkets(ctx context.Context, status string, search string, category string, implementation string, includeHidden bool, offset int) (*MarketsResponse, error) {
 	const pageSize = 50
 	combined := &MarketsResponse{
 		Items:  make([]MarketListItem, 0),
@@ -1016,7 +1020,7 @@ func (c *Client) ListAllMarkets(ctx context.Context, status string, search strin
 
 	currentOffset := offset
 	for {
-		page, err := c.ListMarkets(ctx, status, search, category, implementation, pageSize, currentOffset)
+		page, err := c.ListMarkets(ctx, status, search, category, implementation, includeHidden, pageSize, currentOffset)
 		if err != nil {
 			return nil, err
 		}

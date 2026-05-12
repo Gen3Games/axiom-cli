@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -13,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Gen3Games/axiom-cli/internal/api"
@@ -84,6 +86,23 @@ type bridgeFundingPreview struct {
 	FromXRPLWallet       string
 }
 
+type mmMarketSelection struct {
+	MarketID       string `json:"marketId"`
+	MarketTitle    string `json:"marketTitle"`
+	InstanceDate   string `json:"instanceDate,omitempty"`
+	ContractAddr   string `json:"contractAddress,omitempty"`
+	Category       string `json:"category,omitempty"`
+	Status         string `json:"status,omitempty"`
+	EndsAt         string `json:"endsAt,omitempty"`
+	MarketType     string `json:"marketType,omitempty"`
+	Implementation string `json:"marketImplementation,omitempty"`
+}
+
+type mmInteractiveChoice struct {
+	Label string
+	Value string
+}
+
 func main() {
 	rootCmd := newRootCommand()
 	rootCmd.SetArgs(normalizeCLIArgs(os.Args[1:]))
@@ -97,7 +116,7 @@ func newRootCommand() *cobra.Command {
 	rootCmd := &cobra.Command{
 		Use:           "axiom",
 		Short:         "Axiom Protocol CLI for XRPL EVM users",
-		Long:          "Axiom CLI manages XRPL EVM wallets, funding flows, market discovery, predictions, claims, and profile analytics.",
+		Long:          "Axiom CLI manages XRPL EVM wallets, funding flows, market discovery, predictions, hosted CLOB trading, market-making workflows, claims, and profile analytics.",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
@@ -126,6 +145,7 @@ func newRootCommand() *cobra.Command {
 	rootCmd.AddCommand(newPredictCommand())
 	rootCmd.AddCommand(newClaimCommand())
 	rootCmd.AddCommand(newClobCommand())
+	rootCmd.AddCommand(newMMCommand())
 
 	return rootCmd
 }
@@ -607,9 +627,9 @@ func newMarketsCommand() *cobra.Command {
 			var response *api.MarketsResponse
 			needsLocalFiltering := strings.TrimSpace(category) != "" || normalizedImpl != "" || myPositions
 			if needsLocalFiltering || limit <= 0 {
-				response, err = ctx.API.ListAllMarkets(cmd.Context(), status, search, "", normalizedImpl, 0)
+				response, err = ctx.API.ListAllMarkets(cmd.Context(), status, search, "", normalizedImpl, false, 0)
 			} else {
-				response, err = ctx.API.ListMarkets(cmd.Context(), status, search, "", normalizedImpl, limit, offset)
+				response, err = ctx.API.ListMarkets(cmd.Context(), status, search, "", normalizedImpl, false, limit, offset)
 			}
 			if err != nil {
 				return err
@@ -2556,6 +2576,11 @@ func newClobCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if orderType == "limit" {
+				if err := validateClobSettleableQuantity(payload); err != nil {
+					return err
+				}
+			}
 
 			if mustBoolFlag(cmd, "dry-run") {
 				preview := map[string]any{
@@ -2733,10 +2758,6 @@ func newClobCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			wallet, privateKeyHex, err := requireEVMWalletWithKey(ctx)
-			if err != nil {
-				return err
-			}
 			market, err := loadMarketWithClobFallback(cmd.Context(), ctx, args[0], mustStringFlag(cmd, "instance-date"))
 			if err != nil {
 				return err
@@ -2744,130 +2765,7 @@ func newClobCommand() *cobra.Command {
 			if !isClobMarketImplementation(market.MarketImplementation) {
 				return errors.New("clob split requires an AxiomCTFMarket logical market")
 			}
-			binding, err := resolveSplitMergeBinding(market, mustStringFlag(cmd, "label"))
-			if err != nil {
-				return err
-			}
-			conditionalTokens := resolveHexAddressOrDefault(mustStringFlag(cmd, "outcome-token-address"), evm.DefaultClobConditionalTokens)
-			collateralToken := resolveClobCollateralToken(market)
-			conditionID := common.HexToHash(binding.ConditionID)
-			partition := []*big.Int{big.NewInt(1), big.NewInt(2)}
-			amount, err := parseClobAmount(mustStringFlag(cmd, "amount"))
-			if err != nil {
-				return err
-			}
-
-			// Check collateral balance to ensure the wallet can afford the split.
-			collateralBalance, err := getERC20Balance(cmd.Context(), ctx.Config.EVMRPCURL, collateralToken, wallet.Address())
-			if err != nil {
-				return fmt.Errorf("check collateral balance: %w", err)
-			}
-			if collateralBalance.Cmp(amount) < 0 {
-				return fmt.Errorf("insufficient collateral: balance %s wei (%s XRP) is below split amount %s wei (%s XRP)",
-					collateralBalance.String(), formatWeiToXRP(collateralBalance),
-					amount.String(), formatWeiToXRP(amount))
-			}
-
-			yesTokenID, _, _ := resolveDisplayedTokenID(binding, "yes", collateralToken)
-			noTokenID, _, _ := resolveDisplayedTokenID(binding, "no", collateralToken)
-
-			if mustBoolFlag(cmd, "dry-run") {
-				// Check current allowance for the dry-run preview.
-				currentAllowance, _ := getERC20Allowance(cmd.Context(), ctx.Config.EVMRPCURL, collateralToken, wallet.Address(), conditionalTokens)
-				needsApproval := currentAllowance == nil || currentAllowance.Cmp(amount) < 0
-				preview := map[string]any{
-					"dryRun":               true,
-					"action":               "split",
-					"market":               market.Title,
-					"marketId":             market.ID,
-					"outcomeLabel":         binding.Label,
-					"conditionalTokens":    conditionalTokens.Hex(),
-					"collateralToken":      collateralToken.Hex(),
-					"conditionId":          conditionID.Hex(),
-					"partition":            []string{"1", "2"},
-					"amountWei":            amount.String(),
-					"amountXrp":            formatWeiToXRP(amount),
-					"wallet":               wallet.Address().Hex(),
-					"collateralBalanceWei": collateralBalance.String(),
-					"collateralBalanceXrp": formatWeiToXRP(collateralBalance),
-					"needsApproval":        needsApproval,
-				}
-				if yesTokenID != nil {
-					preview["yesTokenId"] = yesTokenID.String()
-				}
-				if noTokenID != nil {
-					preview["noTokenId"] = noTokenID.String()
-				}
-				return printOutput(ctx.JSON, preview)
-			}
-
-			// Step A: ensure collateral approval for ConditionalTokens contract.
-			approvalTxs := make([]map[string]any, 0, 1)
-			if !mustBoolFlag(cmd, "skip-approval") {
-				currentAllowance, err := getERC20Allowance(cmd.Context(), ctx.Config.EVMRPCURL, collateralToken, wallet.Address(), conditionalTokens)
-				if err != nil {
-					return fmt.Errorf("check collateral allowance: %w", err)
-				}
-				if currentAllowance.Cmp(amount) < 0 {
-					approveMax, _ := evm.ParseBigInt(clobMaxUint256)
-					approveTxHash, err := approveERC20(cmd.Context(), ctx.Config.EVMRPCURL, big.NewInt(xrplEVMChainID), privateKeyHex, collateralToken, conditionalTokens, approveMax)
-					if err != nil {
-						return fmt.Errorf("collateral approval failed: %w", err)
-					}
-					entry := map[string]any{
-						"kind":    "collateral-approve-for-split",
-						"token":   collateralToken.Hex(),
-						"spender": conditionalTokens.Hex(),
-						"txHash":  approveTxHash.Hex(),
-					}
-					// Always wait for the approval receipt so the split tx succeeds.
-					receipt, waitErr := waitForReceipt(cmd.Context(), ctx.Config.EVMRPCURL, approveTxHash)
-					if waitErr != nil {
-						return fmt.Errorf("wait for approval receipt: %w", waitErr)
-					}
-					entry["receiptStatus"] = receipt.Status
-					if receipt.Status == 0 {
-						return fmt.Errorf("collateral approval reverted (tx %s)", approveTxHash.Hex())
-					}
-					approvalTxs = append(approvalTxs, entry)
-				}
-			}
-
-			// Step B: execute splitPosition.
-			txHash, err := splitPosition(cmd.Context(), ctx.Config.EVMRPCURL, big.NewInt(xrplEVMChainID), privateKeyHex, conditionalTokens, collateralToken, conditionID, partition, amount)
-			if err != nil {
-				return fmt.Errorf("split transaction failed: %w", err)
-			}
-			result := map[string]any{
-				"action":       "split",
-				"market":       market.Title,
-				"marketId":     market.ID,
-				"outcomeLabel": binding.Label,
-				"amountWei":    amount.String(),
-				"amountXrp":    formatWeiToXRP(amount),
-				"txHash":       txHash.Hex(),
-				"wallet":       wallet.Address().Hex(),
-			}
-			if yesTokenID != nil {
-				result["yesTokenId"] = yesTokenID.String()
-			}
-			if noTokenID != nil {
-				result["noTokenId"] = noTokenID.String()
-			}
-			if len(approvalTxs) > 0 {
-				result["approvals"] = approvalTxs
-			}
-			if mustBoolFlag(cmd, "wait") {
-				receipt, waitErr := waitForReceipt(cmd.Context(), ctx.Config.EVMRPCURL, txHash)
-				if waitErr != nil {
-					return waitErr
-				}
-				result["receiptStatus"] = receipt.Status
-				if receipt.Status == 0 {
-					return fmt.Errorf("split transaction reverted (tx %s)", txHash.Hex())
-				}
-			}
-			return printOutput(ctx.JSON, result)
+			return runClobSplit(cmd, ctx, market)
 		},
 	}
 	splitCmd.Flags().String("label", "", "Outcome label to identify the binding for split")
@@ -3144,6 +3042,1011 @@ func newClobCommand() *cobra.Command {
 	return cmd
 }
 
+func newMMCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "mm",
+		Short: "Run higher-level market-making workflows on hosted CLOB markets",
+		Long: strings.Join([]string{
+			"Run higher-level market-making workflows on hosted CLOB markets.",
+			"",
+			"These commands sit above the lower-level `clob` surface and focus on common",
+			"operator tasks like inventory checks, two-sided quote placement, and bulk",
+			"order cleanup for the active trading wallet.",
+		}, "\n"),
+	}
+	cmd.PersistentFlags().String("projection-url", firstNonEmpty(os.Getenv("AXIOM_CLOB_PROJECTION_URL"), os.Getenv("CLOB_PROJECTION_URL"), defaultClobProjectionURL), "Override the hosted CLOB projection base URL")
+	cmd.PersistentFlags().String("eventstore-url", firstNonEmpty(os.Getenv("AXIOM_CLOB_EVENTSTORE_URL"), os.Getenv("CLOB_EVENTSTORE_URL"), defaultClobEventstoreURL), "Override the hosted CLOB eventstore base URL")
+	cmd.PersistentFlags().String("exchange-address", evm.DefaultClobExchangeAddress, "Override the on-chain AxiomCTFExchange address used for approvals and settlement prep")
+	cmd.PersistentFlags().String("clob-domain-contract", firstNonEmpty(os.Getenv("AXIOM_CLOB_DOMAIN_CONTRACT"), evm.DefaultClobDomainContract), "Override the hosted CLOB EIP-712 verifying contract used for order and cancel signing")
+	cmd.PersistentFlags().String("clob-chain-id", firstNonEmpty(os.Getenv("AXIOM_CLOB_CHAIN_ID"), strconv.FormatInt(evm.DefaultClobChainID, 10)), "Override the hosted CLOB EIP-712 chain ID used for order and cancel signing")
+	cmd.PersistentFlags().String("outcome-token-address", evm.DefaultClobConditionalTokens, "Override the on-chain AxiomConditionalTokens address used for balances and approvals")
+
+	marketCmd := &cobra.Command{Use: "market", Short: "Search, select, and manage the active market-maker market"}
+	marketListCmd := &cobra.Command{
+		Use:   "list",
+		Short: "List hosted CLOB markets for market-making workflows",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+			search := strings.TrimSpace(mustStringFlag(cmd, "search"))
+			status := strings.TrimSpace(mustStringFlag(cmd, "status"))
+			category := strings.TrimSpace(mustStringFlag(cmd, "category"))
+			limit, err := cmd.Flags().GetInt("limit")
+			if err != nil {
+				return err
+			}
+			marketsResponse, err := withLoadingIndicator(ctx.JSON, "Loading hosted CLOB markets", func() (*api.MarketsResponse, error) {
+				return ctx.ConsoleAPI.ListAllMarkets(cmd.Context(), status, search, "", normalizeMarketImplementation("clob"), true, 0)
+			})
+			if err != nil {
+				return err
+			}
+			filtered := filterMMMarkets(marketsResponse, category)
+			filtered = paginateMarkets(filtered, limit, 0)
+			return printOutput(ctx.JSON, map[string]any{
+				"activeMarket": activeMMMarketSelection(ctx),
+				"items":        buildMMMarketListItems(filtered.Items),
+				"total":        filtered.Total,
+			})
+		},
+	}
+	marketListCmd.Flags().String("search", "", "Search by title or headline")
+	marketListCmd.Flags().String("status", "open", "Filter by market status: open or resolved")
+	marketListCmd.Flags().String("category", "", "Optional category filter")
+	marketListCmd.Flags().Int("limit", 20, "Maximum number of CLOB markets to return")
+	marketCmd.AddCommand(marketListCmd)
+
+	marketUseCmd := &cobra.Command{
+		Use:   "use [market-id-or-address]",
+		Short: "Set the active market-maker market, optionally via an interactive picker",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+
+			marketRef := ""
+			if len(args) > 0 {
+				marketRef = strings.TrimSpace(args[0])
+			}
+			instanceDate := strings.TrimSpace(mustStringFlag(cmd, "instance-date"))
+			market, err := selectMMMarket(cmd.Context(), ctx, cmd, marketRef, instanceDate)
+			if err != nil {
+				return err
+			}
+			if !isClobMarketImplementation(market.MarketImplementation) {
+				return errors.New("mm market use requires an AxiomCTFMarket logical market")
+			}
+
+			selection := buildMMMarketSelection(market, instanceDate)
+			if err := saveActiveMMMarket(ctx.ProfileName, selection); err != nil {
+				return err
+			}
+			return printOutput(ctx.JSON, map[string]any{
+				"activeMarket": selection,
+			})
+		},
+	}
+	marketUseCmd.Flags().String("instance-date", "", "Instance date for recurring markets in YYYY-MM-DD format")
+	marketUseCmd.Flags().String("search", "", "Search text used by the interactive picker when no market argument is provided")
+	marketUseCmd.Flags().String("status", "open", "Status filter used by the interactive picker")
+	marketUseCmd.Flags().String("category", "", "Category filter used by the interactive picker")
+	marketUseCmd.Flags().Int("limit", 20, "Maximum number of markets to show in the interactive picker")
+	marketCmd.AddCommand(marketUseCmd)
+
+	marketShowCmd := &cobra.Command{
+		Use:   "show",
+		Short: "Show the current active market-maker market",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+			selection := activeMMMarketSelection(ctx)
+			if selection == nil {
+				return errors.New("no active market-maker market is set; run `axiom mm market use`")
+			}
+			return printOutput(ctx.JSON, map[string]any{"activeMarket": selection})
+		},
+	}
+	marketCmd.AddCommand(marketShowCmd)
+
+	marketClearCmd := &cobra.Command{
+		Use:   "clear",
+		Short: "Clear the current active market-maker market",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+			if err := clearActiveMMMarket(ctx.ProfileName); err != nil {
+				return err
+			}
+			return printOutput(ctx.JSON, map[string]any{"activeMarket": nil, "cleared": true})
+		},
+	}
+	marketCmd.AddCommand(marketClearCmd)
+	cmd.AddCommand(marketCmd)
+
+	mintCmd := &cobra.Command{
+		Use:   "mint [market-id-or-address]",
+		Short: "Mint complete-set CTF inventory for the active market-making workflow",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+
+			marketRef, instanceDate, err := resolveMMMarketReference(ctx, args, mustStringFlag(cmd, "instance-date"))
+			if err != nil {
+				return err
+			}
+			market, err := loadMMMarket(cmd.Context(), ctx, marketRef, instanceDate)
+			if err != nil {
+				return err
+			}
+			if !isClobMarketImplementation(market.MarketImplementation) {
+				return errors.New("mm mint requires an AxiomCTFMarket logical market")
+			}
+			return runClobSplit(cmd, ctx, market)
+		},
+	}
+	mintCmd.Flags().String("label", "", "Outcome label to identify the binding for minting inventory")
+	mintCmd.Flags().String("amount", "", "Amount of collateral to mint into complete-set inventory (decimal XRP like 0.01 or integer wei)")
+	mintCmd.Flags().Bool("wait", false, "Wait for the mint transaction receipt")
+	mintCmd.Flags().Bool("dry-run", false, "Preview the mint without broadcasting a transaction")
+	mintCmd.Flags().Bool("skip-approval", false, "Skip the automatic collateral approval to the ConditionalTokens contract")
+	mintCmd.Flags().String("instance-date", "", "Instance date for recurring markets in YYYY-MM-DD format")
+	cmd.AddCommand(mintCmd)
+
+	inventoryCmd := &cobra.Command{
+		Use:   "inventory [market-id-or-address]",
+		Short: "Summarize inventory, approvals, and imbalance for a hosted CLOB market",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+
+			walletAddress, err := resolveProfileAddress(ctx, nil)
+			if override := strings.TrimSpace(mustStringFlag(cmd, "wallet")); override != "" {
+				if !common.IsHexAddress(override) || isZeroAddress(override) {
+					return errors.New("--wallet must be a valid non-zero 0x-prefixed address")
+				}
+				walletAddress = override
+				err = nil
+			}
+			if err != nil {
+				return err
+			}
+
+			marketRef, instanceDate, err := resolveMMMarketReference(ctx, args, mustStringFlag(cmd, "instance-date"))
+			if err != nil {
+				return err
+			}
+			market, err := loadMMMarket(cmd.Context(), ctx, marketRef, instanceDate)
+			if err != nil {
+				return err
+			}
+			if !isClobMarketImplementation(market.MarketImplementation) {
+				return errors.New("mm inventory requires an AxiomCTFMarket logical market")
+			}
+
+			status, err := buildClobWalletStatus(
+				cmd.Context(),
+				ctx,
+				market,
+				common.HexToAddress(walletAddress),
+				resolveHexAddressOrDefault(mustStringFlag(cmd, "exchange-address"), evm.DefaultClobExchangeAddress),
+				resolveHexAddressOrDefault(mustStringFlag(cmd, "outcome-token-address"), evm.DefaultClobConditionalTokens),
+			)
+			if err != nil {
+				return err
+			}
+
+			payload, err := buildMMInventoryOutput(status)
+			if err != nil {
+				return err
+			}
+			return printOutput(ctx.JSON, payload)
+		},
+	}
+	inventoryCmd.Flags().String("wallet", "", "Wallet address to inspect; defaults to the active profile EVM address")
+	inventoryCmd.Flags().String("instance-date", "", "Instance date for recurring markets in YYYY-MM-DD format")
+	cmd.AddCommand(inventoryCmd)
+
+	cancelAllCmd := &cobra.Command{
+		Use:   "cancel-all",
+		Short: "Cancel active hosted CLOB orders for the active market-making wallet",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+			wallet, err := requireEVMWallet(ctx)
+			if err != nil {
+				return err
+			}
+
+			marketRef := strings.TrimSpace(mustStringFlag(cmd, "market"))
+			if marketRef == "" {
+				active := activeMMMarketSelection(ctx)
+				if active != nil {
+					marketRef = active.MarketID
+					if strings.TrimSpace(mustStringFlag(cmd, "instance-date")) == "" {
+						_ = cmd.Flags().Set("instance-date", active.InstanceDate)
+					}
+				}
+			}
+			outcomeRaw := strings.TrimSpace(mustStringFlag(cmd, "outcome"))
+			label := strings.TrimSpace(mustStringFlag(cmd, "label"))
+			tokenSideFilter := strings.TrimSpace(mustStringFlag(cmd, "token-side"))
+			displayedSideFilter := strings.TrimSpace(mustStringFlag(cmd, "displayed-side"))
+			switch {
+			case tokenSideFilter != "" && displayedSideFilter != "" && !strings.EqualFold(tokenSideFilter, displayedSideFilter):
+				return errors.New("--token-side and --displayed-side must match when both are provided")
+			case tokenSideFilter == "":
+				tokenSideFilter = displayedSideFilter
+			}
+			if marketRef == "" && (outcomeRaw != "" || label != "" || tokenSideFilter != "") {
+				return errors.New("--market is required when using --outcome, --label, --token-side, or --displayed-side")
+			}
+
+			projectionURL := strings.TrimSpace(mustStringFlag(cmd, "projection-url"))
+			filters := url.Values{}
+			filters.Set("maker", wallet.Address().Hex())
+			filters.Set("active_only", "true")
+			limit, err := cmd.Flags().GetInt("limit")
+			if err != nil {
+				return err
+			}
+			if limit > 0 {
+				filters.Set("limit", strconv.Itoa(limit))
+			}
+			orders, err := ctx.API.ListClobOrders(cmd.Context(), projectionURL, filters)
+			if err != nil {
+				return err
+			}
+
+			targetClobIDs := make(map[string]struct{})
+			if marketRef != "" {
+				market, err := loadMMMarket(cmd.Context(), ctx, marketRef, mustStringFlag(cmd, "instance-date"))
+				if err != nil {
+					return err
+				}
+				if !isClobMarketImplementation(market.MarketImplementation) {
+					return errors.New("mm cancel-all requires an AxiomCTFMarket logical market when --market is provided")
+				}
+
+				switch {
+				case outcomeRaw != "" || label != "":
+					selection, err := resolveClobSelection(
+						market,
+						outcomeRaw,
+						label,
+						tokenSideFilter,
+						mustStringFlag(cmd, "exchange-address"),
+						mustStringFlag(cmd, "outcome-token-address"),
+					)
+					if err != nil {
+						return err
+					}
+					targetClobIDs[clobIDForMarketOutcome(market.ID, selection.Binding.OutcomeIndex, selection.DisplayedSide)] = struct{}{}
+				case tokenSideFilter != "":
+					normalizedSide, err := normalizeClobTokenSide(tokenSideFilter)
+					if err != nil {
+						return err
+					}
+					for _, binding := range sortedClobBindings(market.CTFOutcomeMarkets) {
+						targetClobIDs[clobIDForMarketOutcome(market.ID, binding.OutcomeIndex, normalizedSide)] = struct{}{}
+					}
+				default:
+					for _, clobID := range collectMMMarketClobIDs(market) {
+						targetClobIDs[clobID] = struct{}{}
+					}
+				}
+			}
+
+			targetOrders := make([]api.ClobOrder, 0, len(orders))
+			for _, order := range orders {
+				if len(targetClobIDs) > 0 {
+					if _, ok := targetClobIDs[strings.TrimSpace(order.ClobID)]; !ok {
+						continue
+					}
+				}
+				targetOrders = append(targetOrders, order)
+			}
+
+			items := make([]map[string]any, 0, len(targetOrders))
+			failures := make([]map[string]any, 0)
+			dryRun := mustBoolFlag(cmd, "dry-run")
+			if dryRun {
+				for _, order := range targetOrders {
+					marketID, outcomeIndex, tokenSide, parseErr := parseClobOrderIdentity(order)
+					if parseErr != nil {
+						failures = append(failures, map[string]any{
+							"orderId": order.OrderID,
+							"clobId":  order.ClobID,
+							"error":   parseErr.Error(),
+						})
+						continue
+					}
+					items = append(items, map[string]any{
+						"orderId":   order.OrderID,
+						"clobId":    order.ClobID,
+						"marketId":  marketID,
+						"outcome":   outcomeIndex,
+						"tokenSide": tokenSide,
+						"side":      order.Side,
+						"quantity":  order.Quantity,
+						"remaining": order.Remaining,
+						"status":    order.Status,
+					})
+				}
+				return printOutput(ctx.JSON, map[string]any{
+					"dryRun":          true,
+					"walletAddress":   wallet.Address().Hex(),
+					"market":          marketRef,
+					"totalOpenOrders": len(orders),
+					"targetedOrders":  len(targetOrders),
+					"items":           items,
+					"failures":        failures,
+				})
+			}
+
+			signingDomain, err := resolveClobSigningDomain(cmd)
+			if err != nil {
+				return err
+			}
+			eventstoreURL := strings.TrimSpace(mustStringFlag(cmd, "eventstore-url"))
+			reason := firstNonEmpty(strings.TrimSpace(mustStringFlag(cmd, "reason")), "market-maker-cancel-all")
+			for _, order := range targetOrders {
+				marketID, outcomeIndex, tokenSide, parseErr := parseClobOrderIdentity(order)
+				if parseErr != nil {
+					failures = append(failures, map[string]any{
+						"orderId": order.OrderID,
+						"clobId":  order.ClobID,
+						"error":   parseErr.Error(),
+					})
+					continue
+				}
+				cancelRequest, err := buildSignedClobCancel(wallet, signingDomain, order.OrderID, marketID, outcomeIndex, tokenSide, wallet.Address().Hex(), reason)
+				if err != nil {
+					failures = append(failures, map[string]any{
+						"orderId": order.OrderID,
+						"clobId":  order.ClobID,
+						"error":   err.Error(),
+					})
+					continue
+				}
+				response, err := ctx.API.CancelClobOrder(cmd.Context(), eventstoreURL, order.OrderID, cancelRequest)
+				if err != nil {
+					failures = append(failures, map[string]any{
+						"orderId": order.OrderID,
+						"clobId":  order.ClobID,
+						"error":   err.Error(),
+					})
+					continue
+				}
+				items = append(items, map[string]any{
+					"orderId":         response.OrderID,
+					"clobId":          order.ClobID,
+					"marketId":        marketID,
+					"outcome":         outcomeIndex,
+					"tokenSide":       tokenSide,
+					"remainingShares": response.RemainingQuantity,
+					"tradeCount":      response.TradeCount,
+					"resting":         response.WasAddedToBook,
+				})
+			}
+
+			return printOutput(ctx.JSON, map[string]any{
+				"walletAddress":   wallet.Address().Hex(),
+				"market":          marketRef,
+				"totalOpenOrders": len(orders),
+				"targetedOrders":  len(targetOrders),
+				"cancelled":       len(items),
+				"failed":          len(failures),
+				"items":           items,
+				"failures":        failures,
+			})
+		},
+	}
+	cancelAllCmd.Flags().String("market", "", "Logical market ID to scope the bulk cancel; omit to target all active orders for the wallet")
+	cancelAllCmd.Flags().String("outcome", "", "Optional logical outcome index filter when scoping to one market")
+	cancelAllCmd.Flags().String("label", "", "Optional logical outcome label filter when scoping to one market")
+	cancelAllCmd.Flags().String("token-side", "", "Optional hosted token-side filter when scoping to one market: yes or no")
+	cancelAllCmd.Flags().String("displayed-side", "", "Optional displayed-side alias for --token-side when scoping to one market: yes or no")
+	cancelAllCmd.Flags().String("reason", "market-maker-cancel-all", "Optional cancellation reason recorded with each cancel request")
+	cancelAllCmd.Flags().Int("limit", 200, "Maximum number of active orders to fetch before canceling")
+	cancelAllCmd.Flags().Bool("dry-run", false, "List the targeted active orders without canceling them")
+	cancelAllCmd.Flags().String("instance-date", "", "Instance date for recurring markets in YYYY-MM-DD format")
+	cmd.AddCommand(cancelAllCmd)
+
+	statusCmd := &cobra.Command{
+		Use:   "status [market-id-or-address]",
+		Short: "Show active market, inventory, orders, fills, and top-of-book for one MM workflow",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+
+			walletAddress, err := resolveProfileAddress(ctx, nil)
+			if override := strings.TrimSpace(mustStringFlag(cmd, "wallet")); override != "" {
+				if !common.IsHexAddress(override) || isZeroAddress(override) {
+					return errors.New("--wallet must be a valid non-zero 0x-prefixed address")
+				}
+				walletAddress = override
+				err = nil
+			}
+			if err != nil {
+				return err
+			}
+
+			marketRef, instanceDate, err := resolveMMMarketReference(ctx, args, mustStringFlag(cmd, "instance-date"))
+			if err != nil {
+				return err
+			}
+			market, err := loadMMMarket(cmd.Context(), ctx, marketRef, instanceDate)
+			if err != nil {
+				return err
+			}
+			if !isClobMarketImplementation(market.MarketImplementation) {
+				return errors.New("mm status requires an AxiomCTFMarket logical market")
+			}
+
+			selection, err := resolveClobSelection(
+				market,
+				mustStringFlag(cmd, "outcome"),
+				mustStringFlag(cmd, "label"),
+				mustStringFlag(cmd, "displayed-side"),
+				mustStringFlag(cmd, "exchange-address"),
+				mustStringFlag(cmd, "outcome-token-address"),
+			)
+			if err != nil {
+				return err
+			}
+
+			status, err := buildClobWalletStatus(
+				cmd.Context(),
+				ctx,
+				market,
+				common.HexToAddress(walletAddress),
+				selection.ExchangeAddress,
+				selection.OutcomeToken,
+			)
+			if err != nil {
+				return err
+			}
+			inventory, err := buildMMInventoryOutput(status)
+			if err != nil {
+				return err
+			}
+
+			projectionURL := strings.TrimSpace(mustStringFlag(cmd, "projection-url"))
+			clobID := clobIDForMarketOutcome(market.ID, selection.Binding.OutcomeIndex, selection.DisplayedSide)
+
+			book, err := ctx.API.GetClobBook(cmd.Context(), projectionURL, market.ID, selection.Binding.OutcomeIndex, selection.DisplayedSide)
+			if err != nil {
+				return err
+			}
+			depth, err := ctx.API.GetClobDepth(cmd.Context(), projectionURL, market.ID, selection.Binding.OutcomeIndex, selection.DisplayedSide)
+			if err != nil {
+				return err
+			}
+
+			orderLimit, err := cmd.Flags().GetInt("order-limit")
+			if err != nil {
+				return err
+			}
+			orderFilters := url.Values{}
+			orderFilters.Set("maker", walletAddress)
+			orderFilters.Set("clob_id", clobID)
+			orderFilters.Set("token_side", selection.DisplayedSide)
+			orderFilters.Set("active_only", "true")
+			if orderLimit > 0 {
+				orderFilters.Set("limit", strconv.Itoa(orderLimit))
+			}
+			orders, err := ctx.API.ListClobOrders(cmd.Context(), projectionURL, orderFilters)
+			if err != nil {
+				return err
+			}
+
+			fillLimit, err := cmd.Flags().GetInt("fill-limit")
+			if err != nil {
+				return err
+			}
+			fillFilters := url.Values{}
+			fillFilters.Set("wallet", walletAddress)
+			fillFilters.Set("clob_id", clobID)
+			fillFilters.Set("token_side", selection.DisplayedSide)
+			if fillLimit > 0 {
+				fillFilters.Set("limit", strconv.Itoa(fillLimit))
+			}
+			fills, err := ctx.API.ListClobFills(cmd.Context(), projectionURL, fillFilters)
+			if err != nil {
+				return err
+			}
+
+			payload := map[string]any{
+				"activeMarket":   buildMMMarketSelection(market, instanceDate),
+				"walletAddress":  walletAddress,
+				"marketId":       market.ID,
+				"marketTitle":    market.Title,
+				"outcomeLabel":   selection.LogicalOutcome.Label,
+				"outcomeIndex":   selection.Binding.OutcomeIndex,
+				"displayedSide":  selection.DisplayedSide,
+				"clobId":         clobID,
+				"inventory":      inventory,
+				"book":           book,
+				"depth":          depth,
+				"activeOrders":   orders,
+				"recentFills":    fills,
+				"activeOrderCount": len(orders),
+				"recentFillCount":  len(fills),
+			}
+			return printOutput(ctx.JSON, payload)
+		},
+	}
+	statusCmd.Flags().String("outcome", "", "Logical outcome index to inspect")
+	statusCmd.Flags().String("label", "", "Logical outcome label to inspect")
+	statusCmd.Flags().String("displayed-side", "", "Displayed side to inspect: yes or no; inferred for single-binding binary markets")
+	statusCmd.Flags().String("wallet", "", "Wallet address to inspect; defaults to the active profile EVM address")
+	statusCmd.Flags().Int("order-limit", 20, "Maximum number of active orders to include")
+	statusCmd.Flags().Int("fill-limit", 20, "Maximum number of recent fills to include")
+	statusCmd.Flags().String("instance-date", "", "Instance date for recurring markets in YYYY-MM-DD format")
+	cmd.AddCommand(statusCmd)
+
+	ordersCmd := &cobra.Command{
+		Use:   "orders [market-id-or-address]",
+		Short: "List active MM orders for one exact hosted CLOB book",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+
+			walletAddress, err := resolveProfileAddress(ctx, nil)
+			if override := strings.TrimSpace(mustStringFlag(cmd, "wallet")); override != "" {
+				if !common.IsHexAddress(override) || isZeroAddress(override) {
+					return errors.New("--wallet must be a valid non-zero 0x-prefixed address")
+				}
+				walletAddress = override
+				err = nil
+			}
+			if err != nil {
+				return err
+			}
+
+			marketRef, instanceDate, err := resolveMMMarketReference(ctx, args, mustStringFlag(cmd, "instance-date"))
+			if err != nil {
+				return err
+			}
+			market, err := loadMMMarket(cmd.Context(), ctx, marketRef, instanceDate)
+			if err != nil {
+				return err
+			}
+			if !isClobMarketImplementation(market.MarketImplementation) {
+				return errors.New("mm orders requires an AxiomCTFMarket logical market")
+			}
+
+			selection, err := resolveClobSelection(
+				market,
+				mustStringFlag(cmd, "outcome"),
+				mustStringFlag(cmd, "label"),
+				mustStringFlag(cmd, "displayed-side"),
+				mustStringFlag(cmd, "exchange-address"),
+				mustStringFlag(cmd, "outcome-token-address"),
+			)
+			if err != nil {
+				return err
+			}
+
+			filters := url.Values{}
+			filters.Set("maker", walletAddress)
+			filters.Set("clob_id", clobIDForMarketOutcome(market.ID, selection.Binding.OutcomeIndex, selection.DisplayedSide))
+			filters.Set("token_side", selection.DisplayedSide)
+			filters.Set("active_only", "true")
+			limit, err := cmd.Flags().GetInt("limit")
+			if err != nil {
+				return err
+			}
+			if limit > 0 {
+				filters.Set("limit", strconv.Itoa(limit))
+			}
+			orders, err := ctx.API.ListClobOrders(cmd.Context(), strings.TrimSpace(mustStringFlag(cmd, "projection-url")), filters)
+			if err != nil {
+				return err
+			}
+
+			return printOutput(ctx.JSON, map[string]any{
+				"activeMarket":  buildMMMarketSelection(market, instanceDate),
+				"walletAddress": walletAddress,
+				"marketId":      market.ID,
+				"marketTitle":   market.Title,
+				"outcomeLabel":  selection.LogicalOutcome.Label,
+				"outcomeIndex":  selection.Binding.OutcomeIndex,
+				"displayedSide": selection.DisplayedSide,
+				"clobId":        clobIDForMarketOutcome(market.ID, selection.Binding.OutcomeIndex, selection.DisplayedSide),
+				"items":         orders,
+				"total":         len(orders),
+			})
+		},
+	}
+	ordersCmd.Flags().String("outcome", "", "Logical outcome index to inspect")
+	ordersCmd.Flags().String("label", "", "Logical outcome label to inspect")
+	ordersCmd.Flags().String("displayed-side", "", "Displayed side to inspect: yes or no; inferred for single-binding binary markets")
+	ordersCmd.Flags().String("wallet", "", "Wallet address to inspect; defaults to the active profile EVM address")
+	ordersCmd.Flags().Int("limit", 20, "Maximum number of active orders to return")
+	ordersCmd.Flags().String("instance-date", "", "Instance date for recurring markets in YYYY-MM-DD format")
+	cmd.AddCommand(ordersCmd)
+
+	bookCmd := &cobra.Command{
+		Use:   "book [market-id-or-address]",
+		Short: "Fetch the hosted book summary and depth for one exact MM book",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+
+			marketRef, instanceDate, err := resolveMMMarketReference(ctx, args, mustStringFlag(cmd, "instance-date"))
+			if err != nil {
+				return err
+			}
+			market, err := loadMMMarket(cmd.Context(), ctx, marketRef, instanceDate)
+			if err != nil {
+				return err
+			}
+			if !isClobMarketImplementation(market.MarketImplementation) {
+				return errors.New("mm book requires an AxiomCTFMarket logical market")
+			}
+
+			selection, err := resolveClobSelection(
+				market,
+				mustStringFlag(cmd, "outcome"),
+				mustStringFlag(cmd, "label"),
+				mustStringFlag(cmd, "displayed-side"),
+				mustStringFlag(cmd, "exchange-address"),
+				mustStringFlag(cmd, "outcome-token-address"),
+			)
+			if err != nil {
+				return err
+			}
+
+			projectionURL := strings.TrimSpace(mustStringFlag(cmd, "projection-url"))
+			book, err := ctx.API.GetClobBook(cmd.Context(), projectionURL, market.ID, selection.Binding.OutcomeIndex, selection.DisplayedSide)
+			if err != nil {
+				return err
+			}
+			depth, err := ctx.API.GetClobDepth(cmd.Context(), projectionURL, market.ID, selection.Binding.OutcomeIndex, selection.DisplayedSide)
+			if err != nil {
+				return err
+			}
+
+			return printOutput(ctx.JSON, map[string]any{
+				"activeMarket":  buildMMMarketSelection(market, instanceDate),
+				"marketId":      market.ID,
+				"marketTitle":   market.Title,
+				"outcomeLabel":  selection.LogicalOutcome.Label,
+				"outcomeIndex":  selection.Binding.OutcomeIndex,
+				"displayedSide": selection.DisplayedSide,
+				"clobId":        clobIDForMarketOutcome(market.ID, selection.Binding.OutcomeIndex, selection.DisplayedSide),
+				"book":          book,
+				"depth":         depth,
+			})
+		},
+	}
+	bookCmd.Flags().String("outcome", "", "Logical outcome index to inspect")
+	bookCmd.Flags().String("label", "", "Logical outcome label to inspect")
+	bookCmd.Flags().String("displayed-side", "", "Displayed side to inspect: yes or no; inferred for single-binding binary markets")
+	bookCmd.Flags().String("instance-date", "", "Instance date for recurring markets in YYYY-MM-DD format")
+	cmd.AddCommand(bookCmd)
+
+	fillsCmd := &cobra.Command{
+		Use:   "fills [market-id-or-address]",
+		Short: "List recent MM fills for one exact hosted CLOB book",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+
+			walletAddress, err := resolveProfileAddress(ctx, nil)
+			if override := strings.TrimSpace(mustStringFlag(cmd, "wallet")); override != "" {
+				if !common.IsHexAddress(override) || isZeroAddress(override) {
+					return errors.New("--wallet must be a valid non-zero 0x-prefixed address")
+				}
+				walletAddress = override
+				err = nil
+			}
+			if err != nil {
+				return err
+			}
+
+			marketRef, instanceDate, err := resolveMMMarketReference(ctx, args, mustStringFlag(cmd, "instance-date"))
+			if err != nil {
+				return err
+			}
+			market, err := loadMMMarket(cmd.Context(), ctx, marketRef, instanceDate)
+			if err != nil {
+				return err
+			}
+			if !isClobMarketImplementation(market.MarketImplementation) {
+				return errors.New("mm fills requires an AxiomCTFMarket logical market")
+			}
+
+			selection, err := resolveClobSelection(
+				market,
+				mustStringFlag(cmd, "outcome"),
+				mustStringFlag(cmd, "label"),
+				mustStringFlag(cmd, "displayed-side"),
+				mustStringFlag(cmd, "exchange-address"),
+				mustStringFlag(cmd, "outcome-token-address"),
+			)
+			if err != nil {
+				return err
+			}
+
+			filters := url.Values{}
+			filters.Set("wallet", walletAddress)
+			filters.Set("clob_id", clobIDForMarketOutcome(market.ID, selection.Binding.OutcomeIndex, selection.DisplayedSide))
+			filters.Set("token_side", selection.DisplayedSide)
+			limit, err := cmd.Flags().GetInt("limit")
+			if err != nil {
+				return err
+			}
+			if limit > 0 {
+				filters.Set("limit", strconv.Itoa(limit))
+			}
+			fills, err := ctx.API.ListClobFills(cmd.Context(), strings.TrimSpace(mustStringFlag(cmd, "projection-url")), filters)
+			if err != nil {
+				return err
+			}
+
+			return printOutput(ctx.JSON, map[string]any{
+				"activeMarket":  buildMMMarketSelection(market, instanceDate),
+				"walletAddress": walletAddress,
+				"marketId":      market.ID,
+				"marketTitle":   market.Title,
+				"outcomeLabel":  selection.LogicalOutcome.Label,
+				"outcomeIndex":  selection.Binding.OutcomeIndex,
+				"displayedSide": selection.DisplayedSide,
+				"clobId":        clobIDForMarketOutcome(market.ID, selection.Binding.OutcomeIndex, selection.DisplayedSide),
+				"items":         fills,
+				"total":         len(fills),
+			})
+		},
+	}
+	fillsCmd.Flags().String("outcome", "", "Logical outcome index to inspect")
+	fillsCmd.Flags().String("label", "", "Logical outcome label to inspect")
+	fillsCmd.Flags().String("displayed-side", "", "Displayed side to inspect: yes or no; inferred for single-binding binary markets")
+	fillsCmd.Flags().String("wallet", "", "Wallet address to inspect; defaults to the active profile EVM address")
+	fillsCmd.Flags().Int("limit", 20, "Maximum number of fills to return")
+	fillsCmd.Flags().String("instance-date", "", "Instance date for recurring markets in YYYY-MM-DD format")
+	cmd.AddCommand(fillsCmd)
+
+	quoteCmd := &cobra.Command{
+		Use:   "quote [market-id-or-address]",
+		Short: "Place a two-sided market-making quote on one hosted CLOB book",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+			wallet, privateKeyHex, err := requireEVMWalletWithKey(ctx)
+			if err != nil {
+				return err
+			}
+
+			marketRef, instanceDate, err := resolveMMMarketReference(ctx, args, mustStringFlag(cmd, "instance-date"))
+			if err != nil {
+				return err
+			}
+			market, err := loadMMMarket(cmd.Context(), ctx, marketRef, instanceDate)
+			if err != nil {
+				return err
+			}
+			if !isClobMarketImplementation(market.MarketImplementation) {
+				return errors.New("mm quote requires an AxiomCTFMarket logical market")
+			}
+
+			selection, err := resolveClobSelection(
+				market,
+				mustStringFlag(cmd, "outcome"),
+				mustStringFlag(cmd, "label"),
+				mustStringFlag(cmd, "displayed-side"),
+				mustStringFlag(cmd, "exchange-address"),
+				mustStringFlag(cmd, "outcome-token-address"),
+			)
+			if err != nil {
+				return err
+			}
+
+			bidPriceBps, err := parseClobPriceToBps(mustStringFlag(cmd, "bid-price"))
+			if err != nil {
+				return fmt.Errorf("parse --bid-price: %w", err)
+			}
+			askPriceBps, err := parseClobPriceToBps(mustStringFlag(cmd, "ask-price"))
+			if err != nil {
+				return fmt.Errorf("parse --ask-price: %w", err)
+			}
+			if askPriceBps <= bidPriceBps {
+				return errors.New("--ask-price must be greater than --bid-price")
+			}
+			quantity, err := parseClobQuantity(mustStringFlag(cmd, "quantity"))
+			if err != nil {
+				return err
+			}
+
+			signingDomain, err := resolveClobSigningDomain(cmd)
+			if err != nil {
+				return err
+			}
+			expiry := mustStringFlag(cmd, "expiry")
+			bidPayload, err := buildClobSignedOrder(wallet, market.ID, selection, "buy", "limit", bidPriceBps, quantity, expiry, signingDomain)
+			if err != nil {
+				return err
+			}
+			askPayload, err := buildClobSignedOrder(wallet, market.ID, selection, "sell", "limit", askPriceBps, quantity, expiry, signingDomain)
+			if err != nil {
+				return err
+			}
+
+			status, err := buildClobWalletStatus(cmd.Context(), ctx, market, wallet.Address(), selection.ExchangeAddress, selection.OutcomeToken)
+			if err != nil {
+				return err
+			}
+			bidBlocks := collectClobSmokeBlocking(status, selection, bidPayload)
+			askBlocks := collectClobSmokeBlocking(status, selection, askPayload)
+			if settleErr := validateClobSettleableQuantity(bidPayload); settleErr != nil {
+				bidBlocks = append(bidBlocks, settleErr.Error())
+			}
+			if settleErr := validateClobSettleableQuantity(askPayload); settleErr != nil {
+				askBlocks = append(askBlocks, settleErr.Error())
+			}
+			if mustBoolFlag(cmd, "dry-run") {
+				quoteReady := len(bidBlocks) == 0 && len(askBlocks) == 0
+				return printOutput(ctx.JSON, map[string]any{
+					"dryRun":        true,
+					"market":        market.Title,
+					"marketId":      market.ID,
+					"outcomeLabel":  selection.LogicalOutcome.Label,
+					"outcomeIndex":  selection.Binding.OutcomeIndex,
+					"displayedSide": selection.DisplayedSide,
+					"quoteReady":    quoteReady,
+					"bid": map[string]any{
+						"priceBps":       bidPriceBps,
+						"quantity":       quantity,
+						"makerAmount":    bidPayload.MakerAmount,
+						"takerAmount":    bidPayload.TakerAmount,
+						"expiration":     bidPayload.Expiration,
+						"nonce":          bidPayload.Nonce,
+						"tokenSide":      bidPayload.TokenSide,
+						"outcomeTokenId": bidPayload.OutcomeTokenID,
+						"blocking":       bidBlocks,
+					},
+					"ask": map[string]any{
+						"priceBps":       askPriceBps,
+						"quantity":       quantity,
+						"makerAmount":    askPayload.MakerAmount,
+						"takerAmount":    askPayload.TakerAmount,
+						"expiration":     askPayload.Expiration,
+						"nonce":          askPayload.Nonce,
+						"tokenSide":      askPayload.TokenSide,
+						"outcomeTokenId": askPayload.OutcomeTokenID,
+						"blocking":       askBlocks,
+					},
+				})
+			}
+
+			approvals := make([]map[string]any, 0, 2)
+
+			if len(bidBlocks) > 0 {
+				approvalTxs, approveErr := ensureClobOrderApprovals(cmd.Context(), ctx.Config.EVMRPCURL, privateKeyHex, wallet.Address(), status, selection, bidPayload, true)
+				if approveErr != nil {
+					return fmt.Errorf("auto-approve bid quote prerequisites: %w", approveErr)
+				}
+				if len(approvalTxs) > 0 {
+					approvals = append(approvals, approvalTxs...)
+					status.CollateralAllowanceWei = clobMaxUint256
+					approveAmount, parseErr := evm.ParseBigInt(clobMaxUint256)
+					if parseErr != nil {
+						return parseErr
+					}
+					status.CollateralAllowanceXRP = formatWeiToXRP(approveAmount)
+					bidBlocks = collectClobSmokeBlockingAfterApprovals(status, selection, bidPayload)
+				}
+			}
+			if len(askBlocks) > 0 {
+				approvalTxs, approveErr := ensureClobOrderApprovals(cmd.Context(), ctx.Config.EVMRPCURL, privateKeyHex, wallet.Address(), status, selection, askPayload, true)
+				if approveErr != nil {
+					return fmt.Errorf("auto-approve ask quote prerequisites: %w", approveErr)
+				}
+				if len(approvalTxs) > 0 {
+					approvals = append(approvals, approvalTxs...)
+					status.OutcomeApprovalForAll = true
+					askBlocks = collectClobSmokeBlockingAfterApprovals(status, selection, askPayload)
+				}
+			}
+			quoteReady := len(bidBlocks) == 0 && len(askBlocks) == 0
+
+			if !quoteReady {
+				return buildMMQuoteReadinessError(bidBlocks, askBlocks)
+			}
+
+			eventstoreURL := strings.TrimSpace(mustStringFlag(cmd, "eventstore-url"))
+			bidResponse, err := submitClobSmokeOrderWithRetry(cmd.Context(), ctx, eventstoreURL, bidPayload)
+			if err != nil {
+				return err
+			}
+			askResponse, err := submitClobSmokeOrderWithRetry(cmd.Context(), ctx, eventstoreURL, askPayload)
+			if err != nil {
+				rollbackRequest, rollbackBuildErr := buildSignedClobCancel(wallet, signingDomain, bidResponse.OrderID, market.ID, selection.Binding.OutcomeIndex, selection.DisplayedSide, wallet.Address().Hex(), "market-maker-quote-rollback")
+				if rollbackBuildErr != nil {
+					return fmt.Errorf("ask quote failed after bid order %s was placed: %w (rollback was not prepared: %v)", bidResponse.OrderID, err, rollbackBuildErr)
+				}
+				rollbackResponse, rollbackErr := ctx.API.CancelClobOrder(cmd.Context(), eventstoreURL, bidResponse.OrderID, rollbackRequest)
+				if rollbackErr != nil {
+					return fmt.Errorf("ask quote failed after bid order %s was placed: %w (rollback cancel failed: %v)", bidResponse.OrderID, err, rollbackErr)
+				}
+				return fmt.Errorf("ask quote failed after bid order %s was placed and rolled back with cancel %s: %w", bidResponse.OrderID, rollbackResponse.OrderID, err)
+			}
+
+			result := map[string]any{
+				"market":        market.Title,
+				"marketId":      market.ID,
+				"outcomeLabel":  selection.LogicalOutcome.Label,
+				"outcomeIndex":  selection.Binding.OutcomeIndex,
+				"displayedSide": selection.DisplayedSide,
+				"quantity":      quantity,
+				"bid": map[string]any{
+					"priceBps":        bidPriceBps,
+					"orderId":         bidResponse.OrderID,
+					"tradeCount":      bidResponse.TradeCount,
+					"remainingShares": bidResponse.RemainingQuantity,
+					"resting":         bidResponse.WasAddedToBook,
+				},
+				"ask": map[string]any{
+					"priceBps":        askPriceBps,
+					"orderId":         askResponse.OrderID,
+					"tradeCount":      askResponse.TradeCount,
+					"remainingShares": askResponse.RemainingQuantity,
+					"resting":         askResponse.WasAddedToBook,
+				},
+				"message": "Two-sided quote resting on the hosted CLOB book.",
+			}
+			if len(approvals) > 0 {
+				result["approvals"] = approvals
+			}
+			return printOutput(ctx.JSON, result)
+		},
+	}
+	quoteCmd.Flags().String("outcome", "", "Logical outcome index to quote")
+	quoteCmd.Flags().String("label", "", "Logical outcome label to quote")
+	quoteCmd.Flags().String("displayed-side", "", "Displayed side to quote: yes or no; inferred for single-binding binary markets")
+	quoteCmd.Flags().String("bid-price", "", "Bid price in displayed percent units, for example 45")
+	quoteCmd.Flags().String("ask-price", "", "Ask price in displayed percent units, for example 55")
+	quoteCmd.Flags().String("quantity", "", "Whole-number share quantity to post on both sides")
+	quoteCmd.Flags().String("expiry", "24h", "Expiry preset for both resting quotes: 1h, 24h, 7d, never")
+	quoteCmd.Flags().Bool("dry-run", false, "Build both signed quotes locally and report readiness without submitting them")
+	quoteCmd.Flags().String("instance-date", "", "Instance date for recurring markets in YYYY-MM-DD format")
+	cmd.AddCommand(quoteCmd)
+
+	return cmd
+}
+
 func resolveClobMarketFactoryAddress(cmdCtx context.Context, ctx *cliContext, override string, overrideChanged bool) (common.Address, error) {
 	trimmedOverride := strings.TrimSpace(override)
 	if overrideChanged {
@@ -3326,6 +4229,568 @@ func buildRegistrationMessage(walletAddress string, deviceID string, issuedAt ti
 		"Network: xrpl-mainnet",
 		"Purpose: create or refresh my Axiom CLI profile and funding destination tag.",
 	}, "\n")
+}
+
+func buildMMInventoryOutput(status *clobWalletStatus) (map[string]any, error) {
+	if status == nil {
+		return nil, errors.New("wallet status is required")
+	}
+
+	totalCompleteSets := big.NewInt(0)
+	totalYes := big.NewInt(0)
+	totalNo := big.NewInt(0)
+	bindings := make([]map[string]any, 0, len(status.Bindings))
+	for _, binding := range status.Bindings {
+		yesBalance := big.NewInt(0)
+		noBalance := big.NewInt(0)
+		var yesTokenID string
+		var noTokenID string
+		for _, side := range binding.Sides {
+			balance, err := evm.ParseBigInt(side.Balance)
+			if err != nil {
+				return nil, fmt.Errorf("parse %s balance for outcome %q: %w", side.DisplayedSide, binding.OutcomeLabel, err)
+			}
+			switch strings.ToLower(strings.TrimSpace(side.DisplayedSide)) {
+			case "yes":
+				yesBalance = balance
+				yesTokenID = side.TokenID
+			case "no":
+				noBalance = balance
+				noTokenID = side.TokenID
+			}
+		}
+
+		completeSets := cloneBigInt(yesBalance)
+		if noBalance.Cmp(completeSets) < 0 {
+			completeSets = cloneBigInt(noBalance)
+		}
+		imbalance := new(big.Int).Sub(cloneBigInt(yesBalance), cloneBigInt(noBalance))
+		bias := "balanced"
+		if imbalance.Sign() > 0 {
+			bias = "yes"
+		} else if imbalance.Sign() < 0 {
+			bias = "no"
+		}
+
+		totalCompleteSets.Add(totalCompleteSets, completeSets)
+		totalYes.Add(totalYes, yesBalance)
+		totalNo.Add(totalNo, noBalance)
+
+		bindings = append(bindings, map[string]any{
+			"outcomeIndex":      binding.OutcomeIndex,
+			"outcomeLabel":      binding.OutcomeLabel,
+			"contractAddress":   binding.ContractAddress,
+			"conditionId":       binding.ConditionID,
+			"questionId":        binding.QuestionID,
+			"yesTokenId":        yesTokenID,
+			"noTokenId":         noTokenID,
+			"yesBalanceWei":     yesBalance.String(),
+			"yesBalanceXrp":     formatWeiToXRP(yesBalance),
+			"noBalanceWei":      noBalance.String(),
+			"noBalanceXrp":      formatWeiToXRP(noBalance),
+			"completeSetsWei":   completeSets.String(),
+			"completeSetsXrp":   formatWeiToXRP(completeSets),
+			"imbalanceWei":      imbalance.String(),
+			"imbalanceXrp":      formatWeiToXRP(new(big.Int).Abs(cloneBigInt(imbalance))),
+			"inventoryBias":     bias,
+			"mergeReady":        completeSets.Sign() > 0,
+			"outcomeTokenSides": binding.Sides,
+		})
+	}
+
+	collateralBalance, err := evm.ParseBigInt(status.CollateralBalanceWei)
+	if err != nil {
+		return nil, fmt.Errorf("parse collateral balance: %w", err)
+	}
+	collateralAllowance, err := evm.ParseBigInt(status.CollateralAllowanceWei)
+	if err != nil {
+		return nil, fmt.Errorf("parse collateral allowance: %w", err)
+	}
+	totalImbalance := new(big.Int).Sub(cloneBigInt(totalYes), cloneBigInt(totalNo))
+	totalBias := "balanced"
+	if totalImbalance.Sign() > 0 {
+		totalBias = "yes"
+	} else if totalImbalance.Sign() < 0 {
+		totalBias = "no"
+	}
+
+	return map[string]any{
+		"walletAddress":         status.WalletAddress,
+		"marketId":              status.MarketID,
+		"marketTitle":           status.MarketTitle,
+		"exchangeAddress":       status.ExchangeAddress,
+		"outcomeToken":          status.OutcomeToken,
+		"outcomeApprovalForAll": status.OutcomeApprovalForAll,
+		"summary": map[string]any{
+			"bindings":               len(status.Bindings),
+			"collateralToken":        status.CollateralToken,
+			"collateralBalanceWei":   collateralBalance.String(),
+			"collateralBalanceXrp":   formatWeiToXRP(collateralBalance),
+			"collateralAllowanceWei": collateralAllowance.String(),
+			"collateralAllowanceXrp": formatWeiToXRP(collateralAllowance),
+			"totalYesWei":            totalYes.String(),
+			"totalYesXrp":            formatWeiToXRP(totalYes),
+			"totalNoWei":             totalNo.String(),
+			"totalNoXrp":             formatWeiToXRP(totalNo),
+			"totalCompleteSetsWei":   totalCompleteSets.String(),
+			"totalCompleteSetsXrp":   formatWeiToXRP(totalCompleteSets),
+			"inventoryBias":          totalBias,
+			"imbalanceWei":           totalImbalance.String(),
+			"imbalanceXrp":           formatWeiToXRP(new(big.Int).Abs(cloneBigInt(totalImbalance))),
+		},
+		"bindings": bindings,
+	}, nil
+}
+
+func activeMMMarketSelection(ctx *cliContext) *mmMarketSelection {
+	if ctx == nil {
+		return nil
+	}
+	state, err := app.LoadMMState()
+	if err != nil {
+		return nil
+	}
+	account := state.Account(ctx.ProfileName)
+	if strings.TrimSpace(account.ActiveMarketID) == "" {
+		return nil
+	}
+	return &mmMarketSelection{
+		MarketID:     strings.TrimSpace(account.ActiveMarketID),
+		MarketTitle:  strings.TrimSpace(account.ActiveMarketTitle),
+		InstanceDate: strings.TrimSpace(account.ActiveInstanceDate),
+	}
+}
+
+func saveActiveMMMarket(profileName string, selection mmMarketSelection) error {
+	state, err := app.LoadMMState()
+	if err != nil {
+		return err
+	}
+	state.SetAccount(profileName, app.MMAccountState{
+		ActiveMarketID:     selection.MarketID,
+		ActiveMarketTitle:  selection.MarketTitle,
+		ActiveInstanceDate: selection.InstanceDate,
+	})
+	return app.SaveMMState(state)
+}
+
+func clearActiveMMMarket(profileName string) error {
+	state, err := app.LoadMMState()
+	if err != nil {
+		return err
+	}
+	state.SetAccount(profileName, app.MMAccountState{})
+	return app.SaveMMState(state)
+}
+
+func resolveMMMarketReference(ctx *cliContext, args []string, instanceDateFlag string) (string, string, error) {
+	if len(args) > 0 && strings.TrimSpace(args[0]) != "" {
+		return strings.TrimSpace(args[0]), strings.TrimSpace(instanceDateFlag), nil
+	}
+	active := activeMMMarketSelection(ctx)
+	if active == nil {
+		return "", "", errors.New("no market provided and no active market-maker market is set; run `axiom mm market use`")
+	}
+	instanceDate := strings.TrimSpace(instanceDateFlag)
+	if instanceDate == "" {
+		instanceDate = active.InstanceDate
+	}
+	return active.MarketID, instanceDate, nil
+}
+
+func buildMMMarketSelection(market *api.MarketDetails, instanceDate string) mmMarketSelection {
+	selection := mmMarketSelection{InstanceDate: strings.TrimSpace(instanceDate)}
+	if market == nil {
+		return selection
+	}
+	selection.MarketID = strings.TrimSpace(market.ID)
+	selection.MarketTitle = strings.TrimSpace(market.Title)
+	selection.ContractAddr = strings.TrimSpace(market.ContractAddress)
+	selection.Category = strings.TrimSpace(market.Category)
+	selection.Status = strings.TrimSpace(market.Status)
+	selection.MarketType = strings.TrimSpace(market.MarketType)
+	selection.Implementation = strings.TrimSpace(market.MarketImplementation)
+	if !market.EndsAt.IsZero() {
+		selection.EndsAt = market.EndsAt.UTC().Format(time.RFC3339)
+	}
+	if selection.InstanceDate == "" && market.InstanceDate != nil && !market.InstanceDate.IsZero() {
+		selection.InstanceDate = market.InstanceDate.UTC().Format("2006-01-02")
+	}
+	return selection
+}
+
+func filterMMMarkets(response *api.MarketsResponse, category string) *api.MarketsResponse {
+	if response == nil {
+		return &api.MarketsResponse{}
+	}
+	filtered := make([]api.MarketListItem, 0, len(response.Items))
+	for _, item := range response.Items {
+		if !isClobMarketImplementation(item.MarketImplementation) {
+			continue
+		}
+		if strings.TrimSpace(category) != "" && !strings.EqualFold(strings.TrimSpace(item.Category), strings.TrimSpace(category)) {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	sort.Slice(filtered, func(left int, right int) bool {
+		leftVisible := filtered[left].IsVisible == nil || *filtered[left].IsVisible
+		rightVisible := filtered[right].IsVisible == nil || *filtered[right].IsVisible
+		if leftVisible != rightVisible {
+			return leftVisible
+		}
+		return strings.ToLower(strings.TrimSpace(filtered[left].Title)) < strings.ToLower(strings.TrimSpace(filtered[right].Title))
+	})
+	return &api.MarketsResponse{Items: filtered, Total: len(filtered), Limit: len(filtered), Offset: 0}
+}
+
+func buildMMMarketListItems(items []api.MarketListItem) []map[string]any {
+	results := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		entry := map[string]any{
+			"marketId":              item.ID,
+			"title":                 item.Title,
+			"headline":              item.Headline,
+			"category":              item.Category,
+			"status":                item.Status,
+			"marketType":            item.MarketType,
+			"marketImplementation":  item.MarketImplementation,
+			"contractAddress":       item.ContractAddress,
+			"outcomes":              item.Outcomes,
+			"ctfOutcomeMarketCount": len(item.CTFOutcomeMarkets),
+		}
+		if item.IsVisible != nil {
+			entry["isVisible"] = *item.IsVisible
+		}
+		if item.InstanceDate != nil && !item.InstanceDate.IsZero() {
+			entry["instanceDate"] = item.InstanceDate.UTC().Format("2006-01-02")
+		}
+		if !item.EndsAt.IsZero() {
+			entry["endsAt"] = item.EndsAt.UTC().Format(time.RFC3339)
+		}
+		results = append(results, entry)
+	}
+	return results
+}
+
+func selectMMMarket(ctx context.Context, cliCtx *cliContext, cmd *cobra.Command, marketRef string, instanceDate string) (*api.MarketDetails, error) {
+	trimmedRef := strings.TrimSpace(marketRef)
+	if trimmedRef != "" {
+		return loadMMMarket(ctx, cliCtx, trimmedRef, instanceDate)
+	}
+	search := strings.TrimSpace(mustStringFlag(cmd, "search"))
+	status := strings.TrimSpace(mustStringFlag(cmd, "status"))
+	category := strings.TrimSpace(mustStringFlag(cmd, "category"))
+	limit, err := cmd.Flags().GetInt("limit")
+	if err != nil {
+		return nil, err
+	}
+	marketsResponse, err := withLoadingIndicator(cliCtx.JSON, "Loading hosted CLOB markets", func() (*api.MarketsResponse, error) {
+		return cliCtx.ConsoleAPI.ListAllMarkets(ctx, status, search, "", normalizeMarketImplementation("clob"), true, 0)
+	})
+	if err != nil {
+		return nil, err
+	}
+	filtered := filterMMMarkets(marketsResponse, category)
+	filtered = paginateMarkets(filtered, limit, 0)
+	if len(filtered.Items) == 0 {
+		return nil, errors.New("no hosted CLOB markets matched the requested filters")
+	}
+	choice, err := chooseInteractiveMMMarket(filtered.Items)
+	if err != nil {
+		return nil, err
+	}
+	resolvedInstanceDate := strings.TrimSpace(instanceDate)
+	if resolvedInstanceDate == "" {
+		for _, item := range filtered.Items {
+			if item.ID == choice.Value && item.InstanceDate != nil && !item.InstanceDate.IsZero() {
+				resolvedInstanceDate = item.InstanceDate.UTC().Format("2006-01-02")
+				break
+			}
+		}
+	}
+	return loadMMMarket(ctx, cliCtx, choice.Value, resolvedInstanceDate)
+}
+
+func chooseInteractiveMMMarket(items []api.MarketListItem) (*mmInteractiveChoice, error) {
+	choices := make([]mmInteractiveChoice, 0, len(items))
+	for index, item := range items {
+		parts := []string{fmt.Sprintf("%d.", index+1), item.Title, fmt.Sprintf("[%s]", firstNonEmpty(strings.TrimSpace(item.Category), "uncategorized"))}
+		if item.IsVisible != nil && !*item.IsVisible {
+			parts = append(parts, "[hidden]")
+		}
+		if !item.EndsAt.IsZero() {
+			parts = append(parts, item.EndsAt.UTC().Format("2006-01-02 15:04 UTC"))
+		}
+		parts = append(parts, item.ID)
+		choices = append(choices, mmInteractiveChoice{Label: strings.Join(parts, "  "), Value: item.ID})
+	}
+	return promptInteractiveChoice("Select market-maker market", choices)
+}
+
+func promptInteractiveChoice(prompt string, choices []mmInteractiveChoice) (*mmInteractiveChoice, error) {
+	if len(choices) == 0 {
+		return nil, errors.New("no choices available")
+	}
+	if strings.TrimSpace(prompt) != "" {
+		if _, err := fmt.Fprintf(os.Stderr, "%s\n", strings.TrimSpace(prompt)); err != nil {
+			return nil, fmt.Errorf("write prompt: %w", err)
+		}
+	}
+	for _, choice := range choices {
+		if _, err := fmt.Fprintf(os.Stderr, "%s\n", choice.Label); err != nil {
+			return nil, fmt.Errorf("write choice: %w", err)
+		}
+	}
+	if _, err := fmt.Fprint(os.Stderr, "Enter choice number: "); err != nil {
+		return nil, fmt.Errorf("write choice prompt: %w", err)
+	}
+	reader := bufio.NewReader(os.Stdin)
+	line, err := reader.ReadString('\n')
+	if err != nil && !errors.Is(err, os.ErrClosed) {
+		if strings.TrimSpace(line) == "" {
+			return nil, fmt.Errorf("read choice: %w", err)
+		}
+	}
+	selection := strings.TrimSpace(line)
+	if selection == "" {
+		return nil, errors.New("interactive selection cancelled")
+	}
+	index, err := strconv.Atoi(selection)
+	if err != nil || index < 1 || index > len(choices) {
+		return nil, fmt.Errorf("invalid selection %q", selection)
+	}
+	choice := choices[index-1]
+	return &choice, nil
+}
+
+func withLoadingIndicator[T any](asJSON bool, message string, run func() (T, error)) (T, error) {
+	var zero T
+	trimmedMessage := strings.TrimSpace(message)
+	if trimmedMessage == "" {
+		return run()
+	}
+
+	if _, err := fmt.Fprintf(os.Stderr, "%s...", trimmedMessage); err != nil {
+		return zero, fmt.Errorf("write loading message: %w", err)
+	}
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		frames := []string{"|", "/", "-", "\\"}
+		ticker := time.NewTicker(120 * time.Millisecond)
+		defer ticker.Stop()
+		index := 0
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				_, _ = fmt.Fprintf(os.Stderr, "\r%s... %s", trimmedMessage, frames[index%len(frames)])
+				index++
+			}
+		}
+	}()
+
+	result, err := run()
+	close(stop)
+	wg.Wait()
+	_, _ = fmt.Fprintf(os.Stderr, "\r%s... done\n", trimmedMessage)
+	return result, err
+}
+
+func collectMMMarketClobIDs(market *api.MarketDetails) []string {
+	if market == nil {
+		return nil
+	}
+	bindings := sortedClobBindings(market.CTFOutcomeMarkets)
+	if len(bindings) == 1 && len(market.Outcomes) == 2 {
+		return []string{
+			clobIDForMarketOutcome(market.ID, bindings[0].OutcomeIndex, "yes"),
+			clobIDForMarketOutcome(market.ID, bindings[0].OutcomeIndex, "no"),
+		}
+	}
+	results := make([]string, 0, len(bindings))
+	for _, binding := range bindings {
+		results = append(results, clobIDForMarketOutcome(market.ID, binding.OutcomeIndex, "yes"))
+	}
+	return results
+}
+
+func parseClobOrderIdentity(order api.ClobOrder) (string, int, string, error) {
+	clobID := strings.TrimSpace(order.ClobID)
+	if clobID == "" {
+		return "", 0, "", errors.New("order is missing clob_id")
+	}
+	lastDash := strings.LastIndex(clobID, "-")
+	if lastDash <= 0 || lastDash == len(clobID)-1 {
+		return "", 0, "", fmt.Errorf("invalid clob_id %q", clobID)
+	}
+	tokenSide, err := normalizeClobTokenSide(clobID[lastDash+1:])
+	if err != nil {
+		return "", 0, "", fmt.Errorf("invalid clob_id %q: %w", clobID, err)
+	}
+	marketWithOutcome := clobID[:lastDash]
+	secondDash := strings.LastIndex(marketWithOutcome, "-")
+	if secondDash <= 0 || secondDash == len(marketWithOutcome)-1 {
+		return "", 0, "", fmt.Errorf("invalid clob_id %q", clobID)
+	}
+	outcomeIndex, err := strconv.Atoi(marketWithOutcome[secondDash+1:])
+	if err != nil {
+		return "", 0, "", fmt.Errorf("parse clob outcome from %q: %w", clobID, err)
+	}
+	marketID := marketWithOutcome[:secondDash]
+	if strings.TrimSpace(marketID) == "" {
+		return "", 0, "", fmt.Errorf("invalid clob_id %q", clobID)
+	}
+	return marketID, outcomeIndex, tokenSide, nil
+}
+
+func buildMMQuoteReadinessError(bidBlocks []string, askBlocks []string) error {
+	issues := make([]string, 0, len(bidBlocks)+len(askBlocks))
+	for _, block := range bidBlocks {
+		issues = append(issues, fmt.Sprintf("bid: %s", block))
+	}
+	for _, block := range askBlocks {
+		issues = append(issues, fmt.Sprintf("ask: %s", block))
+	}
+	if len(issues) == 0 {
+		return errors.New("quote is not ready")
+	}
+	return fmt.Errorf("quote is not ready: %s", strings.Join(issues, "; "))
+}
+
+func runClobSplit(cmd *cobra.Command, ctx *cliContext, market *api.MarketDetails) error {
+	wallet, privateKeyHex, err := requireEVMWalletWithKey(ctx)
+	if err != nil {
+		return err
+	}
+	binding, err := resolveSplitMergeBinding(market, mustStringFlag(cmd, "label"))
+	if err != nil {
+		return err
+	}
+	conditionalTokens := resolveHexAddressOrDefault(mustStringFlag(cmd, "outcome-token-address"), evm.DefaultClobConditionalTokens)
+	collateralToken := resolveClobCollateralToken(market)
+	conditionID := common.HexToHash(binding.ConditionID)
+	partition := []*big.Int{big.NewInt(1), big.NewInt(2)}
+	amount, err := parseClobAmount(mustStringFlag(cmd, "amount"))
+	if err != nil {
+		return err
+	}
+
+	collateralBalance, err := getERC20Balance(cmd.Context(), ctx.Config.EVMRPCURL, collateralToken, wallet.Address())
+	if err != nil {
+		return fmt.Errorf("check collateral balance: %w", err)
+	}
+	if collateralBalance.Cmp(amount) < 0 {
+		return fmt.Errorf("insufficient collateral: balance %s wei (%s XRP) is below split amount %s wei (%s XRP)",
+			collateralBalance.String(), formatWeiToXRP(collateralBalance),
+			amount.String(), formatWeiToXRP(amount))
+	}
+
+	yesTokenID, _, _ := resolveDisplayedTokenID(binding, "yes", collateralToken)
+	noTokenID, _, _ := resolveDisplayedTokenID(binding, "no", collateralToken)
+	action := "split"
+	if cmd != nil && cmd.CommandPath() == "axiom mm mint" {
+		action = "mint"
+	}
+
+	if mustBoolFlag(cmd, "dry-run") {
+		currentAllowance, _ := getERC20Allowance(cmd.Context(), ctx.Config.EVMRPCURL, collateralToken, wallet.Address(), conditionalTokens)
+		needsApproval := currentAllowance == nil || currentAllowance.Cmp(amount) < 0
+		preview := map[string]any{
+			"dryRun":               true,
+			"action":               action,
+			"market":               market.Title,
+			"marketId":             market.ID,
+			"outcomeLabel":         binding.Label,
+			"conditionalTokens":    conditionalTokens.Hex(),
+			"collateralToken":      collateralToken.Hex(),
+			"conditionId":          conditionID.Hex(),
+			"partition":            []string{"1", "2"},
+			"amountWei":            amount.String(),
+			"amountXrp":            formatWeiToXRP(amount),
+			"wallet":               wallet.Address().Hex(),
+			"collateralBalanceWei": collateralBalance.String(),
+			"collateralBalanceXrp": formatWeiToXRP(collateralBalance),
+			"needsApproval":        needsApproval,
+		}
+		if yesTokenID != nil {
+			preview["yesTokenId"] = yesTokenID.String()
+		}
+		if noTokenID != nil {
+			preview["noTokenId"] = noTokenID.String()
+		}
+		return printOutput(ctx.JSON, preview)
+	}
+
+	approvalTxs := make([]map[string]any, 0, 1)
+	if !mustBoolFlag(cmd, "skip-approval") {
+		currentAllowance, err := getERC20Allowance(cmd.Context(), ctx.Config.EVMRPCURL, collateralToken, wallet.Address(), conditionalTokens)
+		if err != nil {
+			return fmt.Errorf("check collateral allowance: %w", err)
+		}
+		if currentAllowance.Cmp(amount) < 0 {
+			approveMax, _ := evm.ParseBigInt(clobMaxUint256)
+			approveTxHash, err := approveERC20(cmd.Context(), ctx.Config.EVMRPCURL, big.NewInt(xrplEVMChainID), privateKeyHex, collateralToken, conditionalTokens, approveMax)
+			if err != nil {
+				return fmt.Errorf("collateral approval failed: %w", err)
+			}
+			entry := map[string]any{
+				"kind":    "collateral-approve-for-split",
+				"token":   collateralToken.Hex(),
+				"spender": conditionalTokens.Hex(),
+				"txHash":  approveTxHash.Hex(),
+			}
+			receipt, waitErr := waitForReceipt(cmd.Context(), ctx.Config.EVMRPCURL, approveTxHash)
+			if waitErr != nil {
+				return fmt.Errorf("wait for approval receipt: %w", waitErr)
+			}
+			entry["receiptStatus"] = receipt.Status
+			if receipt.Status == 0 {
+				return fmt.Errorf("collateral approval reverted (tx %s)", approveTxHash.Hex())
+			}
+			approvalTxs = append(approvalTxs, entry)
+		}
+	}
+
+	txHash, err := splitPosition(cmd.Context(), ctx.Config.EVMRPCURL, big.NewInt(xrplEVMChainID), privateKeyHex, conditionalTokens, collateralToken, conditionID, partition, amount)
+	if err != nil {
+		return fmt.Errorf("split transaction failed: %w", err)
+	}
+	result := map[string]any{
+		"action":       action,
+		"market":       market.Title,
+		"marketId":     market.ID,
+		"outcomeLabel": binding.Label,
+		"amountWei":    amount.String(),
+		"amountXrp":    formatWeiToXRP(amount),
+		"txHash":       txHash.Hex(),
+		"wallet":       wallet.Address().Hex(),
+	}
+	if yesTokenID != nil {
+		result["yesTokenId"] = yesTokenID.String()
+	}
+	if noTokenID != nil {
+		result["noTokenId"] = noTokenID.String()
+	}
+	if len(approvalTxs) > 0 {
+		result["approvals"] = approvalTxs
+	}
+	if mustBoolFlag(cmd, "wait") {
+		receipt, waitErr := waitForReceipt(cmd.Context(), ctx.Config.EVMRPCURL, txHash)
+		if waitErr != nil {
+			return waitErr
+		}
+		result["receiptStatus"] = receipt.Status
+		if receipt.Status == 0 {
+			return fmt.Errorf("split transaction reverted (tx %s)", txHash.Hex())
+		}
+	}
+	return printOutput(ctx.JSON, result)
 }
 
 func buildProfileUpdateMessage(walletAddress string, deviceID string, issuedAt time.Time, displayName string, avatarURL string) string {
