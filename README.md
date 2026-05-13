@@ -159,6 +159,19 @@ Hosted order, cancel, and `CreateBook` signatures use this EIP-712 domain:
 
 The hosted signing domain is separate from the on-chain exchange contract used for approvals and settlement prep. Do not point `--clob-domain-contract` at `0xCd9522eeB541ef44722b73a9bf104CED3A2347B2`.
 
+## Market-making guide
+
+For the dedicated hosted CLOB market-making runbook, see [`docs/market-making.md`](docs/market-making.md).
+
+That document covers:
+
+- the full `axiom mm` command surface
+- active-market state in `mm-state.json`
+- exact hosted book targeting rules
+- minting, quoting, status, orders, fills, and cancel workflows
+- readiness checks, auto-approvals, and settleability rules
+- the detailed six-book beta validation walkthrough and results
+
 ## Quick start
 
 Create a local XRPL EVM wallet:
