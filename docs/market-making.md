@@ -50,7 +50,7 @@ Default production values:
 - eventstore: `https://clob.axiomprotocol.io/api`
 - signing domain contract: `0xa232ACB932b4E745f6ee2aaC1E2707ae0E1055c5`
 - chain id: `1440000`
-- exchange address: `0xCd9522eeB541ef44722b73a9bf104CED3A2347B2`
+- exchange address: `0xa232ACB932b4E745f6ee2aaC1E2707ae0E1055c5`
 - outcome token address: `0x43e3fa6De5D87dd7265053FA55601d1972984edA`
 
 ## Architecture

@@ -1775,6 +1775,91 @@ func TestClobOrderPlaceRejectsUnsettlableTinyLimitOrder(t *testing.T) {
 	}
 }
 
+func TestClobOrderPlaceAutoApprovesMissingOutcomeApproval(t *testing.T) {
+	setCLIEnv(t)
+	server, state := newMockAPIServer(t)
+	defer server.Close()
+
+	privateKey := "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+	if _, stderr, err := executeCLI(t, "--json", "wallet", "import", "--private-key", privateKey); err != nil {
+		t.Fatalf("wallet import error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	originalGetERC20Balance := getERC20Balance
+	originalGetERC20Allowance := getERC20Allowance
+	originalIsERC1155ApprovedForAll := isERC1155ApprovedForAll
+	originalGetERC1155Balance := getERC1155Balance
+	originalSetERC1155ApprovalForAll := setERC1155ApprovalForAll
+	originalWaitForReceipt := waitForTxReceipt
+	var approveERC1155Calls int
+	getERC20Balance = func(_ context.Context, _ string, _ common.Address, _ common.Address) (*big.Int, error) {
+		return testBigInt("10000000000000000000"), nil
+	}
+	getERC20Allowance = func(_ context.Context, _ string, _ common.Address, _ common.Address, _ common.Address) (*big.Int, error) {
+		return testBigInt(clobMaxUint256), nil
+	}
+	isERC1155ApprovedForAll = func(_ context.Context, _ string, _ common.Address, _ common.Address, _ common.Address) (bool, error) {
+		return false, nil
+	}
+	getERC1155Balance = func(_ context.Context, _ string, _ common.Address, _ common.Address, tokenID *big.Int) (*big.Int, error) {
+		if tokenID.String() == "101" {
+			return testBigInt("5000000000000000000"), nil
+		}
+		return big.NewInt(0), nil
+	}
+	setERC1155ApprovalForAll = func(_ context.Context, _ string, _ *big.Int, _ string, _ common.Address, operator common.Address, approved bool) (common.Hash, error) {
+		approveERC1155Calls++
+		if !approved {
+			t.Fatal("setERC1155ApprovalForAll approved = false, want true")
+		}
+		if operator != common.HexToAddress("0xa232ACB932b4E745f6ee2aaC1E2707ae0E1055c5") {
+			t.Fatalf("setERC1155ApprovalForAll operator = %s, want canonical hosted exchange", operator.Hex())
+		}
+		return common.HexToHash("0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"), nil
+	}
+	waitForTxReceipt = func(_ context.Context, _ string, txHash common.Hash) (*types.Receipt, error) {
+		return &types.Receipt{TxHash: txHash, Status: 1}, nil
+	}
+	t.Cleanup(func() {
+		getERC20Balance = originalGetERC20Balance
+		getERC20Allowance = originalGetERC20Allowance
+		isERC1155ApprovedForAll = originalIsERC1155ApprovedForAll
+		getERC1155Balance = originalGetERC1155Balance
+		setERC1155ApprovalForAll = originalSetERC1155ApprovalForAll
+		waitForTxReceipt = originalWaitForReceipt
+	})
+
+	stdout, stderr, err := executeCLI(
+		t,
+		"--json",
+		"--api-url", server.URL+"/api/cli",
+		"--eventstore-url", server.URL+"/api",
+		"clob",
+		"order",
+		"place",
+		"clob-1",
+		"--label", "Yes",
+		"--side", "sell",
+		"--type", "limit",
+		"--price", "55",
+		"--quantity", "3",
+	)
+	if err != nil {
+		t.Fatalf("clob order place auto-approve error = %v\nstderr:\n%s", err, stderr)
+	}
+	if approveERC1155Calls != 1 {
+		t.Fatalf("approveERC1155Calls = %d, want 1", approveERC1155Calls)
+	}
+	if !strings.Contains(stdout, "outcome-approval-for-all") {
+		t.Fatalf("clob order place stdout missing outcome approval\nstdout:\n%s", stdout)
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.clobSubmitCalls != 1 {
+		t.Fatalf("clobSubmitCalls = %d, want 1", state.clobSubmitCalls)
+	}
+}
+
 func TestClobFillsListResolvesSingleBindingDisplayedNoSide(t *testing.T) {
 	setCLIEnv(t)
 	server, state := newMockAPIServer(t)
@@ -2429,10 +2514,13 @@ func TestMMQuoteAutoApprovesMissingExchangeApprovals(t *testing.T) {
 		}
 		return common.HexToHash("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), nil
 	}
-	setERC1155ApprovalForAll = func(_ context.Context, _ string, _ *big.Int, _ string, _ common.Address, _ common.Address, approved bool) (common.Hash, error) {
+	setERC1155ApprovalForAll = func(_ context.Context, _ string, _ *big.Int, _ string, _ common.Address, operator common.Address, approved bool) (common.Hash, error) {
 		approveERC1155Calls++
 		if !approved {
 			t.Fatal("setERC1155ApprovalForAll approved = false, want true")
+		}
+		if operator != common.HexToAddress("0xa232ACB932b4E745f6ee2aaC1E2707ae0E1055c5") {
+			t.Fatalf("setERC1155ApprovalForAll operator = %s, want canonical hosted exchange", operator.Hex())
 		}
 		return common.HexToHash("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"), nil
 	}

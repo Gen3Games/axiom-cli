@@ -119,7 +119,7 @@ Hosted CLOB endpoints are command-scoped rather than persisted in `config.json`:
 - `--eventstore-url`: `https://clob.axiomprotocol.io/api`
 - `--clob-domain-contract`: `0xa232ACB932b4E745f6ee2aaC1E2707ae0E1055c5`
 - `--clob-chain-id`: `1440000`
-- `--exchange-address`: `0xCd9522eeB541ef44722b73a9bf104CED3A2347B2`
+- `--exchange-address`: `0xa232ACB932b4E745f6ee2aaC1E2707ae0E1055c5`
 - `--outcome-token-address`: `0x43e3fa6De5D87dd7265053FA55601d1972984edA`
 - `--factory-address`: optional; when omitted the CLI loads the canonical `MarketFactory` from the console API
 
@@ -157,7 +157,7 @@ Hosted order, cancel, and `CreateBook` signatures use this EIP-712 domain:
 - Chain ID: `1440000`
 - Verifying contract: `0xa232ACB932b4E745f6ee2aaC1E2707ae0E1055c5`
 
-The hosted signing domain is separate from the on-chain exchange contract used for approvals and settlement prep. Do not point `--clob-domain-contract` at `0xCd9522eeB541ef44722b73a9bf104CED3A2347B2`.
+The hosted signing domain is configured separately from the on-chain exchange address, but current mainnet uses the same canonical contract for both values: `0xa232ACB932b4E745f6ee2aaC1E2707ae0E1055c5`.
 
 ## Market-making guide
 

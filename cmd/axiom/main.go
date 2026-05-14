@@ -2520,7 +2520,7 @@ func newClobCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			wallet, _, err := requireEVMWalletWithKey(ctx)
+			wallet, privateKeyHex, err := requireEVMWalletWithKey(ctx)
 			if err != nil {
 				return err
 			}
@@ -2605,11 +2605,28 @@ func newClobCommand() *cobra.Command {
 				return printOutput(ctx.JSON, map[string]any{"dryRun": true, "order": preview})
 			}
 
+			status, err := buildClobWalletStatus(cmd.Context(), ctx, market, wallet.Address(), selection.ExchangeAddress, selection.OutcomeToken)
+			if err != nil {
+				return fmt.Errorf("load order wallet status: %w", err)
+			}
+
+			blocking := collectClobSmokeBlocking(status, selection, payload)
+			approvals, err := ensureClobOrderApprovals(cmd.Context(), ctx.Config.EVMRPCURL, privateKeyHex, wallet.Address(), status, selection, payload, true)
+			if err != nil {
+				return fmt.Errorf("auto-approve order prerequisites: %w", err)
+			}
+			if len(approvals) > 0 {
+				blocking = collectClobSmokeBlockingAfterApprovals(status, selection, payload)
+			}
+			if len(blocking) > 0 {
+				return fmt.Errorf("order is not ready: %s", strings.Join(blocking, "; "))
+			}
+
 			response, err := ctx.API.SubmitClobOrder(cmd.Context(), strings.TrimSpace(mustStringFlag(cmd, "eventstore-url")), payload)
 			if err != nil {
 				return err
 			}
-			return printOutput(ctx.JSON, map[string]any{
+			result := map[string]any{
 				"market":          market.Title,
 				"marketId":        market.ID,
 				"outcomeLabel":    selection.LogicalOutcome.Label,
@@ -2624,7 +2641,11 @@ func newClobCommand() *cobra.Command {
 				"remainingShares": response.RemainingQuantity,
 				"resting":         response.WasAddedToBook,
 				"message":         describeClobOrderResult(orderType, response),
-			})
+			}
+			if len(approvals) > 0 {
+				result["approvals"] = approvals
+			}
+			return printOutput(ctx.JSON, result)
 		},
 	}
 	placeCmd.Flags().String("outcome", "", "Logical outcome index to trade")
