@@ -240,6 +240,7 @@ Trade a hosted CLOB market end to end:
 axiom markets get clob-1
 axiom clob wallet status clob-1
 axiom clob wallet approve clob-1 --wait
+axiom clob wallet approve --skip-collateral --wait
 axiom clob order place clob-1 --label "Yes" --side buy --type limit --price 52.5 --quantity 10
 axiom clob orders list --mine --active-only
 axiom clob fills list --mine
@@ -350,10 +351,11 @@ Run a smoke test against the hosted CLOB stack with imported CLI accounts:
 axiom clob smoke
 axiom clob smoke first-city-to-ban-private-cars-2032-1773930455346-1773930455346 --label "Paris"
 axiom clob smoke --secondary-account trader-two --live
-axiom clob smoke --live --auto-approve --wait
+axiom clob smoke --live --wait
+axiom clob smoke --live --auto-approve=false
 ```
 
-`axiom clob smoke` uses the active imported CLI account for signing and can inspect a second imported account via `--secondary-account`. It checks hosted projection reads plus on-chain readiness, builds a signed order locally, and in `--live` mode submits a low-impact order then cleans it up with a cancel unless `--keep-order` is set.
+`axiom clob smoke` uses the active imported CLI account for signing and can inspect a second imported account via `--secondary-account`. It checks hosted projection reads plus on-chain readiness, builds a signed order locally, and in `--live` mode auto-approves missing prerequisites, submits a low-impact order, then cleans it up with a cancel unless `--keep-order` is set.
 
 ## Hosted CLOB workflows
 
@@ -363,6 +365,7 @@ Prepare a wallet for hosted trading:
 axiom markets get clob-1
 axiom clob wallet status clob-1
 axiom clob wallet approve clob-1 --wait
+axiom clob wallet approve --collateral-token-address 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE --wait
 ```
 
 Inspect hosted books and history:
@@ -531,7 +534,7 @@ axiom clob market resolve \
 axiom clob smoke
 axiom clob smoke first-city-to-ban-private-cars-2032-1773930455346-1773930455346 --label "Paris"
 axiom clob smoke --secondary-account trader-two --live
-axiom clob smoke --live --auto-approve --wait
+axiom clob smoke --live --wait
 ```
 
 Immediately after a live cancel, the first `clob order get` can briefly return the pre-cancel projection row. Subsequent reads converge to `status: "cancelled"` and `remaining: 0`.

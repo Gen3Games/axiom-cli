@@ -2255,7 +2255,14 @@ func newClobCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return printOutput(ctx.JSON, status)
+			approvalStatus, err := buildClobApprovalStatus(status)
+			if err != nil {
+				return err
+			}
+			return printOutput(ctx.JSON, map[string]any{
+				"walletStatus":   status,
+				"approvalStatus": approvalStatus,
+			})
 		},
 	}
 	statusCmd.Flags().String("wallet", "", "Wallet address to inspect; defaults to the active profile EVM address")
@@ -2263,9 +2270,9 @@ func newClobCommand() *cobra.Command {
 	walletCmd.AddCommand(statusCmd)
 
 	approveCmd := &cobra.Command{
-		Use:   "approve <market-id-or-address>",
+		Use:   "approve [market-id-or-address]",
 		Short: "Approve collateral and outcome-token spending for the hosted CLOB exchange",
-		Args:  cobra.ExactArgs(1),
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, err := buildCLIContext()
 			if err != nil {
@@ -2275,13 +2282,6 @@ func newClobCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			market, err := loadMarketWithClobFallback(cmd.Context(), ctx, args[0], mustStringFlag(cmd, "instance-date"))
-			if err != nil {
-				return err
-			}
-			if !isClobMarketImplementation(market.MarketImplementation) {
-				return errors.New("clob wallet approve requires an AxiomCTFMarket logical market")
-			}
 
 			skipCollateral := mustBoolFlag(cmd, "skip-collateral")
 			skipOutcome := mustBoolFlag(cmd, "skip-outcome")
@@ -2289,9 +2289,25 @@ func newClobCommand() *cobra.Command {
 				return errors.New("nothing to approve: remove --skip-collateral or --skip-outcome")
 			}
 
+			var market *api.MarketDetails
+			if len(args) > 0 {
+				market, err = loadMarketWithClobFallback(cmd.Context(), ctx, args[0], mustStringFlag(cmd, "instance-date"))
+				if err != nil {
+					return err
+				}
+				if !isClobMarketImplementation(market.MarketImplementation) {
+					return errors.New("clob wallet approve requires an AxiomCTFMarket logical market when a market is provided")
+				}
+			} else if !cmd.Flags().Changed("collateral-token-address") && !skipCollateral {
+				return errors.New("clob wallet approve without a market requires --collateral-token-address unless using --skip-collateral")
+			}
+
 			exchangeAddress := resolveHexAddressOrDefault(mustStringFlag(cmd, "exchange-address"), evm.DefaultClobExchangeAddress)
 			outcomeToken := resolveHexAddressOrDefault(mustStringFlag(cmd, "outcome-token-address"), evm.DefaultClobConditionalTokens)
-			collateralToken := resolveClobCollateralToken(market)
+			collateralToken := resolveHexAddressOrDefault(mustStringFlag(cmd, "collateral-token-address"), evm.DefaultClobCollateralToken)
+			if market != nil {
+				collateralToken = resolveClobCollateralToken(market)
+			}
 			transactions := make([]map[string]any, 0, 2)
 
 			if !skipCollateral {
@@ -2313,7 +2329,7 @@ func newClobCommand() *cobra.Command {
 					"txHash":        txHash.Hex(),
 				}
 				if mustBoolFlag(cmd, "wait") {
-					receipt, waitErr := waitForReceipt(cmd.Context(), ctx.Config.EVMRPCURL, txHash)
+					receipt, waitErr := waitForTxReceipt(cmd.Context(), ctx.Config.EVMRPCURL, txHash)
 					if waitErr != nil {
 						return waitErr
 					}
@@ -2336,7 +2352,7 @@ func newClobCommand() *cobra.Command {
 					"txHash":        txHash.Hex(),
 				}
 				if mustBoolFlag(cmd, "wait") {
-					receipt, waitErr := waitForReceipt(cmd.Context(), ctx.Config.EVMRPCURL, txHash)
+					receipt, waitErr := waitForTxReceipt(cmd.Context(), ctx.Config.EVMRPCURL, txHash)
 					if waitErr != nil {
 						return waitErr
 					}
@@ -2345,15 +2361,25 @@ func newClobCommand() *cobra.Command {
 				transactions = append(transactions, entry)
 			}
 
-			return printOutput(ctx.JSON, map[string]any{
-				"market":        market.Title,
-				"marketId":      market.ID,
+			output := map[string]any{
 				"walletAddress": wallet.Address().Hex(),
 				"transactions":  transactions,
-			})
+			}
+			if market != nil {
+				output["market"] = market.Title
+				output["marketId"] = market.ID
+			}
+			if !skipCollateral {
+				output["collateralToken"] = collateralToken.Hex()
+			}
+			output["exchangeAddress"] = exchangeAddress.Hex()
+			output["outcomeToken"] = outcomeToken.Hex()
+
+			return printOutput(ctx.JSON, output)
 		},
 	}
 	approveCmd.Flags().String("collateral-amount", clobMaxUint256, "Collateral approval amount in wei; defaults to max uint256")
+	approveCmd.Flags().String("collateral-token-address", evm.DefaultClobCollateralToken, "Collateral ERC-20 token address to approve when no market is provided")
 	approveCmd.Flags().Bool("skip-collateral", false, "Skip ERC-20 collateral approval")
 	approveCmd.Flags().Bool("skip-outcome", false, "Skip ERC-1155 setApprovalForAll")
 	approveCmd.Flags().Bool("wait", false, "Wait for the approval transaction receipts")
@@ -2404,6 +2430,7 @@ func newClobCommand() *cobra.Command {
 			}
 			var marketDetails *api.MarketDetails
 			var selection *clobSelection
+			var approvalStatus map[string]any
 			if market != "" {
 				marketDetails, selection, err = resolveClobReadSelection(cmd.Context(), ctx, cmd, market)
 				if err != nil {
@@ -2411,6 +2438,16 @@ func newClobCommand() *cobra.Command {
 				}
 				filters.Set("clob_id", clobIDForMarketOutcome(marketDetails.ID, selection.Binding.OutcomeIndex, selection.DisplayedSide))
 				filters.Set("token_side", selection.DisplayedSide)
+				if maker != "" && common.IsHexAddress(maker) && !isZeroAddress(maker) {
+					status, statusErr := buildClobWalletStatus(cmd.Context(), ctx, marketDetails, common.HexToAddress(maker), selection.ExchangeAddress, selection.OutcomeToken)
+					if statusErr != nil {
+						return statusErr
+					}
+					approvalStatus, err = buildClobApprovalStatus(status)
+					if err != nil {
+						return err
+					}
+				}
 			}
 			orders, err := ctx.API.ListClobOrders(cmd.Context(), projectionURL, filters)
 			if err != nil {
@@ -2425,6 +2462,9 @@ func newClobCommand() *cobra.Command {
 			}
 			if maker != "" {
 				payload["maker"] = maker
+			}
+			if approvalStatus != nil {
+				payload["approvalStatus"] = approvalStatus
 			}
 			return printOutput(ctx.JSON, payload)
 		},
@@ -2468,6 +2508,7 @@ func newClobCommand() *cobra.Command {
 			filters := url.Values{}
 			var marketDetails *api.MarketDetails
 			var selection *clobSelection
+			var approvalStatus map[string]any
 			if market != "" {
 				marketDetails, selection, err = resolveClobReadSelection(cmd.Context(), ctx, cmd, market)
 				if err != nil {
@@ -2475,6 +2516,16 @@ func newClobCommand() *cobra.Command {
 				}
 				filters.Set("clob_id", clobIDForMarketOutcome(marketDetails.ID, selection.Binding.OutcomeIndex, selection.DisplayedSide))
 				filters.Set("token_side", selection.DisplayedSide)
+				if wallet != "" && common.IsHexAddress(wallet) && !isZeroAddress(wallet) {
+					status, statusErr := buildClobWalletStatus(cmd.Context(), ctx, marketDetails, common.HexToAddress(wallet), selection.ExchangeAddress, selection.OutcomeToken)
+					if statusErr != nil {
+						return statusErr
+					}
+					approvalStatus, err = buildClobApprovalStatus(status)
+					if err != nil {
+						return err
+					}
+				}
 			}
 			if wallet != "" {
 				filters.Set("wallet", wallet)
@@ -2495,6 +2546,9 @@ func newClobCommand() *cobra.Command {
 			}
 			if wallet != "" {
 				payload["wallet"] = wallet
+			}
+			if approvalStatus != nil {
+				payload["approvalStatus"] = approvalStatus
 			}
 			return printOutput(ctx.JSON, payload)
 		},
@@ -2583,6 +2637,15 @@ func newClobCommand() *cobra.Command {
 			}
 
 			if mustBoolFlag(cmd, "dry-run") {
+				status, err := buildClobWalletStatus(cmd.Context(), ctx, market, wallet.Address(), selection.ExchangeAddress, selection.OutcomeToken)
+				if err != nil {
+					return fmt.Errorf("load order wallet status: %w", err)
+				}
+				approvalStatus, err := buildClobApprovalStatus(status)
+				if err != nil {
+					return err
+				}
+				blocking := collectClobSmokeBlocking(status, selection, payload)
 				preview := map[string]any{
 					"market":          market.Title,
 					"marketId":        market.ID,
@@ -2601,8 +2664,14 @@ func newClobCommand() *cobra.Command {
 					"takerAmount":     payload.TakerAmount,
 					"expiration":      payload.Expiration,
 					"nonce":           payload.Nonce,
+					"blocking":        blocking,
 				}
-				return printOutput(ctx.JSON, map[string]any{"dryRun": true, "order": preview})
+				return printOutput(ctx.JSON, map[string]any{
+					"dryRun":         true,
+					"orderReady":     len(blocking) == 0,
+					"approvalStatus": approvalStatus,
+					"order":          preview,
+				})
 			}
 
 			status, err := buildClobWalletStatus(cmd.Context(), ctx, market, wallet.Address(), selection.ExchangeAddress, selection.OutcomeToken)
@@ -3269,11 +3338,16 @@ func newMMCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			approvalStatus, err := buildClobApprovalStatus(status)
+			if err != nil {
+				return err
+			}
 
 			payload, err := buildMMInventoryOutput(status)
 			if err != nil {
 				return err
 			}
+			payload["approvalStatus"] = approvalStatus
 			return printOutput(ctx.JSON, payload)
 		},
 	}
@@ -3546,6 +3620,10 @@ func newMMCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			approvalStatus, err := buildClobApprovalStatus(status)
+			if err != nil {
+				return err
+			}
 			inventory, err := buildMMInventoryOutput(status)
 			if err != nil {
 				return err
@@ -3597,19 +3675,20 @@ func newMMCommand() *cobra.Command {
 			}
 
 			payload := map[string]any{
-				"activeMarket":   buildMMMarketSelection(market, instanceDate),
-				"walletAddress":  walletAddress,
-				"marketId":       market.ID,
-				"marketTitle":    market.Title,
-				"outcomeLabel":   selection.LogicalOutcome.Label,
-				"outcomeIndex":   selection.Binding.OutcomeIndex,
-				"displayedSide":  selection.DisplayedSide,
-				"clobId":         clobID,
-				"inventory":      inventory,
-				"book":           book,
-				"depth":          depth,
-				"activeOrders":   orders,
-				"recentFills":    fills,
+				"activeMarket":     buildMMMarketSelection(market, instanceDate),
+				"walletAddress":    walletAddress,
+				"marketId":         market.ID,
+				"marketTitle":      market.Title,
+				"outcomeLabel":     selection.LogicalOutcome.Label,
+				"outcomeIndex":     selection.Binding.OutcomeIndex,
+				"displayedSide":    selection.DisplayedSide,
+				"clobId":           clobID,
+				"approvalStatus":   approvalStatus,
+				"inventory":        inventory,
+				"book":             book,
+				"depth":            depth,
+				"activeOrders":     orders,
+				"recentFills":      fills,
 				"activeOrderCount": len(orders),
 				"recentFillCount":  len(fills),
 			}
@@ -3670,6 +3749,21 @@ func newMMCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			status, err := buildClobWalletStatus(
+				cmd.Context(),
+				ctx,
+				market,
+				common.HexToAddress(walletAddress),
+				selection.ExchangeAddress,
+				selection.OutcomeToken,
+			)
+			if err != nil {
+				return err
+			}
+			approvalStatus, err := buildClobApprovalStatus(status)
+			if err != nil {
+				return err
+			}
 
 			filters := url.Values{}
 			filters.Set("maker", walletAddress)
@@ -3689,16 +3783,17 @@ func newMMCommand() *cobra.Command {
 			}
 
 			return printOutput(ctx.JSON, map[string]any{
-				"activeMarket":  buildMMMarketSelection(market, instanceDate),
-				"walletAddress": walletAddress,
-				"marketId":      market.ID,
-				"marketTitle":   market.Title,
-				"outcomeLabel":  selection.LogicalOutcome.Label,
-				"outcomeIndex":  selection.Binding.OutcomeIndex,
-				"displayedSide": selection.DisplayedSide,
-				"clobId":        clobIDForMarketOutcome(market.ID, selection.Binding.OutcomeIndex, selection.DisplayedSide),
-				"items":         orders,
-				"total":         len(orders),
+				"activeMarket":   buildMMMarketSelection(market, instanceDate),
+				"walletAddress":  walletAddress,
+				"marketId":       market.ID,
+				"marketTitle":    market.Title,
+				"outcomeLabel":   selection.LogicalOutcome.Label,
+				"outcomeIndex":   selection.Binding.OutcomeIndex,
+				"displayedSide":  selection.DisplayedSide,
+				"clobId":         clobIDForMarketOutcome(market.ID, selection.Binding.OutcomeIndex, selection.DisplayedSide),
+				"approvalStatus": approvalStatus,
+				"items":          orders,
+				"total":          len(orders),
 			})
 		},
 	}
@@ -3818,6 +3913,21 @@ func newMMCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			status, err := buildClobWalletStatus(
+				cmd.Context(),
+				ctx,
+				market,
+				common.HexToAddress(walletAddress),
+				selection.ExchangeAddress,
+				selection.OutcomeToken,
+			)
+			if err != nil {
+				return err
+			}
+			approvalStatus, err := buildClobApprovalStatus(status)
+			if err != nil {
+				return err
+			}
 
 			filters := url.Values{}
 			filters.Set("wallet", walletAddress)
@@ -3836,16 +3946,17 @@ func newMMCommand() *cobra.Command {
 			}
 
 			return printOutput(ctx.JSON, map[string]any{
-				"activeMarket":  buildMMMarketSelection(market, instanceDate),
-				"walletAddress": walletAddress,
-				"marketId":      market.ID,
-				"marketTitle":   market.Title,
-				"outcomeLabel":  selection.LogicalOutcome.Label,
-				"outcomeIndex":  selection.Binding.OutcomeIndex,
-				"displayedSide": selection.DisplayedSide,
-				"clobId":        clobIDForMarketOutcome(market.ID, selection.Binding.OutcomeIndex, selection.DisplayedSide),
-				"items":         fills,
-				"total":         len(fills),
+				"activeMarket":   buildMMMarketSelection(market, instanceDate),
+				"walletAddress":  walletAddress,
+				"marketId":       market.ID,
+				"marketTitle":    market.Title,
+				"outcomeLabel":   selection.LogicalOutcome.Label,
+				"outcomeIndex":   selection.Binding.OutcomeIndex,
+				"displayedSide":  selection.DisplayedSide,
+				"clobId":         clobIDForMarketOutcome(market.ID, selection.Binding.OutcomeIndex, selection.DisplayedSide),
+				"approvalStatus": approvalStatus,
+				"items":          fills,
+				"total":          len(fills),
 			})
 		},
 	}

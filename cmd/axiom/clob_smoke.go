@@ -87,13 +87,16 @@ func newClobSmokeCommand() *cobra.Command {
 
 			side := strings.ToLower(strings.TrimSpace(mustStringFlag(cmd, "side")))
 			orderType := strings.ToLower(strings.TrimSpace(mustStringFlag(cmd, "type")))
-			quantity, err := parseClobQuantity(firstNonEmpty(strings.TrimSpace(mustStringFlag(cmd, "quantity")), "1"))
+			quantityProvided := cmd.Flags().Changed("quantity")
+			quantityRaw := strings.TrimSpace(mustStringFlag(cmd, "quantity"))
+			quantity, err := parseClobQuantity(firstNonEmpty(quantityRaw, "1"))
 			if err != nil {
 				return err
 			}
+			priceRaw := strings.TrimSpace(mustStringFlag(cmd, "price"))
 			priceBps := 0
 			if orderType != "market" {
-				priceBps, err = parseClobPriceToBps(firstNonEmpty(strings.TrimSpace(mustStringFlag(cmd, "price")), "1"))
+				priceBps, err = parseClobPriceToBps(firstNonEmpty(priceRaw, "1"))
 				if err != nil {
 					return err
 				}
@@ -116,6 +119,36 @@ func newClobSmokeCommand() *cobra.Command {
 			)
 			if err != nil {
 				return err
+			}
+			autoAdjusted := false
+			if orderType == "limit" && !quantityProvided {
+				adjustedQuantity, adjusted, adjustErr := adjustClobSmokeQuantityForSettlement(payload, quantity)
+				if adjustErr != nil {
+					return adjustErr
+				}
+				if adjusted {
+					quantity = adjustedQuantity
+					autoAdjusted = true
+					payload, err = buildClobSignedOrder(
+						primaryWallet,
+						market.ID,
+						selection,
+						side,
+						orderType,
+						priceBps,
+						quantity,
+						mustStringFlag(cmd, "expiry"),
+						signingDomain,
+					)
+					if err != nil {
+						return err
+					}
+				}
+			}
+			if orderType == "limit" {
+				if err := validateClobSettleableQuantity(payload); err != nil {
+					return err
+				}
 			}
 
 			result := map[string]any{
@@ -140,18 +173,19 @@ func newClobSmokeCommand() *cobra.Command {
 					Blocking: collectClobSmokeBlocking(primaryStatus, selection, payload),
 				},
 				"order": map[string]any{
-					"side":            side,
-					"orderType":       orderType,
-					"priceBps":        priceBps,
-					"quantity":        quantity,
-					"maker":           payload.Maker,
-					"makerAmount":     payload.MakerAmount,
-					"takerAmount":     payload.TakerAmount,
-					"expiration":      payload.Expiration,
-					"nonce":           payload.Nonce,
-					"collateralToken": payload.CollateralToken,
-					"outcomeToken":    payload.OutcomeToken,
-					"outcomeTokenId":  payload.OutcomeTokenID,
+					"autoAdjustedQuantity": autoAdjusted,
+					"side":                 side,
+					"orderType":            orderType,
+					"priceBps":             priceBps,
+					"quantity":             quantity,
+					"maker":                payload.Maker,
+					"makerAmount":          payload.MakerAmount,
+					"takerAmount":          payload.TakerAmount,
+					"expiration":           payload.Expiration,
+					"nonce":                payload.Nonce,
+					"collateralToken":      payload.CollateralToken,
+					"outcomeToken":         payload.OutcomeToken,
+					"outcomeTokenId":       payload.OutcomeTokenID,
 				},
 			}
 
@@ -398,10 +432,31 @@ func clobSmokeDisplayedSideBalance(status *clobWalletStatus, outcomeIndex int, d
 }
 
 func ensureClobSmokeApprovals(cmd *cobra.Command, ctx *cliContext, privateKeyHex string, walletAddress common.Address, status *clobWalletStatus, selection *clobSelection, payload api.ClobSignedOrderPayload) ([]map[string]any, error) {
-	if !mustBoolFlag(cmd, "auto-approve") {
+	if !clobSmokeAutoApproveEnabled(cmd) {
 		return nil, nil
 	}
 	return ensureClobOrderApprovals(cmd.Context(), ctx.Config.EVMRPCURL, privateKeyHex, walletAddress, status, selection, payload, mustBoolFlag(cmd, "wait"))
+}
+
+func clobSmokeAutoApproveEnabled(cmd *cobra.Command) bool {
+	if cmd == nil || cmd.Flags() == nil {
+		return true
+	}
+	if cmd.Flags().Changed("auto-approve") {
+		return mustBoolFlag(cmd, "auto-approve")
+	}
+	return true
+}
+
+func adjustClobSmokeQuantityForSettlement(payload api.ClobSignedOrderPayload, requestedQuantity int) (int, bool, error) {
+	minShares, err := clobMinSettleableShares(payload)
+	if err != nil {
+		return 0, false, err
+	}
+	if requestedQuantity >= minShares {
+		return requestedQuantity, false, nil
+	}
+	return minShares, true, nil
 }
 
 func ensureClobOrderApprovals(

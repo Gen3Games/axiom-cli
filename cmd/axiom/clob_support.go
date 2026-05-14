@@ -266,6 +266,36 @@ type clobSplitStatusSummary struct {
 	MergeApprovalRequired bool
 }
 
+func buildClobApprovalStatus(status *clobWalletStatus) (map[string]any, error) {
+	if status == nil {
+		return nil, errors.New("wallet status is required")
+	}
+
+	collateralBalance, err := evm.ParseBigInt(status.CollateralBalanceWei)
+	if err != nil {
+		return nil, fmt.Errorf("parse collateral balance: %w", err)
+	}
+	collateralAllowance, err := evm.ParseBigInt(status.CollateralAllowanceWei)
+	if err != nil {
+		return nil, fmt.Errorf("parse collateral allowance: %w", err)
+	}
+
+	return map[string]any{
+		"exchangeAddress":        status.ExchangeAddress,
+		"collateralToken":        status.CollateralToken,
+		"collateralBalanceWei":   collateralBalance.String(),
+		"collateralBalanceXrp":   formatWeiToXRP(collateralBalance),
+		"collateralAllowanceWei": collateralAllowance.String(),
+		"collateralAllowanceXrp": formatWeiToXRP(collateralAllowance),
+		"outcomeToken":           status.OutcomeToken,
+		"outcomeApprovalForAll":  status.OutcomeApprovalForAll,
+		"ready": map[string]any{
+			"collateralApproval": collateralAllowance.Sign() > 0,
+			"outcomeApproval":    status.OutcomeApprovalForAll,
+		},
+	}, nil
+}
+
 func parseClobPriceToBps(value string) (int, error) {
 	parsed, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
 	if err != nil {

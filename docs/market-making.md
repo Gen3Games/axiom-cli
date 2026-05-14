@@ -418,7 +418,7 @@ quote is not ready: bid: order quantity too small for on-chain settlement: quant
 
 #### Live auto-approval
 
-Unlike `clob smoke`, live `mm quote` auto-approves missing prerequisites without requiring a separate `--auto-approve` flag.
+Like live `clob smoke`, live `mm quote` auto-approves missing prerequisites by default.
 
 It can submit:
 
@@ -737,7 +737,7 @@ Use `axiom clob` when you want:
 Relevant lower-level commands:
 
 - `axiom clob wallet status`
-- `axiom clob wallet approve`
+- `axiom clob wallet approve` (market optional when you already know the collateral token or only need ERC-1155 `setApprovalForAll`)
 - `axiom clob book depth`
 - `axiom clob order place`
 - `axiom clob orders list`
