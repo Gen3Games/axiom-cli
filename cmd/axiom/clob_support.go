@@ -1333,56 +1333,22 @@ func buildClobOrderAmounts(side string, priceBps int, quantity int) (*big.Int, *
 	return makerAmount, takerAmount
 }
 
-func clobMinSettleableShares(payload api.ClobSignedOrderPayload) (int, error) {
-	makerAmount, err := evm.ParseBigInt(payload.MakerAmount)
-	if err != nil {
-		return 0, fmt.Errorf("parse maker amount: %w", err)
-	}
-	takerAmount, err := evm.ParseBigInt(payload.TakerAmount)
-	if err != nil {
-		return 0, fmt.Errorf("parse taker amount: %w", err)
-	}
-	if makerAmount.Sign() <= 0 || takerAmount.Sign() <= 0 {
-		return 1, nil
-	}
-
-	one := big.NewInt(1)
-	var minShares *big.Int
-	if payload.Side == clobOrderSideValue["buy"] {
-		minShares = new(big.Int).Add(
-			new(big.Int).Div(new(big.Int).Sub(takerAmount, one), makerAmount),
-			one,
-		)
-	} else {
-		minShares = new(big.Int).Add(
-			new(big.Int).Div(new(big.Int).Sub(makerAmount, one), takerAmount),
-			one,
-		)
-	}
-	if !minShares.IsInt64() || minShares.Int64() <= 0 {
-		return 1, nil
-	}
-	if minShares.Int64() > int64(^uint(0)>>1) {
-		return 0, errors.New("minimum settleable quantity exceeds supported CLI integer range")
-	}
-	return int(minShares.Int64()), nil
+// clobMinSettleableShares returns the minimum number of shares that settles
+// on-chain. With ceiling rounding in Math.mulDiv, any qty >= 1 works.
+func clobMinSettleableShares(_ api.ClobSignedOrderPayload) (int, error) {
+	return 1, nil
 }
 
+// validateClobSettleableQuantity checks that the order has a non-zero quantity.
+// The on-chain exchange uses Math.mulDiv with Rounding.Ceil, so any qty >= 1
+// produces a valid fill amount.
 func validateClobSettleableQuantity(payload api.ClobSignedOrderPayload) error {
-	minShares, err := clobMinSettleableShares(payload)
-	if err != nil {
-		return err
-	}
 	derivedQuantity, err := clobPayloadQuantity(payload)
 	if err != nil {
 		return err
 	}
-	if derivedQuantity < minShares {
-		priceBps, priceErr := clobPayloadPriceBps(payload)
-		if priceErr != nil {
-			return priceErr
-		}
-		return fmt.Errorf("order quantity too small for on-chain settlement: quantity %d at price %d bps, minimum is %d shares", derivedQuantity, priceBps, minShares)
+	if derivedQuantity < 1 {
+		return fmt.Errorf("order quantity too small for on-chain settlement: quantity must be at least 1")
 	}
 	return nil
 }
