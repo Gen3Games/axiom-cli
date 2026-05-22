@@ -684,11 +684,12 @@ func TestClobSmokeDryRunUsesImportedAccount(t *testing.T) {
 	if !strings.Contains(stdout, "0x00000000000000000000000000000000000000C1") {
 		t.Fatalf("clob smoke dry-run stdout missing binding address\nstdout:\n%s", stdout)
 	}
-	if !strings.Contains(stdout, "\"autoAdjustedQuantity\": true") {
-		t.Fatalf("clob smoke dry-run stdout missing auto-adjusted quantity flag\nstdout:\n%s", stdout)
+	// With relaxed settlement checks (min qty = 1), no auto-adjustment needed.
+	if !strings.Contains(stdout, "\"autoAdjustedQuantity\": false") {
+		t.Fatalf("clob smoke dry-run stdout should show no auto-adjustment\nstdout:\n%s", stdout)
 	}
-	if !strings.Contains(stdout, "\"quantity\": 100") {
-		t.Fatalf("clob smoke dry-run stdout missing adjusted settleable quantity\nstdout:\n%s", stdout)
+	if !strings.Contains(stdout, "\"quantity\": 1") {
+		t.Fatalf("clob smoke dry-run stdout missing quantity\nstdout:\n%s", stdout)
 	}
 }
 
@@ -1648,8 +1649,8 @@ func TestClobSmokeLiveSubmitsAndCancelsOrder(t *testing.T) {
 			t.Fatalf("clob smoke live stdout missing %q\nstdout:\n%s", want, stdout)
 		}
 	}
-	if !strings.Contains(stdout, "\"autoAdjustedQuantity\": true") {
-		t.Fatalf("clob smoke live stdout missing auto-adjusted quantity flag\nstdout:\n%s", stdout)
+	if !strings.Contains(stdout, "\"autoAdjustedQuantity\": false") {
+		t.Fatalf("clob smoke live stdout should show no auto-adjustment\nstdout:\n%s", stdout)
 	}
 	if !strings.Contains(stdout, "\"orderId\": \"order-1\"") {
 		t.Fatalf("clob smoke live stdout missing order id\nstdout:\n%s", stdout)
@@ -1784,7 +1785,11 @@ func TestClobOrdersListResolvesSingleBindingDisplayedNoSide(t *testing.T) {
 	}
 }
 
-func TestClobOrderPlaceRejectsUnsettlableTinyLimitOrder(t *testing.T) {
+func TestClobOrderPlaceAcceptsSmallLimitOrder(t *testing.T) {
+	// With relaxed on-chain settlement checks, qty 1 at 4500 bps should no
+	// longer be rejected for settlement reasons. The command may fail for other
+	// reasons (e.g. insufficient funds on-chain), but the settlement preflight
+	// should pass.
 	setCLIEnv(t)
 	server, _ := newMockAPIServer(t)
 	defer server.Close()
@@ -1794,7 +1799,7 @@ func TestClobOrderPlaceRejectsUnsettlableTinyLimitOrder(t *testing.T) {
 		t.Fatalf("wallet import error = %v\nstderr:\n%s", err, stderr)
 	}
 
-	_, stderr, err := executeCLI(
+	_, _, err := executeCLI(
 		t,
 		"--json",
 		"--api-url", server.URL+"/api/cli",
@@ -1808,11 +1813,9 @@ func TestClobOrderPlaceRejectsUnsettlableTinyLimitOrder(t *testing.T) {
 		"--price", "45",
 		"--quantity", "1",
 	)
-	if err == nil {
-		t.Fatal("clob order place error = nil, want minimum-size rejection")
-	}
-	if !strings.Contains(err.Error(), "order quantity too small for on-chain settlement: quantity 1 at price 4500 bps, minimum is 3 shares") {
-		t.Fatalf("clob order place error = %q\nstderr:\n%s", err.Error(), stderr)
+	// Should NOT fail with "order quantity too small" anymore.
+	if err != nil && strings.Contains(err.Error(), "order quantity too small") {
+		t.Fatalf("clob order place should not reject qty 1 for settlement, got: %v", err)
 	}
 }
 
@@ -2359,7 +2362,7 @@ func TestMMQuoteDryRunBuildsTwoSidedPreview(t *testing.T) {
 	}
 }
 
-func TestMMQuoteDryRunShowsMinimumSettleableBlocker(t *testing.T) {
+func TestMMQuoteDryRunAcceptsSmallQuantity(t *testing.T) {
 	setCLIEnv(t)
 	server, _ := newMockAPIServer(t)
 	defer server.Close()
@@ -2410,13 +2413,11 @@ func TestMMQuoteDryRunShowsMinimumSettleableBlocker(t *testing.T) {
 		"--dry-run",
 	)
 	if err != nil {
-		t.Fatalf("mm quote dry-run settleable blocker error = %v\nstderr:\n%s", err, stderr)
+		t.Fatalf("mm quote dry-run small qty error = %v\nstderr:\n%s", err, stderr)
 	}
-	if !strings.Contains(stdout, "order quantity too small for on-chain settlement: quantity 1 at price 4500 bps, minimum is 3 shares") {
-		t.Fatalf("mm quote dry-run stdout missing settleable blocker\nstdout:\n%s", stdout)
-	}
-	if !strings.Contains(stdout, "\"quoteReady\": false") {
-		t.Fatalf("mm quote dry-run stdout missing quoteReady false\nstdout:\n%s", stdout)
+	// With relaxed settlement checks, qty 1 at 45/55 bps should be accepted.
+	if !strings.Contains(stdout, "\"quoteReady\": true") {
+		t.Fatalf("mm quote dry-run should accept qty 1, got:\n%s", stdout)
 	}
 }
 

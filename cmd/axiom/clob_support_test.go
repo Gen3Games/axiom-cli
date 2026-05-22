@@ -73,19 +73,17 @@ func TestBuildClobOrderAmountsMarketOrder(t *testing.T) {
 	}
 }
 
-func TestValidateClobSettleableQuantityRejectsTinyLimitBuy(t *testing.T) {
+func TestValidateClobSettleableQuantityAcceptsSmallLimitBuy(t *testing.T) {
+	// Quantity 1 at 4500 bps should be accepted — on-chain Math.mulDiv with
+	// ceiling rounding guarantees a non-zero result for any non-zero inputs.
 	payload := api.ClobSignedOrderPayload{
 		Side:        clobOrderSideValue["buy"],
 		MakerAmount: "450000000000000000",
 		TakerAmount: "1000000000000000000",
 	}
 
-	err := validateClobSettleableQuantity(payload)
-	if err == nil {
-		t.Fatal("validateClobSettleableQuantity() error = nil, want minimum-size rejection")
-	}
-	if err.Error() != "order quantity too small for on-chain settlement: quantity 1 at price 4500 bps, minimum is 3 shares" {
-		t.Fatalf("validateClobSettleableQuantity() error = %q", err.Error())
+	if err := validateClobSettleableQuantity(payload); err != nil {
+		t.Fatalf("validateClobSettleableQuantity() error = %v, want nil", err)
 	}
 }
 
