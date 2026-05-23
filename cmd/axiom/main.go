@@ -4304,15 +4304,18 @@ func newMMCommand() *cobra.Command {
 				OutcomeLabel    string `json:"outcomeLabel"`
 				TokenSide       string `json:"tokenSide"`
 				OrderCount      int    `json:"orderCount"`
+				HasInventory    bool   `json:"hasInventory"`
 				Error           string `json:"error,omitempty"`
 			}
 
 			seen := make(map[string]*discoveredMarket)
+			marketIDsFromOrders := make(map[string]struct{})
 			for _, order := range allOrders {
 				marketID, _, tokenSide, parseErr := parseClobOrderIdentity(order)
 				if parseErr != nil {
 					continue
 				}
+				marketIDsFromOrders[marketID] = struct{}{}
 				key := marketID + "|" + tokenSide
 				if existing, ok := seen[key]; ok {
 					existing.OrderCount++
@@ -4343,6 +4346,40 @@ func newMMCommand() *cobra.Command {
 							m.ContractAddress = addr
 						} else if addr, ok := addrByID[strings.ToLower(m.MarketID)]; ok {
 							m.ContractAddress = addr
+						}
+					}
+
+					for _, item := range resolved.Items {
+						itemMarketID := strings.TrimSpace(item.ID)
+						if _, hasOrders := marketIDsFromOrders[itemMarketID]; hasOrders {
+							continue
+						}
+						ca := strings.TrimSpace(item.ContractAddress)
+						if ca == "" || !common.IsHexAddress(ca) {
+							continue
+						}
+
+						market, loadErr := loadMMMarket(cmd.Context(), ctx, ca, "")
+						if loadErr != nil {
+							continue
+						}
+
+						legs, planErr := buildClobRedemptionPlan(cmd.Context(), ctx, market, wallet.Address())
+						if planErr != nil || len(legs) == 0 {
+							continue
+						}
+
+						key := itemMarketID + "|" + "yes"
+						if _, exists := seen[key]; !exists {
+							seen[key] = &discoveredMarket{
+								MarketID:        itemMarketID,
+								ContractAddress: ca,
+								ClobID:          itemMarketID + "-0-yes",
+								OutcomeLabel:    "Yes",
+								TokenSide:       "yes",
+								OrderCount:      0,
+								HasInventory:    true,
+							}
 						}
 					}
 				}
