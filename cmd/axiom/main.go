@@ -2480,6 +2480,70 @@ func newClobCommand() *cobra.Command {
 	ordersListCmd.Flags().Int("limit", 20, "Maximum number of orders to return")
 	ordersListCmd.Flags().String("instance-date", "", "Instance date for recurring markets in YYYY-MM-DD format")
 	ordersCmd.AddCommand(ordersListCmd)
+
+	ordersCancelCmd := &cobra.Command{
+		Use:   "cancel --order-id <id> --market <id>",
+		Short: "Cancel a hosted resting CLOB order using the requester wallet signature",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+			wallet, _, err := requireEVMWalletWithKey(ctx)
+			if err != nil {
+				return err
+			}
+			orderID := strings.TrimSpace(mustStringFlag(cmd, "order-id"))
+			market := strings.TrimSpace(mustStringFlag(cmd, "market"))
+			requester := strings.TrimSpace(mustStringFlag(cmd, "requester"))
+			if orderID == "" {
+				return errors.New("--order-id is required")
+			}
+			if market == "" {
+				return errors.New("--market is required")
+			}
+			if requester == "" {
+				requester = strings.TrimSpace(ctx.Profile.EVMAddress)
+			}
+			if requester == "" {
+				return errors.New("--requester is required when the active profile does not have an EVM wallet configured")
+			}
+			order, err := ctx.API.GetClobOrder(cmd.Context(), strings.TrimSpace(mustStringFlag(cmd, "projection-url")), orderID)
+			if err != nil {
+				return err
+			}
+			if requester != "" && !strings.EqualFold(strings.TrimSpace(order.Maker), requester) {
+				return errors.New("requester must match the order maker")
+			}
+			marketDetails, selection, err := resolveClobReadSelection(cmd.Context(), ctx, cmd, market)
+			if err != nil {
+				return err
+			}
+			reason := strings.TrimSpace(mustStringFlag(cmd, "reason"))
+			eventstoreURL := strings.TrimSpace(mustStringFlag(cmd, "eventstore-url"))
+			signingDomain, err := resolveClobSigningDomain(cmd)
+			if err != nil {
+				return err
+			}
+			cancelRequest, err := buildSignedClobCancel(wallet, signingDomain, orderID, marketDetails.ID, selection.Binding.OutcomeIndex, order.TokenSide, requester, reason)
+			if err != nil {
+				return err
+			}
+			response, err := ctx.API.CancelClobOrder(cmd.Context(), eventstoreURL, orderID, cancelRequest)
+			if err != nil {
+				return err
+			}
+			return printOutput(ctx.JSON, response)
+		},
+	}
+	ordersCancelCmd.Flags().String("order-id", "", "Order UUID to cancel")
+	ordersCancelCmd.Flags().String("market", "", "Logical market ID for the order book")
+	ordersCancelCmd.Flags().Int("outcome", 0, "Displayed outcome index within the logical market")
+	ordersCancelCmd.Flags().String("label", "", "Displayed outcome label within the logical market")
+	ordersCancelCmd.Flags().String("requester", "", "Requester wallet address; defaults to the active profile EVM address")
+	ordersCancelCmd.Flags().String("reason", "user-requested", "Optional cancellation reason")
+	ordersCancelCmd.Flags().String("instance-date", "", "Instance date for recurring markets in YYYY-MM-DD format")
+	ordersCmd.AddCommand(ordersCancelCmd)
 	cmd.AddCommand(ordersCmd)
 
 	fillsCmd := &cobra.Command{Use: "fills", Short: "Inspect hosted CLOB fills"}
@@ -4026,6 +4090,37 @@ func newMMCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+
+			if mustBoolFlag(cmd, "cancel-active") {
+				cancelReason := strings.TrimSpace(mustStringFlag(cmd, "cancel-reason"))
+				if cancelReason == "" {
+					cancelReason = "market-maker-quote-replace"
+				}
+				eventstoreURL := strings.TrimSpace(mustStringFlag(cmd, "eventstore-url"))
+				projectionURL := strings.TrimSpace(mustStringFlag(cmd, "projection-url"))
+				filters := url.Values{}
+				filters.Set("maker", wallet.Address().Hex())
+				filters.Set("active_only", "true")
+				filters.Set("clob_id", clobIDForMarketOutcome(market.ID, selection.Binding.OutcomeIndex, selection.DisplayedSide))
+				existingOrders, listErr := ctx.API.ListClobOrders(cmd.Context(), projectionURL, filters)
+				if listErr != nil {
+					return fmt.Errorf("list existing orders before cancel-active: %w", listErr)
+				}
+				for _, order := range existingOrders {
+					_, existingOutcomeIndex, existingTokenSide, parseErr := parseClobOrderIdentity(order)
+					if parseErr != nil {
+						continue
+					}
+					cancelRequest, cancelErr := buildSignedClobCancel(wallet, signingDomain, order.OrderID, market.ID, existingOutcomeIndex, existingTokenSide, wallet.Address().Hex(), cancelReason)
+					if cancelErr != nil {
+						continue
+					}
+					if _, cancelErr = ctx.API.CancelClobOrder(cmd.Context(), eventstoreURL, order.OrderID, cancelRequest); cancelErr != nil {
+						continue
+					}
+				}
+			}
+
 			expiry := mustStringFlag(cmd, "expiry")
 			bidPayload, err := buildClobSignedOrder(wallet, market.ID, selection, "buy", "limit", bidPriceBps, quantity, expiry, signingDomain)
 			if err != nil {
@@ -4173,6 +4268,8 @@ func newMMCommand() *cobra.Command {
 	quoteCmd.Flags().String("quantity", "", "Whole-number share quantity to post on both sides")
 	quoteCmd.Flags().String("expiry", "24h", "Expiry preset for both resting quotes: 1h, 24h, 7d, never")
 	quoteCmd.Flags().Bool("dry-run", false, "Build both signed quotes locally and report readiness without submitting them")
+	quoteCmd.Flags().Bool("cancel-active", false, "Cancel existing resting orders on this book before placing new quotes")
+	quoteCmd.Flags().String("cancel-reason", "market-maker-quote-replace", "Cancellation reason recorded when --cancel-active removes prior orders")
 	quoteCmd.Flags().String("instance-date", "", "Instance date for recurring markets in YYYY-MM-DD format")
 	cmd.AddCommand(quoteCmd)
 
