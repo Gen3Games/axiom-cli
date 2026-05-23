@@ -4273,6 +4273,98 @@ func newMMCommand() *cobra.Command {
 	quoteCmd.Flags().String("instance-date", "", "Instance date for recurring markets in YYYY-MM-DD format")
 	cmd.AddCommand(quoteCmd)
 
+	discoverCmd := &cobra.Command{
+		Use:   "discover",
+		Short: "Discover all active markets where the wallet has inventory or resting orders",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx, err := buildCLIContext()
+			if err != nil {
+				return err
+			}
+			wallet, err := requireEVMWallet(ctx)
+			if err != nil {
+				return err
+			}
+			walletAddr := wallet.Address().Hex()
+
+			projectionURL := strings.TrimSpace(mustStringFlag(cmd, "projection-url"))
+			filters := url.Values{}
+			filters.Set("maker", walletAddr)
+			filters.Set("active_only", "true")
+			filters.Set("limit", "200")
+			allOrders, err := ctx.API.ListClobOrders(cmd.Context(), projectionURL, filters)
+			if err != nil {
+				return fmt.Errorf("list active orders: %w", err)
+			}
+
+			type discoveredMarket struct {
+				MarketID        string `json:"marketId"`
+				ContractAddress string `json:"contractAddress"`
+				ClobID          string `json:"clobId"`
+				OutcomeLabel    string `json:"outcomeLabel"`
+				TokenSide       string `json:"tokenSide"`
+				OrderCount      int    `json:"orderCount"`
+				Error           string `json:"error,omitempty"`
+			}
+
+			seen := make(map[string]*discoveredMarket)
+			for _, order := range allOrders {
+				marketID, _, tokenSide, parseErr := parseClobOrderIdentity(order)
+				if parseErr != nil {
+					continue
+				}
+				key := marketID + "|" + tokenSide
+				if existing, ok := seen[key]; ok {
+					existing.OrderCount++
+				} else {
+					seen[key] = &discoveredMarket{
+						MarketID:     marketID,
+						ClobID:       order.ClobID,
+						OutcomeLabel: "Yes",
+						TokenSide:    tokenSide,
+						OrderCount:   1,
+					}
+				}
+			}
+
+			includeInventory := mustBoolFlag(cmd, "inventory")
+			if includeInventory {
+				resolved, resolveErr := ctx.ConsoleAPI.ListAllMarkets(cmd.Context(), "open", "", "", "AxiomCTFMarket", false, 0)
+				if resolveErr == nil {
+					addrByID := make(map[string]string, len(resolved.Items))
+					for _, item := range resolved.Items {
+						if ca := strings.TrimSpace(item.ContractAddress); ca != "" {
+							addrByID[strings.TrimSpace(item.ID)] = ca
+							addrByID[strings.ToLower(strings.TrimSpace(item.ContractAddress))] = ca
+						}
+					}
+					for _, m := range seen {
+						if addr, ok := addrByID[m.MarketID]; ok {
+							m.ContractAddress = addr
+						} else if addr, ok := addrByID[strings.ToLower(m.MarketID)]; ok {
+							m.ContractAddress = addr
+						}
+					}
+				}
+			}
+
+			markets := make([]discoveredMarket, 0, len(seen))
+			for _, m := range seen {
+				markets = append(markets, *m)
+			}
+
+			return printOutput(ctx.JSON, map[string]any{
+				"walletAddress": walletAddr,
+				"totalMarkets":  len(markets),
+				"totalOrders":   len(allOrders),
+				"markets":       markets,
+			})
+		},
+	}
+	discoverCmd.Flags().String("instance-date", "", "Instance date for recurring markets in YYYY-MM-DD format")
+	discoverCmd.Flags().Bool("inventory", true, "Include contract address lookup for discovered markets")
+	cmd.AddCommand(discoverCmd)
+
 	return cmd
 }
 
