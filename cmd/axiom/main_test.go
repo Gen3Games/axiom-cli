@@ -80,6 +80,7 @@ func TestCommandHelpSmoke(t *testing.T) {
 		{args: []string{"mm", "book", "--help"}, want: "Fetch the hosted book summary and depth for one exact MM book"},
 		{args: []string{"mm", "fills", "--help"}, want: "List recent MM fills for one exact hosted CLOB book"},
 		{args: []string{"mm", "quote", "--help"}, want: "Place a two-sided market-making quote on one hosted CLOB book"},
+		{args: []string{"mm", "ladder-quote", "--help"}, want: "Place a multi-level two-sided market-making quote ladder on one hosted CLOB book"},
 		{args: []string{"mm", "cancel-all", "--help"}, want: "Cancel active hosted CLOB orders for the active market-making wallet"},
 		{args: []string{"clob", "market", "create", "--help"}, want: "Deploy a single binary AxiomCTFMarket via MarketFactory.createMarket(...)"},
 		{args: []string{"clob", "market", "resolve", "--help"}, want: "Resolve a deployed binary AxiomCTFMarket with an explicit payout vector"},
@@ -2484,6 +2485,148 @@ func TestMMQuoteSubmitsBidAndAskOrders(t *testing.T) {
 	}
 	if len(state.clobOrders) != 2 {
 		t.Fatalf("clobOrders = %d, want 2", len(state.clobOrders))
+	}
+}
+
+func TestMMLadderQuoteDryRunBuildsMultipleLevels(t *testing.T) {
+	setCLIEnv(t)
+	server, _ := newMockAPIServer(t)
+	defer server.Close()
+
+	privateKey := "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+	if _, stderr, err := executeCLI(t, "--json", "wallet", "import", "--private-key", privateKey); err != nil {
+		t.Fatalf("wallet import error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	originalGetERC20Balance := getERC20Balance
+	originalGetERC20Allowance := getERC20Allowance
+	originalIsERC1155ApprovedForAll := isERC1155ApprovedForAll
+	originalGetERC1155Balance := getERC1155Balance
+	getERC20Balance = func(_ context.Context, _ string, _ common.Address, _ common.Address) (*big.Int, error) {
+		return testBigInt("10000000000000000000"), nil
+	}
+	getERC20Allowance = func(_ context.Context, _ string, _ common.Address, _ common.Address, _ common.Address) (*big.Int, error) {
+		return testBigInt("10000000000000000000"), nil
+	}
+	isERC1155ApprovedForAll = func(_ context.Context, _ string, _ common.Address, _ common.Address, _ common.Address) (bool, error) {
+		return true, nil
+	}
+	getERC1155Balance = func(_ context.Context, _ string, _ common.Address, _ common.Address, _ *big.Int) (*big.Int, error) {
+		return testBigInt("10000000000000000000"), nil
+	}
+	t.Cleanup(func() {
+		getERC20Balance = originalGetERC20Balance
+		getERC20Allowance = originalGetERC20Allowance
+		isERC1155ApprovedForAll = originalIsERC1155ApprovedForAll
+		getERC1155Balance = originalGetERC1155Balance
+	})
+
+	stdout, stderr, err := executeCLI(
+		t,
+		"--json",
+		"--api-url", server.URL+"/api/cli",
+		"--console-api-url", server.URL+"/api/cli",
+		"mm",
+		"ladder-quote",
+		"clob-1",
+		"--label", "Yes",
+		"--level", "45,55,1",
+		"--level", "40,60,2",
+		"--dry-run",
+	)
+	if err != nil {
+		t.Fatalf("mm ladder-quote dry-run error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+		t.Fatalf("json.Unmarshal(stdout) error = %v\nstdout:\n%s", err, stdout)
+	}
+	if payload["quoteReady"] != true {
+		t.Fatalf("quoteReady = %#v, want true", payload["quoteReady"])
+	}
+	levels, ok := payload["levels"].([]any)
+	if !ok {
+		t.Fatalf("levels = %#v, want array", payload["levels"])
+	}
+	if len(levels) != 2 {
+		t.Fatalf("len(levels) = %d, want 2", len(levels))
+	}
+	first, ok := levels[0].(map[string]any)
+	if !ok {
+		t.Fatalf("first level = %#v, want object", levels[0])
+	}
+	if first["quantity"] != float64(1) {
+		t.Fatalf("first quantity = %#v, want 1", first["quantity"])
+	}
+	second, ok := levels[1].(map[string]any)
+	if !ok {
+		t.Fatalf("second level = %#v, want object", levels[1])
+	}
+	if second["quantity"] != float64(2) {
+		t.Fatalf("second quantity = %#v, want 2", second["quantity"])
+	}
+}
+
+func TestMMLadderQuoteSubmitsAllLevels(t *testing.T) {
+	setCLIEnv(t)
+	server, state := newMockAPIServer(t)
+	defer server.Close()
+
+	privateKey := "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+	if _, stderr, err := executeCLI(t, "--json", "wallet", "import", "--private-key", privateKey); err != nil {
+		t.Fatalf("wallet import error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	originalGetERC20Balance := getERC20Balance
+	originalGetERC20Allowance := getERC20Allowance
+	originalIsERC1155ApprovedForAll := isERC1155ApprovedForAll
+	originalGetERC1155Balance := getERC1155Balance
+	getERC20Balance = func(_ context.Context, _ string, _ common.Address, _ common.Address) (*big.Int, error) {
+		return testBigInt("10000000000000000000"), nil
+	}
+	getERC20Allowance = func(_ context.Context, _ string, _ common.Address, _ common.Address, _ common.Address) (*big.Int, error) {
+		return testBigInt("10000000000000000000"), nil
+	}
+	isERC1155ApprovedForAll = func(_ context.Context, _ string, _ common.Address, _ common.Address, _ common.Address) (bool, error) {
+		return true, nil
+	}
+	getERC1155Balance = func(_ context.Context, _ string, _ common.Address, _ common.Address, _ *big.Int) (*big.Int, error) {
+		return testBigInt("10000000000000000000"), nil
+	}
+	t.Cleanup(func() {
+		getERC20Balance = originalGetERC20Balance
+		getERC20Allowance = originalGetERC20Allowance
+		isERC1155ApprovedForAll = originalIsERC1155ApprovedForAll
+		getERC1155Balance = originalGetERC1155Balance
+	})
+
+	stdout, stderr, err := executeCLI(
+		t,
+		"--json",
+		"--api-url", server.URL+"/api/cli",
+		"--console-api-url", server.URL+"/api/cli",
+		"mm",
+		"--eventstore-url", server.URL+"/api",
+		"ladder-quote",
+		"clob-1",
+		"--label", "Yes",
+		"--level", "45,55,1",
+		"--level", "40,60,2",
+	)
+	if err != nil {
+		t.Fatalf("mm ladder-quote error = %v\nstderr:\n%s", err, stderr)
+	}
+	if !strings.Contains(stdout, "Multi-level two-sided quote ladder resting on the hosted CLOB book") {
+		t.Fatalf("mm ladder-quote stdout missing completion message\nstdout:\n%s", stdout)
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.clobSubmitCalls != 4 {
+		t.Fatalf("clobSubmitCalls = %d, want 4", state.clobSubmitCalls)
+	}
+	if len(state.clobOrders) != 4 {
+		t.Fatalf("clobOrders = %d, want 4", len(state.clobOrders))
 	}
 }
 

@@ -4272,6 +4272,7 @@ func newMMCommand() *cobra.Command {
 	quoteCmd.Flags().String("cancel-reason", "market-maker-quote-replace", "Cancellation reason recorded when --cancel-active removes prior orders")
 	quoteCmd.Flags().String("instance-date", "", "Instance date for recurring markets in YYYY-MM-DD format")
 	cmd.AddCommand(quoteCmd)
+	cmd.AddCommand(newMMLadderQuoteCommand())
 
 	discoverCmd := &cobra.Command{
 		Use:   "discover",
