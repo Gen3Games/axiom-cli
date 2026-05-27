@@ -2559,12 +2559,116 @@ func TestMMLadderQuoteDryRunBuildsMultipleLevels(t *testing.T) {
 	if first["quantity"] != float64(1) {
 		t.Fatalf("first quantity = %#v, want 1", first["quantity"])
 	}
+	firstBid, ok := first["bid"].(map[string]any)
+	if !ok {
+		t.Fatalf("first bid = %#v, want object", first["bid"])
+	}
+	if firstBid["quantity"] != float64(1) {
+		t.Fatalf("first bid quantity = %#v, want 1", firstBid["quantity"])
+	}
 	second, ok := levels[1].(map[string]any)
 	if !ok {
 		t.Fatalf("second level = %#v, want object", levels[1])
 	}
 	if second["quantity"] != float64(2) {
 		t.Fatalf("second quantity = %#v, want 2", second["quantity"])
+	}
+	secondAsk, ok := second["ask"].(map[string]any)
+	if !ok {
+		t.Fatalf("second ask = %#v, want object", second["ask"])
+	}
+	if secondAsk["quantity"] != float64(2) {
+		t.Fatalf("second ask quantity = %#v, want 2", secondAsk["quantity"])
+	}
+}
+
+func TestMMLadderQuoteDryRunSupportsAsymmetricLevels(t *testing.T) {
+	setCLIEnv(t)
+	server, _ := newMockAPIServer(t)
+	defer server.Close()
+
+	privateKey := "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+	if _, stderr, err := executeCLI(t, "--json", "wallet", "import", "--private-key", privateKey); err != nil {
+		t.Fatalf("wallet import error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	originalGetERC20Balance := getERC20Balance
+	originalGetERC20Allowance := getERC20Allowance
+	originalIsERC1155ApprovedForAll := isERC1155ApprovedForAll
+	originalGetERC1155Balance := getERC1155Balance
+	getERC20Balance = func(_ context.Context, _ string, _ common.Address, _ common.Address) (*big.Int, error) {
+		return testBigInt("10000000000000000000"), nil
+	}
+	getERC20Allowance = func(_ context.Context, _ string, _ common.Address, _ common.Address, _ common.Address) (*big.Int, error) {
+		return testBigInt("10000000000000000000"), nil
+	}
+	isERC1155ApprovedForAll = func(_ context.Context, _ string, _ common.Address, _ common.Address, _ common.Address) (bool, error) {
+		return true, nil
+	}
+	getERC1155Balance = func(_ context.Context, _ string, _ common.Address, _ common.Address, _ *big.Int) (*big.Int, error) {
+		return testBigInt("10000000000000000000"), nil
+	}
+	t.Cleanup(func() {
+		getERC20Balance = originalGetERC20Balance
+		getERC20Allowance = originalGetERC20Allowance
+		isERC1155ApprovedForAll = originalIsERC1155ApprovedForAll
+		getERC1155Balance = originalGetERC1155Balance
+	})
+
+	stdout, stderr, err := executeCLI(
+		t,
+		"--json",
+		"--api-url", server.URL+"/api/cli",
+		"--console-api-url", server.URL+"/api/cli",
+		"mm",
+		"ladder-quote",
+		"clob-1",
+		"--label", "Yes",
+		"--level", "45,55,3,1",
+		"--level", "40,60,2,0",
+		"--dry-run",
+	)
+	if err != nil {
+		t.Fatalf("mm ladder-quote dry-run asymmetric error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+		t.Fatalf("json.Unmarshal(stdout) error = %v\nstdout:\n%s", err, stdout)
+	}
+	levels, ok := payload["levels"].([]any)
+	if !ok || len(levels) != 2 {
+		t.Fatalf("levels = %#v, want two entries", payload["levels"])
+	}
+	first, ok := levels[0].(map[string]any)
+	if !ok {
+		t.Fatalf("first level = %#v, want object", levels[0])
+	}
+	if first["quantity"] != float64(3) {
+		t.Fatalf("first quantity = %#v, want 3", first["quantity"])
+	}
+	firstBid, ok := first["bid"].(map[string]any)
+	if !ok || firstBid["quantity"] != float64(3) {
+		t.Fatalf("first bid = %#v, want quantity 3", first["bid"])
+	}
+	firstAsk, ok := first["ask"].(map[string]any)
+	if !ok || firstAsk["quantity"] != float64(1) {
+		t.Fatalf("first ask = %#v, want quantity 1", first["ask"])
+	}
+	second, ok := levels[1].(map[string]any)
+	if !ok {
+		t.Fatalf("second level = %#v, want object", levels[1])
+	}
+	if second["quantity"] != float64(2) {
+		t.Fatalf("second quantity = %#v, want 2", second["quantity"])
+	}
+	secondBid, ok := second["bid"].(map[string]any)
+	if !ok || secondBid["quantity"] != float64(2) {
+		t.Fatalf("second bid = %#v, want quantity 2", second["bid"])
+	}
+	secondAsk, ok := second["ask"].(map[string]any)
+	if !ok || secondAsk["quantity"] != float64(0) {
+		t.Fatalf("second ask = %#v, want quantity 0", second["ask"])
 	}
 }
 
@@ -2627,6 +2731,68 @@ func TestMMLadderQuoteSubmitsAllLevels(t *testing.T) {
 	}
 	if len(state.clobOrders) != 4 {
 		t.Fatalf("clobOrders = %d, want 4", len(state.clobOrders))
+	}
+}
+
+func TestMMLadderQuoteSubmitsAsymmetricLevels(t *testing.T) {
+	setCLIEnv(t)
+	server, state := newMockAPIServer(t)
+	defer server.Close()
+
+	privateKey := "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+	if _, stderr, err := executeCLI(t, "--json", "wallet", "import", "--private-key", privateKey); err != nil {
+		t.Fatalf("wallet import error = %v\nstderr:\n%s", err, stderr)
+	}
+
+	originalGetERC20Balance := getERC20Balance
+	originalGetERC20Allowance := getERC20Allowance
+	originalIsERC1155ApprovedForAll := isERC1155ApprovedForAll
+	originalGetERC1155Balance := getERC1155Balance
+	getERC20Balance = func(_ context.Context, _ string, _ common.Address, _ common.Address) (*big.Int, error) {
+		return testBigInt("10000000000000000000"), nil
+	}
+	getERC20Allowance = func(_ context.Context, _ string, _ common.Address, _ common.Address, _ common.Address) (*big.Int, error) {
+		return testBigInt("10000000000000000000"), nil
+	}
+	isERC1155ApprovedForAll = func(_ context.Context, _ string, _ common.Address, _ common.Address, _ common.Address) (bool, error) {
+		return true, nil
+	}
+	getERC1155Balance = func(_ context.Context, _ string, _ common.Address, _ common.Address, _ *big.Int) (*big.Int, error) {
+		return testBigInt("10000000000000000000"), nil
+	}
+	t.Cleanup(func() {
+		getERC20Balance = originalGetERC20Balance
+		getERC20Allowance = originalGetERC20Allowance
+		isERC1155ApprovedForAll = originalIsERC1155ApprovedForAll
+		getERC1155Balance = originalGetERC1155Balance
+	})
+
+	stdout, stderr, err := executeCLI(
+		t,
+		"--json",
+		"--api-url", server.URL+"/api/cli",
+		"--console-api-url", server.URL+"/api/cli",
+		"mm",
+		"--eventstore-url", server.URL+"/api",
+		"ladder-quote",
+		"clob-1",
+		"--label", "Yes",
+		"--level", "45,55,3,1",
+		"--level", "40,60,2,0",
+	)
+	if err != nil {
+		t.Fatalf("mm ladder-quote asymmetric error = %v\nstderr:\n%s", err, stderr)
+	}
+	if !strings.Contains(stdout, "Multi-level two-sided quote ladder resting on the hosted CLOB book") {
+		t.Fatalf("mm ladder-quote stdout missing completion message\nstdout:\n%s", stdout)
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.clobSubmitCalls != 3 {
+		t.Fatalf("clobSubmitCalls = %d, want 3", state.clobSubmitCalls)
+	}
+	if len(state.clobOrders) != 3 {
+		t.Fatalf("clobOrders = %d, want 3", len(state.clobOrders))
 	}
 }
 

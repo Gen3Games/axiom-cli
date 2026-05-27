@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math/big"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/Gen3Games/axiom-cli/internal/api"
@@ -15,15 +16,19 @@ type mmQuoteLevel struct {
 	BidPriceBps int
 	AskPriceBps int
 	Quantity    int
+	BidQuantity int
+	AskQuantity int
 }
 
 type mmPreparedLadderLevel struct {
 	Index       int
 	Quantity    int
+	BidQuantity int
+	AskQuantity int
 	BidPriceBps int
 	AskPriceBps int
-	BidPayload  api.ClobSignedOrderPayload
-	AskPayload  api.ClobSignedOrderPayload
+	BidPayload  *api.ClobSignedOrderPayload
+	AskPayload  *api.ClobSignedOrderPayload
 	BidBlocks   []string
 	AskBlocks   []string
 }
@@ -111,7 +116,7 @@ func newMMLadderQuoteCommand() *cobra.Command {
 	ladderQuoteCmd.Flags().String("outcome", "", "Logical outcome index to quote")
 	ladderQuoteCmd.Flags().String("label", "", "Logical outcome label to quote")
 	ladderQuoteCmd.Flags().String("displayed-side", "", "Displayed side to quote: yes or no; inferred for single-binding binary markets")
-	ladderQuoteCmd.Flags().StringArray("level", nil, "Quote ladder level as bid,ask,quantity in displayed percent units and whole shares; repeatable")
+	ladderQuoteCmd.Flags().StringArray("level", nil, "Quote ladder level as bid,ask,quantity or bid,ask,bidQuantity,askQuantity in displayed percent units and whole shares; repeatable")
 	ladderQuoteCmd.Flags().String("expiry", "24h", "Expiry preset for all resting quotes: 1h, 24h, 7d, never")
 	ladderQuoteCmd.Flags().Bool("dry-run", false, "Build all signed ladder quotes locally and report readiness without submitting them")
 	ladderQuoteCmd.Flags().Bool("cancel-active", false, "Cancel existing resting orders on this book before placing ladder quotes")
@@ -125,8 +130,8 @@ func parseMMQuoteLevels(values []string) ([]mmQuoteLevel, error) {
 	levels := make([]mmQuoteLevel, 0, len(values))
 	for index, value := range values {
 		parts := strings.Split(value, ",")
-		if len(parts) != 3 {
-			return nil, fmt.Errorf("parse --level[%d]: expected bid,ask,quantity", index)
+		if len(parts) != 3 && len(parts) != 4 {
+			return nil, fmt.Errorf("parse --level[%d]: expected bid,ask,quantity or bid,ask,bidQuantity,askQuantity", index)
 		}
 		bidPriceBps, err := parseClobPriceToBps(parts[0])
 		if err != nil {
@@ -143,7 +148,23 @@ func parseMMQuoteLevels(values []string) ([]mmQuoteLevel, error) {
 		if err != nil {
 			return nil, fmt.Errorf("parse --level[%d] quantity: %w", index, err)
 		}
-		levels = append(levels, mmQuoteLevel{BidPriceBps: bidPriceBps, AskPriceBps: askPriceBps, Quantity: quantity})
+		bidQuantity := quantity
+		askQuantity := quantity
+		if len(parts) == 4 {
+			bidQuantity, err = parseOptionalClobQuantity(parts[2])
+			if err != nil {
+				return nil, fmt.Errorf("parse --level[%d] bidQuantity: %w", index, err)
+			}
+			askQuantity, err = parseOptionalClobQuantity(parts[3])
+			if err != nil {
+				return nil, fmt.Errorf("parse --level[%d] askQuantity: %w", index, err)
+			}
+			quantity = maxInt(bidQuantity, askQuantity)
+		}
+		if bidQuantity <= 0 && askQuantity <= 0 {
+			return nil, fmt.Errorf("parse --level[%d]: at least one side quantity must be positive", index)
+		}
+		levels = append(levels, mmQuoteLevel{BidPriceBps: bidPriceBps, AskPriceBps: askPriceBps, Quantity: quantity, BidQuantity: bidQuantity, AskQuantity: askQuantity})
 	}
 	if len(levels) == 0 {
 		return nil, fmt.Errorf("at least one --level is required")
@@ -201,48 +222,68 @@ func prepareLadderLevels(cmd *cobra.Command, ctx *cliContext, market *api.Market
 	}
 
 	for index, level := range levels {
-		bidPayload, err := buildClobSignedOrder(wallet, market.ID, selection, "buy", "limit", level.BidPriceBps, level.Quantity, expiry, signingDomain)
-		if err != nil {
-			return nil, nil, err
+		var bidPayload *api.ClobSignedOrderPayload
+		if level.BidQuantity > 0 {
+			payload, buildErr := buildClobSignedOrder(wallet, market.ID, selection, "buy", "limit", level.BidPriceBps, level.BidQuantity, expiry, signingDomain)
+			if buildErr != nil {
+				return nil, nil, buildErr
+			}
+			bidPayload = &payload
 		}
-		askPayload, err := buildClobSignedOrder(wallet, market.ID, selection, "sell", "limit", level.AskPriceBps, level.Quantity, expiry, signingDomain)
-		if err != nil {
-			return nil, nil, err
-		}
-
-		bidBlocks := collectClobSmokeBlocking(status, selection, bidPayload)
-		askBlocks := collectClobSmokeBlocking(status, selection, askPayload)
-		if settleErr := validateClobSettleableQuantity(bidPayload); settleErr != nil {
-			bidBlocks = append(bidBlocks, settleErr.Error())
-		}
-		if settleErr := validateClobSettleableQuantity(askPayload); settleErr != nil {
-			askBlocks = append(askBlocks, settleErr.Error())
-		}
-
-		bidMakerAmount, err := evm.ParseBigInt(bidPayload.MakerAmount)
-		if err != nil {
-			return nil, nil, err
-		}
-		askMakerAmount, err := evm.ParseBigInt(askPayload.MakerAmount)
-		if err != nil {
-			return nil, nil, err
+		var askPayload *api.ClobSignedOrderPayload
+		if level.AskQuantity > 0 {
+			payload, buildErr := buildClobSignedOrder(wallet, market.ID, selection, "sell", "limit", level.AskPriceBps, level.AskQuantity, expiry, signingDomain)
+			if buildErr != nil {
+				return nil, nil, buildErr
+			}
+			askPayload = &payload
 		}
 
-		if remainingCollateral.Cmp(bidMakerAmount) < 0 {
+		bidBlocks := make([]string, 0)
+		askBlocks := make([]string, 0)
+		if bidPayload != nil {
+			bidBlocks = collectClobSmokeBlocking(status, selection, *bidPayload)
+			if settleErr := validateClobSettleableQuantity(*bidPayload); settleErr != nil {
+				bidBlocks = append(bidBlocks, settleErr.Error())
+			}
+		}
+		if askPayload != nil {
+			askBlocks = collectClobSmokeBlocking(status, selection, *askPayload)
+			if settleErr := validateClobSettleableQuantity(*askPayload); settleErr != nil {
+				askBlocks = append(askBlocks, settleErr.Error())
+			}
+		}
+
+		var bidMakerAmount = big.NewInt(0)
+		if bidPayload != nil {
+			bidMakerAmount, err = evm.ParseBigInt(bidPayload.MakerAmount)
+			if err != nil {
+				return nil, nil, err
+			}
+		}
+		var askMakerAmount = big.NewInt(0)
+		if askPayload != nil {
+			askMakerAmount, err = evm.ParseBigInt(askPayload.MakerAmount)
+			if err != nil {
+				return nil, nil, err
+			}
+		}
+
+		if bidPayload != nil && remainingCollateral.Cmp(bidMakerAmount) < 0 {
 			bidBlocks = append(bidBlocks, fmt.Sprintf("aggregate collateral balance %s wei is below cumulative required maker amount %s", remainingCollateral.String(), bidPayload.MakerAmount))
 		}
-		if remainingBidAllowance.Cmp(bidMakerAmount) < 0 {
+		if bidPayload != nil && remainingBidAllowance.Cmp(bidMakerAmount) < 0 {
 			bidBlocks = append(bidBlocks, fmt.Sprintf("aggregate collateral allowance %s wei is below cumulative required maker amount %s", remainingBidAllowance.String(), bidPayload.MakerAmount))
 		}
-		if !status.OutcomeApprovalForAll {
+		if askPayload != nil && !status.OutcomeApprovalForAll {
 			askBlocks = append(askBlocks, "outcome-token approval-for-all is not enabled")
 		}
-		if remainingAskInventory.Cmp(askMakerAmount) < 0 {
+		if askPayload != nil && remainingAskInventory.Cmp(askMakerAmount) < 0 {
 			askBlocks = append(askBlocks, fmt.Sprintf("aggregate displayed-side balance %s is below cumulative required maker amount %s", remainingAskInventory.String(), askPayload.MakerAmount))
 		}
 
-		if len(bidBlocks) > 0 {
-			approvalTxs, approveErr := ensureClobOrderApprovals(cmd.Context(), ctx.Config.EVMRPCURL, privateKeyHex, wallet.Address(), status, selection, bidPayload, true)
+		if bidPayload != nil && len(bidBlocks) > 0 {
+			approvalTxs, approveErr := ensureClobOrderApprovals(cmd.Context(), ctx.Config.EVMRPCURL, privateKeyHex, wallet.Address(), status, selection, *bidPayload, true)
 			if approveErr != nil {
 				return nil, nil, fmt.Errorf("auto-approve bid ladder level %d prerequisites: %w", index+1, approveErr)
 			}
@@ -255,14 +296,14 @@ func prepareLadderLevels(cmd *cobra.Command, ctx *cliContext, market *api.Market
 				}
 				status.CollateralAllowanceXRP = formatWeiToXRP(remainingBidAllowance)
 			}
-			bidBlocks = filterAggregateBlocks(collectClobSmokeBlockingAfterApprovals(status, selection, bidPayload), "collateral allowance")
+			bidBlocks = filterAggregateBlocks(collectClobSmokeBlockingAfterApprovals(status, selection, *bidPayload), "collateral allowance")
 			if remainingCollateral.Cmp(bidMakerAmount) < 0 {
 				bidBlocks = append(bidBlocks, fmt.Sprintf("aggregate collateral balance %s wei is below cumulative required maker amount %s", remainingCollateral.String(), bidPayload.MakerAmount))
 			}
 		}
 
-		if len(askBlocks) > 0 {
-			approvalTxs, approveErr := ensureClobOrderApprovals(cmd.Context(), ctx.Config.EVMRPCURL, privateKeyHex, wallet.Address(), status, selection, askPayload, true)
+		if askPayload != nil && len(askBlocks) > 0 {
+			approvalTxs, approveErr := ensureClobOrderApprovals(cmd.Context(), ctx.Config.EVMRPCURL, privateKeyHex, wallet.Address(), status, selection, *askPayload, true)
 			if approveErr != nil {
 				return nil, nil, fmt.Errorf("auto-approve ask ladder level %d prerequisites: %w", index+1, approveErr)
 			}
@@ -270,7 +311,7 @@ func prepareLadderLevels(cmd *cobra.Command, ctx *cliContext, market *api.Market
 				approvals = append(approvals, approvalTxs...)
 				status.OutcomeApprovalForAll = true
 			}
-			askBlocks = filterAggregateBlocks(collectClobSmokeBlockingAfterApprovals(status, selection, askPayload), "displayed-side balance")
+			askBlocks = filterAggregateBlocks(collectClobSmokeBlockingAfterApprovals(status, selection, *askPayload), "displayed-side balance")
 			if remainingAskInventory.Cmp(askMakerAmount) < 0 {
 				askBlocks = append(askBlocks, fmt.Sprintf("aggregate displayed-side balance %s is below cumulative required maker amount %s", remainingAskInventory.String(), askPayload.MakerAmount))
 			}
@@ -287,6 +328,8 @@ func prepareLadderLevels(cmd *cobra.Command, ctx *cliContext, market *api.Market
 		prepared = append(prepared, mmPreparedLadderLevel{
 			Index:       index + 1,
 			Quantity:    level.Quantity,
+			BidQuantity: level.BidQuantity,
+			AskQuantity: level.AskQuantity,
 			BidPriceBps: level.BidPriceBps,
 			AskPriceBps: level.AskPriceBps,
 			BidPayload:  bidPayload,
@@ -329,24 +372,24 @@ func buildMMLadderDryRunResult(market *api.MarketDetails, selection *clobSelecti
 			"quantity": level.Quantity,
 			"bid": map[string]any{
 				"priceBps":       level.BidPriceBps,
-				"quantity":       level.Quantity,
-				"makerAmount":    level.BidPayload.MakerAmount,
-				"takerAmount":    level.BidPayload.TakerAmount,
-				"expiration":     level.BidPayload.Expiration,
-				"nonce":          level.BidPayload.Nonce,
-				"tokenSide":      level.BidPayload.TokenSide,
-				"outcomeTokenId": level.BidPayload.OutcomeTokenID,
+				"quantity":       level.BidQuantity,
+				"makerAmount":    valueOrEmpty(level.BidPayload, func(payload *api.ClobSignedOrderPayload) string { return payload.MakerAmount }),
+				"takerAmount":    valueOrEmpty(level.BidPayload, func(payload *api.ClobSignedOrderPayload) string { return payload.TakerAmount }),
+				"expiration":     valueOrEmpty(level.BidPayload, func(payload *api.ClobSignedOrderPayload) string { return payload.Expiration }),
+				"nonce":          valueOrEmpty(level.BidPayload, func(payload *api.ClobSignedOrderPayload) string { return payload.Nonce }),
+				"tokenSide":      valueOrEmpty(level.BidPayload, func(payload *api.ClobSignedOrderPayload) string { return payload.TokenSide }),
+				"outcomeTokenId": valueOrEmpty(level.BidPayload, func(payload *api.ClobSignedOrderPayload) string { return payload.OutcomeTokenID }),
 				"blocking":       level.BidBlocks,
 			},
 			"ask": map[string]any{
 				"priceBps":       level.AskPriceBps,
-				"quantity":       level.Quantity,
-				"makerAmount":    level.AskPayload.MakerAmount,
-				"takerAmount":    level.AskPayload.TakerAmount,
-				"expiration":     level.AskPayload.Expiration,
-				"nonce":          level.AskPayload.Nonce,
-				"tokenSide":      level.AskPayload.TokenSide,
-				"outcomeTokenId": level.AskPayload.OutcomeTokenID,
+				"quantity":       level.AskQuantity,
+				"makerAmount":    valueOrEmpty(level.AskPayload, func(payload *api.ClobSignedOrderPayload) string { return payload.MakerAmount }),
+				"takerAmount":    valueOrEmpty(level.AskPayload, func(payload *api.ClobSignedOrderPayload) string { return payload.TakerAmount }),
+				"expiration":     valueOrEmpty(level.AskPayload, func(payload *api.ClobSignedOrderPayload) string { return payload.Expiration }),
+				"nonce":          valueOrEmpty(level.AskPayload, func(payload *api.ClobSignedOrderPayload) string { return payload.Nonce }),
+				"tokenSide":      valueOrEmpty(level.AskPayload, func(payload *api.ClobSignedOrderPayload) string { return payload.TokenSide }),
+				"outcomeTokenId": valueOrEmpty(level.AskPayload, func(payload *api.ClobSignedOrderPayload) string { return payload.OutcomeTokenID }),
 				"blocking":       level.AskBlocks,
 			},
 		})
@@ -378,40 +421,50 @@ func submitLadderLevels(cmd *cobra.Command, ctx *cliContext, market *api.MarketD
 	submitted := make([]submittedLadderOrder, 0, len(levels)*2)
 	items := make([]map[string]any, 0, len(levels))
 	for _, level := range levels {
-		bidResponse, err := submitClobSmokeOrderWithRetry(cmd.Context(), ctx, eventstoreURL, level.BidPayload)
-		if err != nil {
-			if rollbackErr := rollbackSubmittedLadderOrders(cmd, ctx, wallet, signingDomain, market.ID, submitted); rollbackErr != nil {
-				return nil, fmt.Errorf("submit ladder bid level %d: %w (rollback failed: %v)", level.Index, err, rollbackErr)
+		var bidResponse *api.ClobOrderResponse
+		if level.BidPayload != nil {
+			response, err := submitClobSmokeOrderWithRetry(cmd.Context(), ctx, eventstoreURL, *level.BidPayload)
+			if err != nil {
+				if rollbackErr := rollbackSubmittedLadderOrders(cmd, ctx, wallet, signingDomain, market.ID, submitted); rollbackErr != nil {
+					return nil, fmt.Errorf("submit ladder bid level %d: %w (rollback failed: %v)", level.Index, err, rollbackErr)
+				}
+				return nil, fmt.Errorf("submit ladder bid level %d: %w", level.Index, err)
 			}
-			return nil, fmt.Errorf("submit ladder bid level %d: %w", level.Index, err)
+			bidResponse = response
+			submitted = append(submitted, submittedLadderOrder{OrderID: response.OrderID, OutcomeIndex: selection.Binding.OutcomeIndex, TokenSide: selection.DisplayedSide})
 		}
-		submitted = append(submitted, submittedLadderOrder{OrderID: bidResponse.OrderID, OutcomeIndex: selection.Binding.OutcomeIndex, TokenSide: selection.DisplayedSide})
 
-		askResponse, err := submitClobSmokeOrderWithRetry(cmd.Context(), ctx, eventstoreURL, level.AskPayload)
-		if err != nil {
-			if rollbackErr := rollbackSubmittedLadderOrders(cmd, ctx, wallet, signingDomain, market.ID, submitted); rollbackErr != nil {
-				return nil, fmt.Errorf("submit ladder ask level %d: %w (rollback failed: %v)", level.Index, err, rollbackErr)
+		var askResponse *api.ClobOrderResponse
+		if level.AskPayload != nil {
+			response, err := submitClobSmokeOrderWithRetry(cmd.Context(), ctx, eventstoreURL, *level.AskPayload)
+			if err != nil {
+				if rollbackErr := rollbackSubmittedLadderOrders(cmd, ctx, wallet, signingDomain, market.ID, submitted); rollbackErr != nil {
+					return nil, fmt.Errorf("submit ladder ask level %d: %w (rollback failed: %v)", level.Index, err, rollbackErr)
+				}
+				return nil, fmt.Errorf("submit ladder ask level %d: %w", level.Index, err)
 			}
-			return nil, fmt.Errorf("submit ladder ask level %d: %w", level.Index, err)
+			askResponse = response
+			submitted = append(submitted, submittedLadderOrder{OrderID: response.OrderID, OutcomeIndex: selection.Binding.OutcomeIndex, TokenSide: selection.DisplayedSide})
 		}
-		submitted = append(submitted, submittedLadderOrder{OrderID: askResponse.OrderID, OutcomeIndex: selection.Binding.OutcomeIndex, TokenSide: selection.DisplayedSide})
 
 		items = append(items, map[string]any{
 			"level":    level.Index,
 			"quantity": level.Quantity,
 			"bid": map[string]any{
 				"priceBps":        level.BidPriceBps,
-				"orderId":         bidResponse.OrderID,
-				"tradeCount":      bidResponse.TradeCount,
-				"remainingShares": bidResponse.RemainingQuantity,
-				"resting":         bidResponse.WasAddedToBook,
+				"quantity":        level.BidQuantity,
+				"orderId":         valueOrEmpty(bidResponse, func(response *api.ClobOrderResponse) string { return response.OrderID }),
+				"tradeCount":      valueOrClobInt(bidResponse, func(response *api.ClobOrderResponse) int { return response.TradeCount }),
+				"remainingShares": valueOrClobInt(bidResponse, func(response *api.ClobOrderResponse) int { return response.RemainingQuantity }),
+				"resting":         valueOrFalse(bidResponse, func(response *api.ClobOrderResponse) bool { return response.WasAddedToBook }),
 			},
 			"ask": map[string]any{
 				"priceBps":        level.AskPriceBps,
-				"orderId":         askResponse.OrderID,
-				"tradeCount":      askResponse.TradeCount,
-				"remainingShares": askResponse.RemainingQuantity,
-				"resting":         askResponse.WasAddedToBook,
+				"quantity":        level.AskQuantity,
+				"orderId":         valueOrEmpty(askResponse, func(response *api.ClobOrderResponse) string { return response.OrderID }),
+				"tradeCount":      valueOrClobInt(askResponse, func(response *api.ClobOrderResponse) int { return response.TradeCount }),
+				"remainingShares": valueOrClobInt(askResponse, func(response *api.ClobOrderResponse) int { return response.RemainingQuantity }),
+				"resting":         valueOrFalse(askResponse, func(response *api.ClobOrderResponse) bool { return response.WasAddedToBook }),
 			},
 		})
 	}
@@ -429,6 +482,49 @@ func submitLadderLevels(cmd *cobra.Command, ctx *cliContext, market *api.MarketD
 		result["approvals"] = approvals
 	}
 	return result, nil
+}
+
+func parseOptionalClobQuantity(value string) (int, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return 0, fmt.Errorf("quantity must not be empty")
+	}
+	quantity, err := strconv.Atoi(trimmed)
+	if err != nil {
+		return 0, fmt.Errorf("parse quantity: %w", err)
+	}
+	if quantity < 0 {
+		return 0, fmt.Errorf("quantity must be zero or a positive whole number")
+	}
+	return quantity, nil
+}
+
+func maxInt(left int, right int) int {
+	if left > right {
+		return left
+	}
+	return right
+}
+
+func valueOrEmpty[T any](value *T, getter func(*T) string) string {
+	if value == nil {
+		return ""
+	}
+	return getter(value)
+}
+
+func valueOrClobInt[T any](value *T, getter func(*T) int) int {
+	if value == nil {
+		return 0
+	}
+	return getter(value)
+}
+
+func valueOrFalse[T any](value *T, getter func(*T) bool) bool {
+	if value == nil {
+		return false
+	}
+	return getter(value)
 }
 
 func rollbackSubmittedLadderOrders(cmd *cobra.Command, ctx *cliContext, wallet *evm.Wallet, signingDomain clobSigningDomain, marketID string, orders []submittedLadderOrder) error {
