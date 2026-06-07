@@ -662,7 +662,7 @@ func newMarketsCommand() *cobra.Command {
 	}
 	listCmd.Flags().String("status", "open", "Filter by status: open or resolved")
 	listCmd.Flags().String("category", "", "Filter by market category (for example hourly, sports, streak)")
-	listCmd.Flags().String("type", "", "Filter by market implementation type (for example clob, parimutuel)")
+	listCmd.Flags().String("type", "", "Filter by market implementation type (for example clob, parimutuel)") // @deprecated parimutuel — use clob/ctf
 	listCmd.Flags().String("search", "", "Search by title or headline")
 	listCmd.Flags().Bool("my-positions", false, "Only return markets where the active wallet currently has open positions")
 	listCmd.Flags().Bool("spot-prices", false, "Fetch current spot odds from XRPL EVM for each returned market")
@@ -1201,7 +1201,7 @@ func newPredictCommand() *cobra.Command {
 				return err
 			}
 			if isClobMarketImplementation(market.MarketImplementation) {
-				return errors.New("predict quote currently supports TieredParimutuel markets only; use `axiom markets get` to inspect CLOB logical markets during Phase 1")
+				return errors.New("predict quote currently supports TieredParimutuel markets only (deprecated); use `axiom markets get` to inspect CLOB logical markets during Phase 1")
 			}
 			amount, _ := cmd.Flags().GetString("amount")
 			if amount == "" {
@@ -5888,7 +5888,7 @@ func normalizeMarketImplementation(input string) string {
 	switch strings.ToLower(input) {
 	case "clob", "ctf", "axiomctfmarket":
 		return "AxiomCTFMarket"
-	case "parimutuel", "tieredparimutuel":
+	case "parimutuel", "tieredparimutuel": // @deprecated — parimutuel markets are deprecated
 		return "TieredParimutuel"
 	default:
 		return input
