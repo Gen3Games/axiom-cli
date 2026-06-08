@@ -2112,16 +2112,23 @@ func newClobCommand() *cobra.Command {
 			}
 
 			input := logicalUpdateInput{
-				Name:        trimmedOrNil("name"),
-				Headline:    trimmedOrNil("headline"),
+				Name:      trimmedOrNil("name"),
+				Headline:  trimmedOrNil("headline"),
 				Description: trimmedOrNil("description"),
-				Category:    trimmedOrNil("category"),
-				ImageURL:    trimmedOrNil("image"),
+				Category:  trimmedOrNil("category"),
+				ImageURL:  trimmedOrNil("image"),
+			}
+			if cmd.Flags().Changed("visible") || cmd.Flags().Changed("hidden") {
+				if cmd.Flags().Changed("visible") && cmd.Flags().Changed("hidden") {
+					return errors.New("--visible and --hidden are mutually exclusive")
+				}
+				v := mustBoolFlag(cmd, "visible")
+				input.IsVisible = &v
 			}
 			if cmd.Flags().Changed("tag") {
 				input.Tags = collectTags()
 			}
-			if input.Name == nil && input.Headline == nil && input.Description == nil && input.Category == nil && input.ImageURL == nil && !cmd.Flags().Changed("tag") {
+			if input.Name == nil && input.Headline == nil && input.Description == nil && input.Category == nil && input.ImageURL == nil && input.IsVisible == nil && !cmd.Flags().Changed("tag") {
 				return errors.New("at least one update field is required")
 			}
 
@@ -2145,6 +2152,7 @@ func newClobCommand() *cobra.Command {
 					"category":         request.Category,
 					"imageUrl":         request.ImageURL,
 					"tags":             request.Tags,
+					"isVisible":        request.IsVisible,
 					"message":          request.Message,
 					"signaturePresent": request.Signature != "",
 				})
@@ -2170,6 +2178,8 @@ func newClobCommand() *cobra.Command {
 	logicalUpdateCmd.Flags().String("category", "", "Updated logical market category")
 	logicalUpdateCmd.Flags().String("image", "", "Updated logical market PFP image URL")
 	logicalUpdateCmd.Flags().StringSlice("tag", nil, "Updated logical metadata tag list; repeatable")
+	logicalUpdateCmd.Flags().Bool("visible", false, "Make the logical market visible in the webapp")
+	logicalUpdateCmd.Flags().Bool("hidden", false, "Hide the logical market from the webapp (--visible and --hidden are mutually exclusive)")
 	logicalUpdateCmd.Flags().Bool("dry-run", false, "Build the logical update payload locally without submitting it")
 	logicalCmd.AddCommand(logicalUpdateCmd)
 	cmd.AddCommand(logicalCmd)

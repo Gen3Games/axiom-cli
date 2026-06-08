@@ -201,12 +201,13 @@ type logicalBindingResolution struct {
 }
 
 type logicalUpdateInput struct {
-	Name        *string
-	Headline    *string
+	Name      *string
+	Headline  *string
 	Description *string
-	Category    *string
-	ImageURL    *string
-	Tags        []string
+	Category  *string
+	ImageURL  *string
+	Tags      []string
+	IsVisible *bool
 }
 
 type logicalBookClosure struct {
@@ -1156,6 +1157,9 @@ func buildLogicalUpdateMessage(marketID string, network string, walletAddress st
 			lines = append(lines, fmt.Sprintf("tags=%s", strings.Join(tags, ",")))
 		}
 	}
+	if input.IsVisible != nil {
+		lines = append(lines, fmt.Sprintf("isVisible=%v", *input.IsVisible))
+	}
 	return strings.Join(lines, "\n")
 }
 
@@ -1198,6 +1202,7 @@ func buildLogicalUpdateRequest(wallet *evm.Wallet, network string, marketID stri
 		Category:      input.Category,
 		ImageURL:      input.ImageURL,
 		Tags:          append([]string(nil), input.Tags...),
+		IsVisible:     input.IsVisible,
 		Message:       message,
 		Signature:     signature,
 	}, nil

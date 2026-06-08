@@ -179,6 +179,7 @@ type UpdateClobMarketRequest struct {
 	Category      *string  `json:"category,omitempty"`
 	ImageURL      *string  `json:"imageUrl,omitempty"`
 	Tags          []string `json:"tags,omitempty"`
+	IsVisible     *bool    `json:"isVisible,omitempty"`
 	Message       string   `json:"message"`
 	Signature     string   `json:"signature"`
 }
